@@ -1,6 +1,6 @@
 'use strict';
 
-const state = { overview: null, devices: [], selectedJob: null, poll: null, authPoll: null, readiness: null, continuationMode: 'resume', expandedRuns: new Set(), knownAttemptRuns: new Set(), jobStripScroll: 0, artifactRun: null, artifactManifest: null, artifactCategory: null, artifactPath: null, artifactPreviewCache: new Map() };
+const state = { overview: null, devices: [], selectedJob: null, poll: null, authPoll: null, readiness: null, continuationMode: 'resume', expandedRuns: new Set(), knownAttemptRuns: new Set(), jobStripScroll: 0, artifactRun: null, artifactManifest: null, artifactCategory: null, artifactPath: null, artifactPreviewCache: new Map(), assistantRun: null, assistantTurns: [] };
 const $ = selector => document.querySelector(selector);
 const $$ = selector => [...document.querySelectorAll(selector)];
 
@@ -169,6 +169,7 @@ function renderRuns(runs) {
       <div class="run-cell"><span>${run.iterations} iterations</span><small>${run.reasoning_mode === 'parallel' ? `${run.specialist_count} specialists` : 'single agent'} · ${run.observation_events} observations</small></div>
       <span class="badge ${escapeText(run.status)}">${escapeText(run.status.replaceAll('_', ' '))}</span>
       <div class="run-actions">
+        <button class="resume-button assistant" data-assistant="${escapeText(run.id)}">Ask assistant</button>
         <button class="resume-button artifacts" data-artifacts="${escapeText(run.id)}">Artifacts</button>
         ${run.continuable ? `<button class="resume-button" data-resume="${escapeText(run.path)}">${run.frida_recoverable ? 'Fix Frida' : run.checkpoint_recoverable ? 'Recover' : 'Resume'}</button>` : ''}
         <button class="resume-button diagnostic" data-retry="${escapeText(run.path)}" ${run.retryable ? '' : 'disabled'}>Rerun / retry</button>
@@ -191,6 +192,7 @@ function renderRuns(runs) {
     $('#launch').scrollIntoView({ behavior: 'smooth' });
   }));
   $$('[data-artifacts]').forEach(button => button.addEventListener('click', () => openArtifactBrowser(button.dataset.artifacts)));
+  $$('[data-assistant]').forEach(button => button.addEventListener('click', () => openRunAssistant(button.dataset.assistant)));
 }
 
 function clearReassessment() {
@@ -248,6 +250,98 @@ function beginReassessment(runId) {
   toast('Policy copied into a new linked assessment. Edit it, then run device readiness.');
 }
 
+function renderAssistantTurns() {
+  const container = $('#assistantMessages');
+  if (!state.assistantTurns.length) {
+    container.innerHTML = '<p class="assistant-empty">Ask a question about this run\'s findings, logs, hooks, decisions, or success checks.</p>';
+    return;
+  }
+  container.innerHTML = state.assistantTurns.map(turn => {
+    const citations = (turn.citations || []).map(citation => `
+      <button class="assistant-citation" type="button" data-chat-citation="${escapeText(citation.path)}" title="${escapeText(citation.note || '')}">${escapeText(citation.path)}</button>`).join('');
+    const action = turn.suggested_action || {};
+    const groundingWarning = turn.grounded === false ? `<div class="assistant-warning">${escapeText(turn.warning || 'This answer is not grounded in accessible run evidence.')}</div>` : '';
+    const run = state.overview?.runs.find(item => item.id === state.assistantRun);
+    const actionCard = action.type === 'rerun' ? `
+      <section class="assistant-action">
+        <strong>Proposed rerun</strong>
+        <p>${escapeText(action.reason || 'Use stronger reasoning on the recorded evidence.')}</p>
+        <dl>
+          <dt>Model</dt><dd>${escapeText(action.model || 'Account default')}</dd>
+          <dt>Thinking</dt><dd>${escapeText(action.reasoning_effort || 'Model default')}</dd>
+          <dt>Mode</dt><dd>${escapeText(action.reasoning_mode || 'single')}${action.reasoning_mode === 'parallel' ? ` · ${Number(action.specialist_count || 3)} specialists` : ''}</dd>
+          <dt>Iterations</dt><dd>${Number(action.additional_iterations || 3)}</dd>
+        </dl>
+        <button class="button" type="button" data-chat-action="${escapeText(turn.id)}" ${run?.retryable ? '' : 'disabled'}>Review in Continue / retry</button>
+      </section>` : '';
+    return `
+      <article class="assistant-message user"><p>${escapeText(turn.question || '')}</p></article>
+      <article class="assistant-message assistant">
+        <span class="assistant-meta">${escapeText(turn.provider || 'codex')} · ${escapeText(turn.model || 'account-default')} · ${escapeText(formatDate(turn.created_utc))}</span>
+        ${groundingWarning}
+        <p>${escapeText(turn.answer || '')}</p>
+        ${citations ? `<div class="assistant-citations">${citations}</div>` : ''}
+        ${actionCard}
+      </article>`;
+  }).join('');
+  $$('[data-chat-citation]').forEach(button => button.addEventListener('click', () => {
+    const runId = state.assistantRun;
+    $('#assistantDialog').close();
+    if (runId) openArtifactBrowser(runId, button.dataset.chatCitation);
+  }));
+  $$('[data-chat-action]').forEach(button => button.addEventListener('click', () => prepareAssistantRerun(button.dataset.chatAction)));
+  container.scrollTop = container.scrollHeight;
+}
+
+async function openRunAssistant(runId) {
+  const run = state.overview?.runs.find(item => item.id === runId);
+  if (!run) return;
+  state.assistantRun = runId;
+  state.assistantTurns = [];
+  $('#assistantTitle').textContent = run.package || run.id;
+  $('#assistantSubtitle').textContent = `${run.id} · ${String(run.status || 'analysis').replaceAll('_', ' ')}`;
+  $('#assistantMessages').innerHTML = '<p class="assistant-empty">Loading conversation…</p>';
+  const dialog = $('#assistantDialog');
+  if (!dialog.open) dialog.showModal();
+  try {
+    const payload = await api(`/api/runs/${encodeURIComponent(runId)}/assistant`);
+    if (state.assistantRun !== runId) return;
+    state.assistantTurns = payload.turns || [];
+    renderAssistantTurns();
+  } catch (error) {
+    $('#assistantMessages').innerHTML = `<p class="assistant-empty">${escapeText(error.message)}</p>`;
+  }
+}
+
+function prepareAssistantRerun(turnId) {
+  const turn = state.assistantTurns.find(item => item.id === turnId);
+  const run = state.overview?.runs.find(item => item.id === state.assistantRun);
+  if (!turn || !run || !run.retryable) return;
+  const action = turn.suggested_action || {};
+  const form = $('#resumeForm');
+  state.continuationMode = 'retry';
+  setTab('resume');
+  $('#resumeRun').value = run.path;
+  populateContinuationValues(run);
+  form.elements.max_iterations.value = String(Math.max(1, Math.min(10, Number(action.additional_iterations || 3))));
+  if (action.model) {
+    if (![...form.elements.model.options].some(item => item.value === action.model)) option(form.elements.model, action.model, `${action.model} · suggested`);
+    form.elements.model.value = action.model;
+    renderReasoningOptions(form.elements.model);
+  }
+  if (action.reasoning_effort && [...form.elements.reasoning_effort.options].some(item => item.value === action.reasoning_effort)) {
+    form.elements.reasoning_effort.value = action.reasoning_effort;
+  }
+  form.elements.reasoning_mode.value = action.reasoning_mode === 'parallel' ? 'parallel' : 'single';
+  form.elements.specialist_count.value = String(action.specialist_count || 3);
+  form.elements.authorized.checked = false;
+  updateReasoningMode(form.elements.reasoning_mode);
+  updateResumeSummary();
+  $('#assistantDialog').close();
+  $('#launch').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  toast('Rerun proposal loaded. Review it and confirm authorization before submitting.');
+}
+
 function formatBytes(value) {
   const bytes = Number(value || 0);
   if (bytes < 1024) return `${bytes} B`;
@@ -255,7 +349,7 @@ function formatBytes(value) {
   return `${(bytes / 1048576).toFixed(1)} MB`;
 }
 
-async function openArtifactBrowser(runId) {
+async function openArtifactBrowser(runId, requestedPath = '') {
   const dialog = $('#artifactDialog');
   state.artifactRun = runId;
   state.artifactManifest = null;
@@ -280,8 +374,12 @@ async function openArtifactBrowser(runId) {
         <small>${escapeText(category.description)}</small>
       </button>`).join('');
     $$('[data-artifact-category]').forEach(button => button.addEventListener('click', () => selectArtifactCategory(button.dataset.artifactCategory)));
-    const initial = manifest.categories.find(category => category.files.length) || manifest.categories[0];
-    if (initial) selectArtifactCategory(initial.id);
+    const requestedCategory = requestedPath ? manifest.categories.find(category => category.files.some(file => file.path === requestedPath)) : null;
+    const initial = requestedCategory || manifest.categories.find(category => category.files.length) || manifest.categories[0];
+    if (initial) {
+      selectArtifactCategory(initial.id);
+      if (requestedPath && initial.files.some(file => file.path === requestedPath)) selectArtifactFile(requestedPath);
+    }
   } catch (error) {
     $('#artifactCategories').innerHTML = `<p class="artifact-empty">${escapeText(error.message)}</p>`;
     $('#artifactFileList').innerHTML = '<p class="artifact-empty">The artifact manifest could not be loaded.</p>';
@@ -780,6 +878,58 @@ function populateContinuationValues(run) {
   updateReasoningMode(mode);
 }
 
+async function askRunAssistant(event) {
+  event.preventDefault();
+  if (!state.assistantRun) return;
+  const form = event.currentTarget;
+  const question = form.elements.question.value.trim();
+  if (!question) return;
+  const button = $('#sendAssistant');
+  button.disabled = true;
+  button.innerHTML = 'Reviewing evidence…';
+  const pending = document.createElement('article');
+  pending.className = 'assistant-message assistant pending';
+  pending.innerHTML = '<span class="assistant-progress-stage">QUEUED</span><p>Preparing the evidence request…</p><small></small>';
+  $('#assistantMessages').append(pending);
+  $('#assistantMessages').scrollTop = $('#assistantMessages').scrollHeight;
+  try {
+    const runId = state.assistantRun;
+    const requestState = await api(`/api/runs/${encodeURIComponent(runId)}/assistant`, {
+      method: 'POST',
+      body: JSON.stringify({
+        question,
+        model: form.elements.model.value,
+        reasoning_effort: form.elements.reasoning_effort.value,
+      }),
+    });
+    let progress = requestState;
+    while (!['complete', 'failed'].includes(progress.status)) {
+      await new Promise(resolve => setTimeout(resolve, 700));
+      progress = await api(`/api/runs/${encodeURIComponent(runId)}/assistant/requests/${encodeURIComponent(requestState.id)}`);
+      const stage = pending.querySelector('.assistant-progress-stage');
+      const detail = pending.querySelector('p');
+      const metrics = pending.querySelector('small');
+      if (stage) stage.textContent = String(progress.stage || progress.status || 'working').replaceAll('_', ' ').toUpperCase();
+      if (detail) detail.textContent = progress.detail || 'Working on the answer…';
+      if (metrics) metrics.textContent = progress.selected_files
+        ? `${progress.selected_files} relevant files · ${Number(progress.evidence_characters || 0).toLocaleString()} evidence characters`
+        : '';
+    }
+    if (progress.status === 'failed') throw new Error(progress.error || progress.detail || 'The run assistant failed.');
+    const turn = progress.turn;
+    if (!turn) throw new Error('The run assistant completed without returning an answer.');
+    state.assistantTurns.push(turn);
+    form.elements.question.value = '';
+    renderAssistantTurns();
+  } catch (error) {
+    pending.remove();
+    toast(error.message, true);
+  } finally {
+    button.disabled = false;
+    button.innerHTML = 'Ask assistant <span>→</span>';
+  }
+}
+
 $$('.segment').forEach(button => button.addEventListener('click', () => setTab(button.dataset.tab)));
 $('#newForm').addEventListener('submit', event => { event.preventDefault(); submitForm(event.currentTarget, '/api/start'); });
 $('#resumeForm').addEventListener('submit', event => { event.preventDefault(); submitForm(event.currentTarget, state.continuationMode === 'retry' ? '/api/retry' : '/api/resume'); });
@@ -824,6 +974,15 @@ $('#closeArtifacts').addEventListener('click', () => { state.artifactRun = null;
 $('#artifactDialog').addEventListener('click', event => {
   if (event.target === event.currentTarget) { state.artifactRun = null; event.currentTarget.close(); }
 });
+$('#assistantForm').addEventListener('submit', askRunAssistant);
+$('#closeAssistant').addEventListener('click', () => { state.assistantRun = null; $('#assistantDialog').close(); });
+$('#assistantDialog').addEventListener('click', event => {
+  if (event.target === event.currentTarget) { state.assistantRun = null; event.currentTarget.close(); }
+});
+$$('[data-assistant-prompt]').forEach(button => button.addEventListener('click', () => {
+  $('#assistantQuestion').value = button.dataset.assistantPrompt;
+  $('#assistantQuestion').focus();
+}));
 $('#closeAuth').addEventListener('click', () => { clearTimeout(state.authPoll); $('#authDialog').close(); });
 $('#authDialog').addEventListener('click', event => { if (event.target === event.currentTarget) event.currentTarget.close(); });
 $('#copyAuthCode').addEventListener('click', async event => {

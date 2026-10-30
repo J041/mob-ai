@@ -231,6 +231,16 @@ Before **Start assessment** is enabled, run **Device readiness** for the exact t
 
 Each iteration is auditable under `runs/RUN_ID/agent/iteration-N/` and contains the prompt, candidate hook, Codex decision, Codex log, Frida/logcat output, validation result, and combined record. `codex-loop-result.json` records the terminal status and complete history. The loop never rebuilds or resigns the APK, and it directs Codex to request human review for remote attestation or unsupported/high-risk changes.
 
+Each assessment row also exposes **Ask assistant**. The run assistant operates in a
+read-only sandbox and answers questions from that run's recorded artifacts, with
+clickable citations into the Artifact browser. It ranks evidence for each question
+and sends a bounded snapshot rather than the complete run, while the drawer reports
+the current evidence-selection, reasoning, and validation stage. A request such as “try harder” may
+produce a bounded rerun proposal, but it cannot operate the device or queue work
+directly. **Review in Continue / retry** copies the proposal into the normal durable
+job form, where authorization must be confirmed before submission. Conversation
+turns and assistant logs are append-only under `runs/RUN_ID/assistant/`.
+
 If a run ends with `max_iterations`, select it in the UI and resume it. The iteration
 count is the number of **additional** attempts. The next iteration is seeded from the
 last validated candidate, prior records remain append-only, and numbering continues.

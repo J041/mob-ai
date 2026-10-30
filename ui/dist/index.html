@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="dark">
   <title>Mob-AI Control Room</title>
   <meta name="description" content="Local control room for authorized mobile application assessment runs.">
-  <link rel="stylesheet" href="/styles.css?v=20261030-field-content-alignment">
+  <link rel="stylesheet" href="/styles.css?v=20261030-fast-assistant">
 </head>
 <body>
   <div class="shell">
@@ -164,6 +164,30 @@
       </section>
     </div>
   </dialog>
+  <dialog class="assistant-dialog" id="assistantDialog">
+    <div class="assistant-heading">
+      <div><p class="kicker">RUN ASSISTANT</p><h2 id="assistantTitle">Ask about this assessment</h2><small id="assistantSubtitle">Evidence-grounded, read-only answers</small></div>
+      <button class="dialog-close" id="closeAssistant" type="button" aria-label="Close assistant">&times;</button>
+    </div>
+    <form class="assistant-shell" id="assistantForm">
+      <div class="assistant-controls">
+        <label class="field"><span>Model</span><select name="model" class="model-select"><option value="">Account default</option></select></label>
+        <label class="field"><span>Thinking level</span><select name="reasoning_effort" class="reasoning-select"><option value="">Model default</option></select></label>
+      </div>
+      <div class="assistant-suggestions" aria-label="Suggested questions">
+        <button type="button" data-assistant-prompt="Why did this assessment end with its current status?">Explain status</button>
+        <button type="button" data-assistant-prompt="Compare the recorded attempts and identify what changed.">Compare attempts</button>
+        <button type="button" data-assistant-prompt="What evidence best explains the latest crash or process exit?">Explain crash</button>
+        <button type="button" data-assistant-prompt="Propose a bounded rerun that tries harder using the available evidence.">Try harder</button>
+      </div>
+      <div class="assistant-messages" id="assistantMessages" aria-live="polite"><p class="assistant-empty">Ask a question about this run's findings, logs, hooks, decisions, or success checks.</p></div>
+      <div class="assistant-composer">
+        <textarea name="question" id="assistantQuestion" rows="3" maxlength="4000" required placeholder="Ask why it failed, compare attempts, or request a stronger rerun plan..."></textarea>
+        <button class="button primary" id="sendAssistant" type="submit">Ask assistant <span>&rarr;</span></button>
+      </div>
+      <p class="assistant-note">The assistant is read-only. Suggested reruns must be reviewed and explicitly authorized in Continue / retry.</p>
+    </form>
+  </dialog>
   <dialog class="auth-dialog" id="authDialog">
     <div class="dialog-heading">
       <div><p class="kicker">CODEX AUTHENTICATION</p><h2>Connect your ChatGPT account</h2></div>
@@ -183,6 +207,6 @@
       </div>
     </div>
   </dialog>
-  <script src="/app.js?v=20261029-human-review-red" defer></script>
+  <script src="/app.js?v=20261030-fast-assistant" defer></script>
 </body>
 </html>
