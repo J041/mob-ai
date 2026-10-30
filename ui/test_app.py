@@ -258,15 +258,41 @@ class WebAppTests(unittest.TestCase):
     @patch("ui.app.subprocess.run")
     def test_wireless_pairing_sends_code_over_stdin(self, run) -> None:
         run.return_value = subprocess.CompletedProcess([], 0, "Successfully paired", "")
-        response = self.client.post(
-            "/api/devices/pair",
-            json={"endpoint": "192.168.1.20:37001", "code": "123456"},
-        )
+        with tempfile.TemporaryDirectory() as temp, patch(
+            "ui.app.WIRELESS_DEVICES_PATH", Path(temp) / "wireless-devices.json",
+        ):
+            response = self.client.post(
+                "/api/devices/pair",
+                json={"endpoint": "192.168.1.20:37001", "code": "123456"},
+            )
+            stored = (Path(temp) / "wireless-devices.json").read_text(encoding="utf-8")
         self.assertEqual(response.status_code, 200)
-        command = run.call_args.args[0]
+        command = run.call_args_list[0].args[0]
         self.assertEqual(command, ["adb", "pair", "192.168.1.20:37001"])
         self.assertNotIn("123456", command)
-        self.assertEqual(run.call_args.kwargs["input"], "123456\n")
+        self.assertEqual(run.call_args_list[0].kwargs["input"], "123456\n")
+        self.assertNotIn("123456", stored)
+        self.assertIn("192.168.1.20:37001", stored)
+
+    @patch("ui.app.subprocess.run")
+    def test_device_discovery_distinguishes_previously_paired_and_discovered(self, run) -> None:
+        run.side_effect = [
+            subprocess.CompletedProcess([], 0, "List of devices attached\n", ""),
+            subprocess.CompletedProcess([], 0, "List of discovered mdns services\nadb-phone _adb-tls-connect._tcp 192.168.1.20:41993\n", ""),
+        ]
+        with tempfile.TemporaryDirectory() as temp:
+            registry = Path(temp) / "wireless-devices.json"
+            registry.write_text(json.dumps({"devices": [{
+                "id": "known-phone", "host": "192.168.1.20",
+                "pairing_endpoint": "192.168.1.20:37001", "paired_utc": "2026-10-30T00:00:00+00:00",
+            }]}), encoding="utf-8")
+            with patch("ui.app.WIRELESS_DEVICES_PATH", registry):
+                response = self.client.get("/api/devices")
+        payload = response.get_json()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["wireless_devices"][0]["status"], "previously_paired")
+        self.assertEqual(payload["wireless_devices"][0]["endpoint"], "192.168.1.20:41993")
+        self.assertTrue(payload["wireless_devices"][0]["connectable"])
 
     def test_wireless_pairing_rejects_invalid_code(self) -> None:
         response = self.client.post(

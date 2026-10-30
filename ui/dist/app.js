@@ -552,26 +552,87 @@ async function refreshOverview(showToast = false) {
   finally { button.disabled = false; }
 }
 
-async function discoverDevices() {
+async function discoverDevices(showToast = true) {
   const button = $('#discoverDevices');
   button.disabled = true;
   button.textContent = 'Discovering…';
   try {
     const data = await api('/api/devices');
     state.devices = data.devices;
+    const wirelessDevices = data.wireless_devices || [];
     const list = $('#deviceOptions');
     list.replaceChildren();
     data.devices.forEach(device => option(list, device.serial, `${device.serial} · ${device.state}`));
-    $('#deviceCount').textContent = data.devices.filter(device => device.state === 'device').length;
-    $('#deviceCaption').textContent = data.devices.length ? `${data.devices.length} ADB entries` : 'none visible';
+    wirelessDevices.filter(device => device.endpoint).forEach(device => {
+      if (![...list.options].some(item => item.value === device.endpoint)) {
+        option(list, device.endpoint, `${device.endpoint} · ${String(device.status).replaceAll('_', ' ')}`);
+      }
+    });
+    renderWirelessDevices(wirelessDevices);
+    const connectedCount = data.devices.filter(device => device.state === 'device').length;
+    $('#deviceCount').textContent = connectedCount;
+    $('#deviceCaption').textContent = wirelessDevices.length
+      ? `${connectedCount} connected · ${wirelessDevices.length} known wireless`
+      : data.devices.length ? `${data.devices.length} ADB entries` : 'none visible';
     const target = $('#newForm [name="target"]');
     if (!target.value && data.devices.filter(device => device.state === 'device').length === 1) {
       target.value = data.devices.find(device => device.state === 'device').serial;
       resetReadiness();
     }
-    toast(`Found ${data.devices.length} ADB device entries.`);
+    if (showToast) toast(`Found ${data.devices.length} ADB entries and ${wirelessDevices.length} wireless records.`);
   } catch (error) { toast(error.message, true); }
   finally { button.disabled = false; button.textContent = 'Discover devices'; }
+}
+
+function wirelessStatusLabel(status) {
+  return ({
+    connected: 'Connected', previously_paired: 'Previously paired', discovered: 'Discovered',
+    unauthorized: 'Unauthorized', offline: 'Offline',
+  })[status] || String(status || 'Unknown').replaceAll('_', ' ');
+}
+
+function renderWirelessDevices(devices) {
+  const container = $('#wirelessDevices');
+  if (!devices.length) {
+    container.innerHTML = '<p>No paired or discovered wireless devices yet.</p>';
+    return;
+  }
+  container.innerHTML = devices.map(device => {
+    const endpoint = device.endpoint || '';
+    const timestamp = device.last_connected_utc || device.paired_utc;
+    const detail = endpoint || device.host || device.pairing_endpoint || 'Connection address not discovered';
+    const action = endpoint
+      ? `<button class="text-button wireless-action" type="button" data-wireless-endpoint="${escapeText(endpoint)}" data-wireless-connected="${device.status === 'connected'}">${device.status === 'connected' ? 'Use device' : 'Connect'}</button>`
+      : '<small class="wireless-address-needed">Enter its connection address below</small>';
+    return `<article class="wireless-device ${escapeText(device.status)}">
+      <span class="wireless-dot" aria-hidden="true"></span>
+      <div><strong>${escapeText(detail)}</strong><small>${escapeText(timestamp ? `Last known ${formatDate(timestamp)}` : device.details || 'Visible on the local network')}</small></div>
+      <b>${escapeText(wirelessStatusLabel(device.status))}</b>${action}
+    </article>`;
+  }).join('');
+  $$('[data-wireless-endpoint]').forEach(button => button.addEventListener('click', () => useWirelessDevice(button)));
+}
+
+async function useWirelessDevice(button) {
+  const endpoint = button.dataset.wirelessEndpoint;
+  const connected = button.dataset.wirelessConnected === 'true';
+  button.disabled = true;
+  try {
+    if (!connected) {
+      await api('/api/devices/connect', { method: 'POST', body: JSON.stringify({ endpoint }) });
+    }
+    const transport = $('#newForm [name="transport"][value="wireless"]');
+    transport.checked = true;
+    updateTransport();
+    $('#newForm [name="target"]').value = endpoint;
+    resetReadiness();
+    toast(connected ? 'Wireless device selected.' : 'Wireless device connected and selected.');
+    await discoverDevices(false);
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    button.disabled = false;
+  }
 }
 
 function formJson(form) {
@@ -697,9 +758,15 @@ async function pairWirelessDevice() {
       method: 'POST', body: JSON.stringify({ endpoint, code }),
     });
     status.className = 'success';
-    status.textContent = `${result.message} Enter the separate connection address below.`;
+    status.textContent = result.connection_endpoint
+      ? `${result.message} The connection address was discovered automatically.`
+      : `${result.message} Enter the separate connection address below.`;
+    if (result.connection_endpoint) {
+      $('#newForm [name="target"]').value = result.connection_endpoint;
+      resetReadiness();
+    }
     toast(result.message);
-    await discoverDevices();
+    await discoverDevices(false);
   } catch (error) {
     status.className = 'error';
     status.textContent = error.message;
@@ -939,7 +1006,7 @@ $('#resumeRun').addEventListener('change', () => {
   populateContinuationValues(run);
   updateResumeSummary();
 });
-$('#discoverDevices').addEventListener('click', discoverDevices);
+$('#discoverDevices').addEventListener('click', () => discoverDevices(true));
 $('#runReadiness').addEventListener('click', runReadiness);
 $$('#newForm [name="transport"]').forEach(input => input.addEventListener('change', updateTransport));
 ['target', 'frida_server'].forEach(name => $('#newForm').elements[name].addEventListener('input', resetReadiness));
@@ -991,5 +1058,6 @@ $('#copyAuthCode').addEventListener('click', async event => {
 });
 
 refreshOverview();
+discoverDevices(false);
 updateTransport();
 updatePolicyBuilder();

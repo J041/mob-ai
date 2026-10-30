@@ -32,6 +32,7 @@ STATIC_ROOT = WORKSPACE / "ui" / "dist"
 UPLOAD_ROOT = WORKSPACE / "uploads"
 POLICY_ROOT = WORKSPACE / "policies" / "generated"
 ASSISTANT_SCHEMA = WORKSPACE / "pipeline" / "assistant-response.schema.json"
+WIRELESS_DEVICES_PATH = WORKSPACE / "ui" / ".state" / "wireless-devices.json"
 UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
 POLICY_ROOT.mkdir(parents=True, exist_ok=True)
 
@@ -95,6 +96,45 @@ def json_file(path: Path):
         return read_json(path) if path.is_file() else None
     except (OSError, json.JSONDecodeError):
         return None
+
+
+def endpoint_host(endpoint: str) -> str:
+    value = endpoint.strip()
+    if value.startswith("[") and "]" in value:
+        return value[1:value.index("]")].lower()
+    return value.rsplit(":", 1)[0].lower() if ":" in value else value.lower()
+
+
+def wireless_registry() -> list[dict]:
+    payload = json_file(WIRELESS_DEVICES_PATH) or {}
+    devices = (payload.get("devices") or []) if isinstance(payload, dict) else []
+    return [dict(item) for item in devices if isinstance(item, dict) and item.get("id")]
+
+
+def record_wireless_device(*, pairing_endpoint: str = "", connection_endpoint: str = "", connected: bool = False) -> dict:
+    """Persist non-secret host knowledge; pairing codes never enter this structure."""
+    now = utc_now()
+    host = endpoint_host(connection_endpoint or pairing_endpoint)
+    with _lock:
+        devices = wireless_registry()
+        item = next((entry for entry in devices if any((
+            connection_endpoint and entry.get("connection_endpoint") == connection_endpoint,
+            pairing_endpoint and entry.get("pairing_endpoint") == pairing_endpoint,
+            host and entry.get("host") == host,
+        ))), None)
+        if item is None:
+            item = {"id": uuid.uuid4().hex, "host": host}
+            devices.append(item)
+        if pairing_endpoint:
+            item["pairing_endpoint"] = pairing_endpoint
+            item["paired_utc"] = now
+        if connection_endpoint:
+            item["connection_endpoint"] = connection_endpoint
+        if connected:
+            item["last_connected_utc"] = now
+        item["updated_utc"] = now
+        atomic_write_json(WIRELESS_DEVICES_PATH, {"devices": devices})
+        return dict(item)
 
 
 def recorded_success_policy(config: dict | None) -> dict:
@@ -1413,6 +1453,75 @@ def upload_apk():
     ), 201
 
 
+def discovered_mdns_services() -> list[dict]:
+    try:
+        result = subprocess.run(["adb", "mdns", "services"], text=True, capture_output=True, timeout=12)
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    if result.returncode:
+        return []
+    services = []
+    for line in result.stdout.splitlines():
+        match = re.match(r"^\s*(\S+)\s+(_adb-tls-(pairing|connect)\._tcp)\s+(\S+:\d+)\s*$", line)
+        if match:
+            services.append({
+                "name": match.group(1), "service": match.group(2),
+                "kind": match.group(3), "endpoint": match.group(4),
+            })
+    return services
+
+
+def wireless_device_view(found: list[dict], mdns: list[dict]) -> list[dict]:
+    records = wireless_registry()
+    live_by_serial = {item["serial"]: item for item in found}
+    connect_services = [item for item in mdns if item["kind"] == "connect"]
+    output: list[dict] = []
+    represented: set[str] = set()
+    for record in records:
+        endpoint = str(record.get("connection_endpoint") or "")
+        host = str(record.get("host") or endpoint_host(endpoint or str(record.get("pairing_endpoint") or "")))
+        discovered = next((item for item in connect_services if endpoint_host(item["endpoint"]) == host), None)
+        target = endpoint or str((discovered or {}).get("endpoint") or "")
+        live = live_by_serial.get(target) or live_by_serial.get(endpoint)
+        adb_state = str((live or {}).get("state") or "")
+        status = "connected" if adb_state == "device" else adb_state if adb_state in {"offline", "unauthorized"} else "previously_paired"
+        if target:
+            represented.add(target)
+        output.append({
+            "id": record["id"], "host": host, "endpoint": target,
+            "pairing_endpoint": str(record.get("pairing_endpoint") or ""),
+            "status": status, "adb_state": adb_state, "paired": True,
+            "discovered": bool(discovered), "connectable": bool(target and status != "connected"),
+            "paired_utc": str(record.get("paired_utc") or ""),
+            "last_connected_utc": str(record.get("last_connected_utc") or ""),
+            "details": str((live or {}).get("details") or ""),
+        })
+    for live in found:
+        serial = str(live["serial"])
+        if serial in represented or not re.fullmatch(r"(?:\[[0-9a-fA-F:]+\]|[A-Za-z0-9._-]+):\d+", serial):
+            continue
+        output.append({
+            "id": f"live-{serial}", "host": endpoint_host(serial), "endpoint": serial,
+            "pairing_endpoint": "", "status": "connected" if live["state"] == "device" else live["state"],
+            "adb_state": live["state"], "paired": False, "discovered": False,
+            "connectable": live["state"] != "device", "paired_utc": "", "last_connected_utc": "",
+            "details": live.get("details") or "",
+        })
+        represented.add(serial)
+    for service in connect_services:
+        endpoint = service["endpoint"]
+        if endpoint in represented:
+            continue
+        output.append({
+            "id": f"mdns-{service['name']}", "host": endpoint_host(endpoint), "endpoint": endpoint,
+            "pairing_endpoint": "", "status": "discovered", "adb_state": "", "paired": False,
+            "discovered": True, "connectable": True, "paired_utc": "", "last_connected_utc": "",
+            "details": service["name"],
+        })
+    order = {"connected": 0, "unauthorized": 1, "offline": 2, "previously_paired": 3, "discovered": 4}
+    return sorted(output, key=lambda item: (order.get(item["status"], 9), item.get("host") or ""))
+
+
 @app.get("/api/devices")
 def devices():
     result = subprocess.run(["adb", "devices", "-l"], text=True, capture_output=True, timeout=20)
@@ -1423,7 +1532,21 @@ def devices():
         match = re.match(r"^([^\s]+)\s+(device|offline|unauthorized)(?:\s+(.*))?$", line)
         if match:
             found.append({"serial": match.group(1), "state": match.group(2), "details": match.group(3) or ""})
-    return jsonify(devices=found)
+    mdns = discovered_mdns_services()
+    return jsonify(devices=found, wireless_devices=wireless_device_view(found, mdns))
+
+
+@app.post("/api/devices/connect")
+def connect_wireless_device():
+    body = request.get_json(force=True, silent=False) or {}
+    endpoint = token(str(body.get("endpoint") or ""), "wireless connection address", r"[A-Za-z0-9._:\-\[\]]+")
+    result = subprocess.run(["adb", "connect", endpoint], text=True, capture_output=True, timeout=25)
+    detail = strip_terminal_controls(result.stdout or result.stderr or "").strip()
+    connected = result.returncode == 0 and bool(re.search(r"connected to|already connected", detail, re.I))
+    if not connected:
+        raise ValueError(f"Wireless ADB connection failed: {detail or 'No response from ADB.'}")
+    record_wireless_device(connection_endpoint=endpoint, connected=True)
+    return jsonify(connected=True, endpoint=endpoint, message="Wireless device connected.")
 
 
 def adb_result(target: str, *arguments: str, timeout: int = 20) -> subprocess.CompletedProcess[str]:
@@ -1460,10 +1583,10 @@ def device_readiness():
         connected = subprocess.run(
             ["adb", "connect", target], text=True, capture_output=True, timeout=25,
         )
-        checks.append(readiness_check(
-            "Wireless ADB", connected.returncode == 0 and bool(re.search(r"connected to|already connected", connected.stdout, re.I)),
-            connected.stdout or connected.stderr,
-        ))
+        wireless_ready = connected.returncode == 0 and bool(re.search(r"connected to|already connected", connected.stdout, re.I))
+        checks.append(readiness_check("Wireless ADB", wireless_ready, connected.stdout or connected.stderr))
+        if wireless_ready:
+            record_wireless_device(connection_endpoint=target, connected=True)
     state = adb_result(target, "get-state")
     device_ready = state.returncode == 0 and state.stdout.strip() == "device"
     checks.append(readiness_check("ADB device", device_ready, state.stdout or state.stderr))
@@ -1572,7 +1695,16 @@ def pair_wireless_device():
         raise ValueError("Wireless pairing timed out. Confirm the pairing address and try again.") from error
     finally:
         pairing_code = ""
-    return jsonify(paired=True, endpoint=endpoint, message="Wireless debugging paired successfully.")
+    matching_connections = [
+        service["endpoint"] for service in discovered_mdns_services()
+        if service["kind"] == "connect" and endpoint_host(service["endpoint"]) == endpoint_host(endpoint)
+    ]
+    connection_endpoint = matching_connections[0] if len(matching_connections) == 1 else ""
+    record_wireless_device(pairing_endpoint=endpoint, connection_endpoint=connection_endpoint)
+    return jsonify(
+        paired=True, endpoint=endpoint, connection_endpoint=connection_endpoint,
+        message="Wireless debugging paired successfully.",
+    )
 
 
 @app.get("/api/runs")

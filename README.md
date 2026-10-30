@@ -227,6 +227,13 @@ debugging screen before starting the assessment. Pairing is normally required on
 
 Before **Start assessment** is enabled, run **Device readiness** for the exact target. The wizard checks ADB state, root access, ABI, Android SDK, temporary storage, SELinux, Frida client/server versions, port forwarding and Frida connectivity. You may optionally select a trusted Frida Server binary to push to the configured device path and start it. A successful check issues a ten-minute token bound to the target, transport and Frida path; changing any of those values requires another check. Pairing codes are never included in readiness state.
 
+The Wireless section also keeps a local, non-secret registry of successful pairings
+under `ui/.state/`. It combines that history with `adb devices` and ADB mDNS discovery
+to distinguish **Connected**, **Previously paired**, **Discovered**, **Unauthorized**,
+and **Offline** devices. Pairing and last-used connection endpoints and timestamps may
+be retained; six-digit pairing codes are never stored. A previously paired label is
+host history rather than proof that Android has not subsequently revoked the pairing.
+
 **Reasoning mode** controls each Codex iteration. **Single agent** explicitly disables multi-agent delegation. **Parallel specialists** enables it and allows two or three read-only reviewers to inspect independent static, runtime, and relevant native evidence concurrently. Specialists inherit the configured read-only Ghidra MCP access but cannot edit the hook or operate the device; only the root agent may update `candidate.js` and return the structured decision. Parallel mode can improve complex evidence review but may use more ChatGPT-plan capacity than single mode.
 
 Each iteration is auditable under `runs/RUN_ID/agent/iteration-N/` and contains the prompt, candidate hook, Codex decision, Codex log, Frida/logcat output, validation result, and combined record. `codex-loop-result.json` records the terminal status and complete history. The loop never rebuilds or resigns the APK, and it directs Codex to request human review for remote attestation or unsupported/high-risk changes.

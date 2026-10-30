@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="dark">
   <title>Mob-AI Control Room</title>
   <meta name="description" content="Local control room for authorized mobile application assessment runs.">
-  <link rel="stylesheet" href="/styles.css?v=20261030-fast-assistant">
+  <link rel="stylesheet" href="/styles.css?v=20261030-wireless-registry">
 </head>
 <body>
   <div class="shell">
@@ -81,6 +81,10 @@
                 <button class="button pair-button" id="pairDevice" type="button">Pair device</button>
               </div>
               <p id="pairingStatus">The pairing code is submitted once over stdin and is never saved.</p>
+              <div class="wireless-registry">
+                <div class="wireless-registry-heading"><strong>Wireless devices</strong><small>Known to this Mob-AI host</small></div>
+                <div class="wireless-device-list" id="wirelessDevices"><p>No paired or discovered wireless devices yet.</p></div>
+              </div>
             </div>
             <label class="field span-2"><span id="targetLabel">Device target</span><input name="target" list="deviceOptions" placeholder="emulator-5554" required><datalist id="deviceOptions"></datalist><small id="targetHint">Use the exact serial shown by ADB.</small></label>
             <section class="readiness span-2" id="readinessPanel">
@@ -207,6 +211,6 @@
       </div>
     </div>
   </dialog>
-  <script src="/app.js?v=20261030-fast-assistant" defer></script>
+  <script src="/app.js?v=20261030-wireless-registry" defer></script>
 </body>
 </html>
