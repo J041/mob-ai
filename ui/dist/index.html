@@ -6,22 +6,10 @@
   <meta name="color-scheme" content="dark">
   <title>Mob-AI Control Room</title>
   <meta name="description" content="Local control room for authorized mobile application assessment runs.">
-  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/styles.css?v=20261030-field-content-alignment">
 </head>
 <body>
   <div class="shell">
-    <aside class="rail" aria-label="Workspace navigation">
-      <div class="brand" aria-label="Mob-AI">
-        <span class="brand-mark">M</span>
-        <span class="brand-copy"><strong>Mob-AI</strong><small>Control Room</small></span>
-      </div>
-      <nav>
-        <a class="nav-item active" href="#launch"><span>01</span>Launch</a>
-        <a class="nav-item" href="#activity"><span>02</span>Activity</a>
-        <a class="nav-item" href="#runs"><span>03</span>Runs</a>
-      </nav>
-    </aside>
-
     <main>
       <header class="topbar">
         <div>
@@ -47,13 +35,18 @@
           <div class="panel-heading">
             <div><p class="kicker">MISSION SETUP</p><h2>Start or continue an assessment</h2></div>
             <div class="segmented" role="tablist" aria-label="Assessment mode">
-              <button class="segment active" role="tab" aria-selected="true" data-tab="new">New run</button>
-              <button class="segment" role="tab" aria-selected="false" data-tab="resume">Resume</button>
+              <button class="segment active" id="newRunTab" role="tab" aria-selected="true" data-tab="new">New run</button>
+              <button class="segment" role="tab" aria-selected="false" data-tab="resume">Continue / retry</button>
             </div>
           </div>
 
           <form id="newForm" class="form-grid tab-panel active" data-panel="new">
-            <label class="field span-2 upload-field">
+            <input name="source_run" id="sourceRun" type="hidden">
+            <div class="reassessment-banner span-2" id="reassessmentBanner" hidden>
+              <div><strong>Linked reassessment</strong><small id="reassessmentSource">Reusing the selected APK and static evidence.</small></div>
+              <button class="text-button" id="clearReassessment" type="button">Use another APK</button>
+            </div>
+            <label class="field span-2 upload-field" id="apkUploadField">
               <span>APK upload <em>stored locally under uploads/</em></span>
               <input name="apk_file" type="file" accept=".apk,application/vnd.android.package-archive" required>
               <small id="apkUploadStatus">Choose the APK you are authorized to assess.</small>
@@ -96,6 +89,7 @@
                 <span class="readiness-state" id="readinessState">NOT CHECKED</span>
               </div>
               <div class="readiness-controls">
+                <label class="field"><span>Frida Server path <em>device path</em></span><input name="frida_server" value="/data/local/tmp/frida-server"></label>
                 <label class="field upload-field"><span>Frida Server binary <em>optional deploy</em></span><input name="frida_binary" type="file"><small>Choose a trusted binary matching the device ABI and Frida client version.</small></label>
                 <label class="switch-field readiness-start"><input name="start_frida" type="checkbox" checked><span class="switch"></span><span>Start and verify Frida</span></label>
                 <button class="button" id="runReadiness" type="button">Run readiness</button>
@@ -108,22 +102,32 @@
             <label class="field"><span>Test window</span><div class="unit-input"><input name="run_seconds" type="number" value="20" min="1" max="600" required><b>sec</b></div></label>
             <label class="field"><span>Codex model</span><select name="model" class="model-select"><option value="">Account default</option></select></label>
             <label class="field"><span>Thinking level</span><select name="reasoning_effort" class="reasoning-select"><option value="">Model default</option></select></label>
-            <label class="field span-2"><span>Frida Server path <em>optional</em></span><input name="frida_server" value="/data/local/tmp/frida-server"></label>
-            <label class="field"><span>Package override</span><input name="package" placeholder="auto-detect"></label>
+            <label class="field"><span>Reasoning mode</span><select name="reasoning_mode" class="reasoning-mode"><option value="single" selected>Single agent</option><option value="parallel">Parallel specialists</option></select></label>
+            <label class="field specialist-count" hidden><span>Maximum specialists</span><select name="specialist_count"><option value="2">2 specialists</option><option value="3" selected>3 specialists</option></select><small>Read-only static, runtime and native evidence reviewers.</small></label>
+            <label class="field"><span>Package override <em>optional</em></span><input name="package" placeholder="auto-detect"></label>
             <label class="switch-field"><input name="install" type="checkbox" checked><span class="switch"></span><span>Install APK</span></label>
             <label class="authorization span-2"><input name="authorized" type="checkbox" required><span>I confirm ownership or explicit authorization to test this APK and selected device.</span></label>
             <div class="form-footer span-2"><p>Observation runs first. Codex edits isolated candidate hooks; validation remains deterministic.</p><button class="button primary" type="submit">Start assessment <span>→</span></button></div>
           </form>
 
           <form id="resumeForm" class="form-grid tab-panel" data-panel="resume">
-            <label class="field span-2"><span>Continuable run</span><select name="run" id="resumeRun" required><option value="">Select a continuable run</option></select></label>
-            <label class="field"><span>Additional iterations</span><input name="max_iterations" type="number" value="3" min="1" max="10" required></label>
-            <label class="field"><span>Codex model <em>optional override</em></span><select name="model" class="model-select"><option value="">Recorded model</option></select></label>
-            <label class="field"><span>Thinking level <em>optional override</em></span><select name="reasoning_effort" class="reasoning-select"><option value="">Recorded level</option></select></label>
+            <label class="field span-2"><span>Assessment run</span><select name="run" id="resumeRun" required><option value="">Select an assessment run</option></select></label>
+            <section class="resume-policy span-2" id="resumePolicy">
+              <div><strong>Success policy</strong><small>Locked to the selected assessment so retries use the same proof of success.</small></div>
+              <input name="success_spec_sha256" id="resumePolicyHash" type="hidden">
+              <p id="resumePolicyName">Select a run to inspect its recorded policy.</p>
+              <div class="resume-policy-checks" id="resumePolicyChecks"></div>
+              <button class="button policy-reassess" id="reassessSelected" type="button" disabled>Reassess with a different policy <span>&rarr;</span></button>
+            </section>
+            <label class="field"><span>Iterations for this attempt</span><input name="max_iterations" type="number" value="3" min="1" max="10" required></label>
+            <label class="field"><span>Codex model</span><select name="model" class="model-select"><option value="">Account default</option></select></label>
+            <label class="field"><span>Thinking level</span><select name="reasoning_effort" class="reasoning-select"><option value="">Model default</option></select></label>
+            <label class="field"><span>Reasoning mode</span><select name="reasoning_mode" class="reasoning-mode"><option value="single">Single agent</option><option value="parallel">Parallel specialists</option></select></label>
+            <label class="field specialist-count" hidden><span>Maximum specialists</span><select name="specialist_count"><option value="2">2 specialists</option><option value="3" selected>3 specialists</option></select></label>
             <label class="field span-2" id="resumeFridaField" hidden><span>Updated Frida Server path</span><input name="frida_server" id="resumeFridaServer" placeholder="/data/local/tmp/frida-server"></label>
             <div class="resume-summary span-2" id="resumeSummary"><span>↳</span><p>Select a run to see its last known state.</p></div>
             <label class="authorization span-2"><input name="authorized" type="checkbox" required><span>I confirm authorization remains valid for this device and APK.</span></label>
-            <div class="form-footer span-2"><p>The previous candidate, validation delta, target, and policy hashes will be verified before continuation.</p><button class="button primary" type="submit">Continue loop <span>→</span></button></div>
+            <div class="form-footer span-2"><p id="continuationHint">The previous candidate, validation delta, target, and policy hashes will be verified before continuation.</p><button class="button primary" id="continuationSubmit" type="submit">Continue loop <span>→</span></button></div>
           </form>
         </article>
 
@@ -143,6 +147,23 @@
   </div>
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <dialog class="artifact-dialog" id="artifactDialog">
+    <div class="artifact-heading">
+      <div><p class="kicker">RUN ARTIFACTS</p><h2 id="artifactTitle">Assessment evidence</h2><small id="artifactSubtitle">Loading manifest…</small></div>
+      <button class="dialog-close" id="closeArtifacts" type="button" aria-label="Close artifact browser">×</button>
+    </div>
+    <div class="artifact-layout">
+      <aside class="artifact-categories" id="artifactCategories" aria-label="Artifact categories"></aside>
+      <section class="artifact-files" aria-label="Artifact files">
+        <div class="artifact-section-heading"><div><strong id="artifactCategoryTitle">Artifacts</strong><small id="artifactCategoryDescription"></small></div><span id="artifactFileCount">0 files</span></div>
+        <div class="artifact-file-list" id="artifactFileList"><p class="artifact-empty">Select a category.</p></div>
+      </section>
+      <section class="artifact-preview" aria-label="Artifact preview">
+        <div class="artifact-preview-heading"><div><strong id="artifactPreviewTitle">Preview</strong><small id="artifactPreviewMeta">Select a file to inspect it.</small></div><a class="resume-button artifact-download" id="artifactDownload" hidden>Download</a></div>
+        <pre id="artifactPreview"><span class="console-muted">No artifact selected.</span></pre>
+      </section>
+    </div>
+  </dialog>
   <dialog class="auth-dialog" id="authDialog">
     <div class="dialog-heading">
       <div><p class="kicker">CODEX AUTHENTICATION</p><h2>Connect your ChatGPT account</h2></div>
@@ -162,6 +183,6 @@
       </div>
     </div>
   </dialog>
-  <script src="/app.js" defer></script>
+  <script src="/app.js?v=20261029-human-review-red" defer></script>
 </body>
 </html>

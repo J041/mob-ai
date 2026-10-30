@@ -65,6 +65,8 @@ services:
     depends_on:
       reverse-engineering:
         condition: service_healthy
+      worker:
+        condition: service_healthy
     volumes:
       - .:/workspace
       - adb-keys:/home/analyst/.android
@@ -86,10 +88,39 @@ services:
       start_period: 10s
     security_opt:
       - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+  worker:
+    image: mob-ai-toolbox:local
+    command: ["python3", "-m", "ui.worker"]
+    init: true
+    restart: unless-stopped
+    working_dir: /workspace
+    depends_on:
+      reverse-engineering:
+        condition: service_healthy
+    volumes:
+      - .:/workspace
+      - adb-keys:/home/analyst/.android
+      - codex-state:/home/analyst/.codex
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    environment:
+      GHIDRA_MCP_URL: http://reverse-engineering:8089
+      GHIDRA_MCP_AUTH_TOKEN: ${GHIDRA_MCP_AUTH_TOKEN:-mob-ai-private-compose-token}
+      MOB_AI_WORKER_POLL_SECONDS: ${MOB_AI_WORKER_POLL_SECONDS:-1}
+      PYTHONUNBUFFERED: "1"
+    healthcheck:
+      test: ["CMD", "python3", "-c", "from pathlib import Path; import time; p=Path('/workspace/ui/.state/worker-heartbeat'); raise SystemExit(0 if p.is_file() and time.time()-p.stat().st_mtime < 30 else 1)"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+    security_opt:
+      - no-new-privileges:true
       # Codex workspace-write uses Bubblewrap to create its own user/mount
-      # namespace. Docker's default seccomp profile blocks that namespace
-      # bootstrap; capabilities remain fully dropped and Bubblewrap supplies
-      # the narrower per-iteration filesystem boundary.
+      # namespace. Only the execution worker needs this seccomp exception.
       - seccomp=unconfined
     cap_drop:
       - ALL

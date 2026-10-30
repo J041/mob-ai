@@ -11,6 +11,31 @@ import pipeline
 
 
 class PipelineTests(unittest.TestCase):
+    def test_prepare_reuses_static_artifacts_for_identical_apk(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            runs = root / "runs"
+            runs.mkdir()
+            source = root / "source-run"
+            (source / "jadx").mkdir(parents=True)
+            (source / "native").mkdir()
+            apk = root / "sample.apk"
+            apk.write_bytes(b"PK\x03\x04same-apk")
+            (source / "original.apk").write_bytes(apk.read_bytes())
+            (source / "jadx" / "Detector.java").write_text("class Detector {}", encoding="utf-8")
+            (source / "native" / "libguard.so").write_bytes(b"native")
+            (source / "report.json").write_text(json.dumps({
+                "package": "com.example", "findings": [{"kind": "root_check"}],
+                "sha256": pipeline.sha256(apk),
+            }), encoding="utf-8")
+            with mock.patch.object(pipeline, "run") as run:
+                run_dir, report = pipeline.prepare(apk, runs, source)
+            run.assert_not_called()
+            self.assertEqual(report["package"], "com.example")
+            self.assertTrue((run_dir / "jadx" / "Detector.java").is_file())
+            self.assertTrue((run_dir / "native" / "libguard.so").is_file())
+            self.assertEqual(report["static_reused_from"], str(source.resolve()))
+
     def test_find_package_and_scan(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -61,6 +86,33 @@ class PipelineTests(unittest.TestCase):
         events = pipeline.parse_observation_events(output)
         self.assertEqual(len(events), 1)
         self.assertEqual(pipeline.infer_modules({"findings": []}, events), {"native-files"})
+
+    def test_observation_diagnostics_capture_crash_evidence(self):
+        with tempfile.TemporaryDirectory() as temp:
+            run_dir = Path(temp)
+            (run_dir / "logs").mkdir()
+            observer = run_dir / "observer.js"
+            observer.write_text("'use strict';", encoding="utf-8")
+            args = argparse.Namespace(
+                device="serial", frida_endpoint="127.0.0.1:27042",
+                observation_seconds=1, diagnostics=True,
+            )
+
+            def fake_run(command, **_kwargs):
+                return subprocess.CompletedProcess(command, 0, "MOB_AI_EVENT {\"kind\":\"ready\"}\n", "")
+
+            def fake_adb(_args, *command, **_kwargs):
+                return subprocess.CompletedProcess(command, 0, " ".join(command), "")
+
+            with mock.patch.object(pipeline, "install_observer", return_value=observer), \
+                    mock.patch.object(pipeline, "run", side_effect=fake_run), \
+                    mock.patch.object(pipeline, "adb", side_effect=fake_adb):
+                result = pipeline.run_observation(args, run_dir, "com.example")
+
+            self.assertEqual(set(result["diagnostics"]), {"crash_buffer", "exit_info", "native_crashes", "tombstone_access"})
+            self.assertTrue((run_dir / "logs" / "diagnostic-crash-buffer.log").is_file())
+            observations = json.loads((run_dir / "observations.json").read_text(encoding="utf-8"))
+            self.assertIn("exit_info", observations["diagnostics"])
 
     def test_timeout_output_decodes_bytes(self):
         error = subprocess.TimeoutExpired(["frida"], 1, output=b"MOB_AI_EVENT {}\n")

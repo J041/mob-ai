@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import queue
 import re
 import shutil
@@ -16,28 +16,26 @@ import urllib.parse
 import urllib.request
 import uuid
 
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, jsonify, request, send_file, send_from_directory
 from werkzeug.exceptions import RequestEntityTooLarge
 from werkzeug.utils import secure_filename
 
 from ui.orchestrator import (
-    EnvironmentFailure, LoopError, LoopRunner, RUNS_ROOT, WORKSPACE,
+    LoopError, RUNS_ROOT, WORKSPACE,
     checkpoint_recovery_available, frida_recovery_available, read_json,
-    workspace_relative, write_json,
+    sha256, workspace_relative, write_json,
 )
+from ui.job_queue import HEARTBEAT_PATH, STATE_ROOT, atomic_write_json
 
 
 STATIC_ROOT = WORKSPACE / "ui" / "dist"
-STATE_ROOT = WORKSPACE / "ui" / ".state" / "jobs"
 UPLOAD_ROOT = WORKSPACE / "uploads"
 POLICY_ROOT = WORKSPACE / "policies" / "generated"
-STATE_ROOT.mkdir(parents=True, exist_ok=True)
 UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
 POLICY_ROOT.mkdir(parents=True, exist_ok=True)
 
 app = Flask(__name__, static_folder=None)
 app.config["MAX_CONTENT_LENGTH"] = int(os.environ.get("MOB_AI_MAX_UPLOAD_MB", "1024")) * 1024 * 1024
-_jobs: dict[str, dict] = {}
 _lock = threading.RLock()
 _auth_lock = threading.RLock()
 _auth_process: subprocess.Popen | None = None
@@ -54,6 +52,7 @@ MODEL_FALLBACK = [
     {"id": "gpt-6-luna", "display_name": "GPT-6 Luna", "is_default": False},
 ]
 REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
+REASONING_MODES = {"single", "parallel"}
 DEFAULT_REASONING_LEVELS = [
     {"effort": "low", "description": "Faster responses with lighter reasoning."},
     {"effort": "medium", "description": "Balanced speed and reasoning depth."},
@@ -63,6 +62,16 @@ DEFAULT_REASONING_LEVELS = [
 ]
 
 ANSI_ESCAPE = re.compile(r"\x1B(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1B\\))")
+ARTIFACT_PREVIEW_SUFFIXES = {".json", ".log", ".txt", ".js", ".md", ".toml", ".xml", ".yaml", ".yml", ".csv"}
+ARTIFACT_CATEGORIES = (
+    ("findings", "Findings", "Static and runtime discovery reports.", ("report.json", "adaptive-plan.json", "observations.json")),
+    ("hooks", "Generated hooks", "Generated and Codex-refined Frida scripts.", ("frida/*.js", "agent/iteration-*/candidate.js")),
+    ("comparisons", "Attempt comparisons", "Before/after evidence from diagnostic retries.", ("agent/diagnostic-retry-*/comparison.json",)),
+    ("logs", "Logcat and crash reports", "Runtime, crash-buffer, exit-info and tombstone evidence.", ("logs/*.log", "agent/**/logs/*.log", "agent/**/pipeline.log")),
+    ("decisions", "Codex decisions", "Structured decisions, iteration records and Codex execution logs.", ("codex-loop-result.json", "agent/iteration-*/decision.json", "agent/iteration-*/record.json", "agent/iteration-*/codex.log")),
+    ("ghidra", "Ghidra results", "Saved native-analysis results produced through Ghidra.", ("ghidra/**/*", "ghidra-results/**/*", "agent/**/ghidra-*")),
+    ("success", "Success-policy checks", "Recorded policy, baseline and validation outcomes.", ("result.json", "codex-loop-config.json", "agent/**/result.json")),
+)
 
 
 def strip_terminal_controls(value: str) -> str:
@@ -85,6 +94,51 @@ def json_file(path: Path):
         return None
 
 
+def recorded_success_policy(config: dict | None) -> dict:
+    """Return safe display metadata for the immutable policy bound to a run."""
+    config = config or {}
+    relative = str(config.get("success_spec") or "")
+    expected_hash = str(config.get("success_spec_sha256") or "")
+    policy: dict = {}
+    valid = False
+    if relative:
+        try:
+            path = (WORKSPACE / relative).resolve()
+            path.relative_to(WORKSPACE)
+            policy = json_file(path) or {}
+            valid = bool(policy and expected_hash and sha256(path) == expected_hash)
+        except (ValueError, OSError):
+            pass
+    checks = []
+    expected_activity = ""
+    expected_ui_pattern = ""
+    forbidden_ui_pattern = ""
+    for check in policy.get("checks") or []:
+        check_type = str(check.get("type") or "") if isinstance(check, dict) else ""
+        if check_type:
+            checks.append(check_type)
+        if check_type == "activity_reached":
+            expected_activity = str(check.get("activity") or "")
+        elif check_type == "ui_text_regex":
+            expected_ui_pattern = str(check.get("pattern") or "")
+        elif check_type == "ui_text_not_regex":
+            forbidden_ui_pattern = str(check.get("pattern") or "")
+    return {
+        "name": str(policy.get("name") or "Recorded success policy"),
+        "preset": str(policy.get("preset") or "advanced"),
+        "repeat": int(policy.get("repeat") or 1),
+        "min_passes": int(policy.get("min_passes") or policy.get("repeat") or 1),
+        "baseline_required": bool(policy.get("baseline_required")),
+        "checks": checks,
+        "sha256": expected_hash,
+        "valid": valid,
+        "path": relative,
+        "expected_activity": expected_activity,
+        "expected_ui_pattern": expected_ui_pattern,
+        "forbidden_ui_pattern": forbidden_ui_pattern,
+    }
+
+
 def resolve_workspace_item(value: str, *, directory: bool = False) -> Path:
     if not value or Path(value).is_absolute():
         raise ValueError("Use a workspace-relative path.")
@@ -104,6 +158,85 @@ def token(value: str, name: str, pattern: str) -> str:
     if not value or not re.fullmatch(pattern, value):
         raise ValueError(f"Invalid {name}.")
     return value
+
+
+def resolve_run_directory(run_id: str) -> Path:
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", run_id):
+        raise ValueError("Invalid run identifier.")
+    directory = (RUNS_ROOT / run_id).resolve()
+    try:
+        directory.relative_to(RUNS_ROOT.resolve())
+    except ValueError as error:
+        raise ValueError("Run escaped the runs directory.") from error
+    if not directory.is_dir() or not (directory / "report.json").is_file():
+        raise FileNotFoundError("Assessment run not found.")
+    return directory
+
+
+def artifact_manifest(run_id: str) -> dict:
+    directory = resolve_run_directory(run_id)
+    report = json_file(directory / "report.json") or {}
+    summary = json_file(directory / "codex-loop-result.json") or {}
+    categories = []
+    allowed: set[str] = set()
+    for identifier, label, description, patterns in ARTIFACT_CATEGORIES:
+        paths: set[Path] = set()
+        for pattern in patterns:
+            paths.update(path for path in directory.glob(pattern) if path.is_file())
+        files = []
+        for path in sorted(paths, key=lambda item: item.relative_to(directory).as_posix()):
+            resolved = path.resolve()
+            try:
+                relative = resolved.relative_to(directory).as_posix()
+            except ValueError:
+                continue
+            allowed.add(relative)
+            stat = resolved.stat()
+            files.append({
+                "path": relative,
+                "name": resolved.name,
+                "size": stat.st_size,
+                "updated_utc": datetime.fromtimestamp(stat.st_mtime, timezone.utc).isoformat(),
+                "previewable": resolved.suffix.lower() in ARTIFACT_PREVIEW_SUFFIXES,
+            })
+        categories.append({"id": identifier, "label": label, "description": description, "files": files})
+    return {
+        "run": {
+            "id": run_id,
+            "package": str(report.get("package") or run_id),
+            "status": str(summary.get("status") or "analysis"),
+            "created_utc": str(report.get("created_utc") or ""),
+        },
+        "categories": categories,
+        "allowed": allowed,
+    }
+
+
+def resolve_run_artifact(run_id: str, relative: str) -> Path:
+    normalized = PurePosixPath(str(relative).replace("\\", "/")).as_posix().lstrip("/")
+    parts = PurePosixPath(normalized).parts
+    allowed = any((
+        normalized in {"report.json", "adaptive-plan.json", "observations.json", "codex-loop-result.json", "result.json", "codex-loop-config.json"},
+        len(parts) == 2 and parts[0] == "frida" and normalized.endswith(".js"),
+        len(parts) == 3 and parts[0] == "agent" and parts[1].startswith("iteration-") and parts[2] in {"candidate.js", "decision.json", "record.json", "codex.log", "result.json"},
+        len(parts) == 3 and parts[0] == "agent" and parts[1].startswith("diagnostic-retry-") and parts[2] in {"comparison.json", "pipeline.log", "result.json"},
+        bool(parts) and parts[0] == "logs" and normalized.endswith(".log"),
+        len(parts) >= 3 and parts[0] == "agent" and "logs" in parts[2:] and normalized.endswith(".log"),
+        len(parts) >= 3 and parts[0] == "agent" and parts[-1] in {"pipeline.log", "result.json"},
+        bool(parts) and parts[0] in {"ghidra", "ghidra-results"},
+        len(parts) >= 3 and parts[0] == "agent" and parts[-1].startswith("ghidra-"),
+    ))
+    if not allowed or ".." in parts:
+        raise FileNotFoundError("Artifact not found in this run's evidence manifest.")
+    directory = resolve_run_directory(run_id)
+    path = (directory / normalized).resolve()
+    try:
+        path.relative_to(directory)
+    except ValueError as error:
+        raise FileNotFoundError("Artifact escaped the assessment run.") from error
+    if not path.is_file():
+        raise FileNotFoundError("Artifact not found.")
+    return path
 
 
 def success_policy(body: dict) -> Path:
@@ -315,6 +448,7 @@ def codex_model_catalog(*, force: bool = False) -> dict:
         if not force and now - float(_model_cache["checked"]) < 300:
             return {"models": list(_model_cache["models"]), "source": _model_cache["source"]}
     models: list[dict] = []
+    local_models: list[dict] = []
     source = "fallback"
     authenticated = codex_authenticated()
     if not authenticated:
@@ -328,8 +462,17 @@ def codex_model_catalog(*, force: bool = False) -> dict:
         except (OSError, RuntimeError, ValueError, json.JSONDecodeError, urllib.error.URLError):
             pass
     try:
-        if not models:
-            for item in read_codex_models():
+        local_models = read_codex_models()
+        if models:
+            local_by_id = {str(item.get("model") or item.get("id") or ""): item for item in local_models}
+            for model in models:
+                local = local_by_id.get(model["id"]) or {}
+                model["is_default"] = bool(local.get("isDefault"))
+                local_effort = str(local.get("defaultReasoningEffort") or "")
+                if not model.get("default_reasoning_effort") and local_effort in REASONING_EFFORTS:
+                    model["default_reasoning_effort"] = local_effort
+        else:
+            for item in local_models:
                 identifier = str(item.get("model") or item.get("id") or "")
                 if not re.fullmatch(r"[A-Za-z0-9._:\-]+", identifier):
                     continue
@@ -340,8 +483,8 @@ def codex_model_catalog(*, force: bool = False) -> dict:
                     "reasoning_levels": [],
                     "default_reasoning_effort": "",
                 })
-            if models:
-                source = "codex_app_server"
+        if models and source != "connected_chatgpt_account":
+            source = "codex_app_server"
     except (OSError, RuntimeError, subprocess.SubprocessError, queue.Empty):
         pass
     if not models:
@@ -445,9 +588,21 @@ def runs() -> list[dict]:
         latest = json_file(directory / "result.json") or {}
         loop = json_file(directory / "codex-loop-result.json")
         config = json_file(directory / "codex-loop-config.json")
+        policy = recorded_success_policy(config)
         frida_recoverable = bool(loop and config and frida_recovery_available(loop))
         checkpoint_recoverable = bool(loop and config and checkpoint_recovery_available(loop))
         resumable = bool(loop and loop.get("status") == "max_iterations" and config)
+        retryable = bool(loop and config and (directory / "original.apk").is_file())
+        actual_model = str(config.get("model") or "") if config else ""
+        actual_effort = str(config.get("reasoning_effort") or "") if config else ""
+        if (not actual_model or not actual_effort) and (directory / "agent").is_dir():
+            logs = sorted((directory / "agent").glob("iteration-*/codex.log"), key=lambda path: path.stat().st_mtime, reverse=True)
+            if logs:
+                header = logs[0].read_text(encoding="utf-8", errors="replace")[:4000]
+                model_match = re.search(r"(?m)^model:\s*(\S+)", header)
+                effort_match = re.search(r"(?m)^reasoning effort:\s*(\S+)", header)
+                actual_model = actual_model or (model_match.group(1) if model_match else "")
+                actual_effort = actual_effort or (effort_match.group(1) if effort_match else "")
         result.append({
             "id": directory.name,
             "path": workspace_relative(directory),
@@ -463,37 +618,78 @@ def runs() -> list[dict]:
             "frida_recoverable": frida_recoverable,
             "checkpoint_recoverable": checkpoint_recoverable,
             "continuable": bool(resumable or frida_recoverable or checkpoint_recoverable),
+            "retryable": retryable,
             "recovery_stage": str(((loop.get("checkpoint") or {}).get("stage") if loop else "") or ""),
             "reason": str((loop.get("reason") if loop else "") or ""),
             "frida_server": str(config.get("start_frida_server") if config else ""),
+            "reasoning_mode": str((config.get("reasoning_mode") if config else "single") or "single"),
+            "model": actual_model,
+            "reasoning_effort": actual_effort,
+            "specialist_count": int(config.get("specialist_count") or 3) if config else 3,
             "target": str(config.get("target") if config else latest.get("device") or ""),
             "transport": str(config.get("transport") if config else latest.get("transport") or ""),
+            "success_policy": policy,
+            "apk_name": Path(str(config.get("apk") or "original.apk")).name if config else "original.apk",
+            "observation_seconds": int(config.get("observation_seconds") or 15) if config else 15,
+            "run_seconds": int(config.get("run_seconds") or 20) if config else 20,
+            "derived_from_run": str(config.get("derived_from_run") or "") if config else "",
             "updated_utc": datetime.fromtimestamp(directory.stat().st_mtime, timezone.utc).isoformat(),
         })
     return result
 
 
-def job_state(job_id: str) -> dict:
+def job_log_tail(job_id: str, limit: int = 120_000) -> str:
+    log_path = STATE_ROOT / job_id / "output.log"
+    if not log_path.is_file():
+        return ""
+    with log_path.open("rb") as stream:
+        stream.seek(max(0, log_path.stat().st_size - limit))
+        return stream.read().decode("utf-8", errors="replace")
+
+
+def job_log_head(job_id: str, limit: int = 8_000) -> str:
+    log_path = STATE_ROOT / job_id / "output.log"
+    if not log_path.is_file():
+        return ""
+    with log_path.open("rb") as stream:
+        return stream.read(limit).decode("utf-8", errors="replace")
+
+
+def infer_job_run_id(state: dict, log_text: str) -> str:
+    recorded = str(state.get("run_id") or "")
+    if re.fullmatch(r"[A-Za-z0-9._-]+", recorded):
+        return recorded
+    matches = re.findall(r"(?:/workspace/)?runs/([A-Za-z0-9._-]+)", log_text)
+    return matches[-1] if matches else ""
+
+
+def infer_attempt_kind(state: dict, log_text: str) -> str:
+    recorded = str(state.get("attempt_kind") or "")
+    if recorded:
+        return recorded
+    if state.get("kind") == "start":
+        return "initial"
+    if "--observation-mode only" in log_text:
+        return "frida_recovery" if "--start-frida-server" in log_text else "observation_recovery"
+    if "--candidate-script" in log_text and "checkpoint-recovery" in log_text:
+        return "validation_recovery"
+    return "resume"
+
+
+def job_state(job_id: str, *, include_output: bool = True) -> dict:
     if not re.fullmatch(r"[a-f0-9]{32}", job_id):
         raise ValueError("Invalid job identifier.")
-    with _lock:
-        live = _jobs.get(job_id)
     stored = json_file(STATE_ROOT / job_id / "job.json")
     if not stored:
         raise FileNotFoundError("Job not found.")
     state = dict(stored)
-    if live:
-        state.update({"running": live["running"], "exit_code": live.get("exit_code"), "status": live.get("status")})
-    elif state.get("running"):
-        state.update({"running": False, "exit_code": None, "status": "interrupted"})
-    log_path = STATE_ROOT / job_id / "output.log"
-    if log_path.is_file():
-        with log_path.open("rb") as stream:
-            stream.seek(max(0, log_path.stat().st_size - 120_000))
-            state["stdout"] = stream.read().decode("utf-8", errors="replace")
-    else:
-        state["stdout"] = ""
-    state["stderr"] = ""
+    log_text = job_log_tail(job_id, 120_000 if include_output else 32_000)
+    inference_text = job_log_head(job_id) + "\n" + log_text
+    state["run_id"] = infer_job_run_id(state, inference_text)
+    state["attempt_kind"] = infer_attempt_kind(state, inference_text)
+    if include_output:
+        state["stdout"] = log_text
+        state["stderr"] = ""
     return state
 
 
@@ -502,65 +698,79 @@ def jobs() -> list[dict]:
     result = []
     for directory in directories[:20]:
         try:
-            result.append(job_state(directory.name))
+            result.append(job_state(directory.name, include_output=False))
         except (ValueError, FileNotFoundError):
             pass
+    previous_by_run: dict[str, str] = {}
+    count_by_run: dict[str, int] = {}
+    for state in sorted(result, key=lambda item: str(item.get("started_utc") or item.get("queued_utc") or "")):
+        run_id = str(state.get("run_id") or "")
+        if not run_id:
+            state.setdefault("attempt_number", 1)
+            state.setdefault("parent_job_id", "")
+            continue
+        count_by_run[run_id] = count_by_run.get(run_id, 0) + 1
+        state["attempt_number"] = int(state.get("attempt_number") or count_by_run[run_id])
+        state["parent_job_id"] = str(state.get("parent_job_id") or previous_by_run.get(run_id) or "")
+        previous_by_run[run_id] = state["id"]
     return result
+
+
+def resume_attempt_kind(run_dir: Path) -> str:
+    summary = json_file(run_dir / "codex-loop-result.json") or {}
+    if frida_recovery_available(summary):
+        return "frida_recovery"
+    if checkpoint_recovery_available(summary):
+        stage = str((summary.get("checkpoint") or {}).get("stage") or "")
+        return f"{stage}_recovery" if stage else "checkpoint_recovery"
+    return "resume"
 
 
 def start_job(kind: str, label: str, payload: dict) -> dict:
     if not codex_authenticated():
         raise ValueError("Codex is not signed in. Connect a ChatGPT account from the dashboard first.")
+    run_id = Path(payload["run"]).name if kind in {"resume", "retry"} else ""
+    existing = jobs() if run_id else []
+    related = [job for job in existing if job.get("run_id") == run_id]
+    parent_job_id = related[0]["id"] if related else ""
+    attempt_number = max((int(job.get("attempt_number") or 0) for job in related), default=0) + 1
+    attempt_kind = "diagnostic_retry" if kind == "retry" else (resume_attempt_kind(Path(payload["run"])) if kind == "resume" else "initial")
     with _lock:
-        if any(job["running"] for job in _jobs.values()):
-            raise ValueError("Another assessment job is already running.")
+        if any(job.get("running") or job.get("status") == "queued" for job in jobs()):
+            raise ValueError("Another assessment job is running or queued.")
         job_id = uuid.uuid4().hex
         directory = STATE_ROOT / job_id
         directory.mkdir(parents=True)
         state = {
-            "id": job_id, "kind": kind, "label": label, "started_utc": utc_now(),
-            "running": True, "exit_code": None, "status": "running",
+            "id": job_id, "kind": kind, "label": label, "queued_utc": utc_now(),
+            "started_utc": "", "running": False, "exit_code": None, "status": "queued",
+            "run_id": run_id, "attempt_number": attempt_number,
+            "attempt_kind": attempt_kind, "parent_job_id": parent_job_id,
         }
-        _jobs[job_id] = state
-        write_json(directory / "job.json", state)
-
-    def worker() -> None:
-        exit_code = 1
-        status = "error"
-        with (directory / "output.log").open("a", encoding="utf-8", buffering=1) as log:
-            try:
-                runner = LoopRunner(log)
-                if kind == "resume":
-                    status, run_dir = runner.resume(payload)
-                else:
-                    status, run_dir = runner.new(payload)
-                log.write(f"\nLoop finished: {status}\nRun directory: {run_dir}\n")
-                exit_code = 0 if status in {"success", "success_without_bypass"} else 1
-            except EnvironmentFailure as error:
-                log.write(f"\nerror: {error}\n")
-                status = "environment_error"
-                exit_code = 2
-            except (LoopError, ValueError) as error:
-                log.write(f"\nerror: {error}\n")
-                status = "needs_input"
-                exit_code = 2
-            except (OSError, subprocess.SubprocessError) as error:
-                log.write(f"\nerror: {error}\n")
-                status = "environment_error"
-                exit_code = 2
-            finally:
-                with _lock:
-                    state.update({"running": False, "exit_code": exit_code, "status": status, "completed_utc": utc_now()})
-                    write_json(directory / "job.json", state)
-
-    threading.Thread(target=worker, name=f"mob-ai-{job_id}", daemon=True).start()
+        atomic_write_json(directory / "request.json", {"kind": kind, "label": label, "payload": payload})
+        atomic_write_json(directory / "job.json", state)
     return job_state(job_id)
 
 
 def parse_start(body: dict) -> tuple[str, dict]:
     if not body.get("authorized"):
         raise ValueError("Confirm ownership or explicit testing authorization.")
-    apk = resolve_workspace_item(str(body.get("apk") or ""))
+    derived_from_run = str(body.get("source_run") or "")
+    derived_from_policy_sha256 = ""
+    label = ""
+    if derived_from_run:
+        token(derived_from_run, "source run", r"[A-Za-z0-9._-]+")
+        source_dir = resolve_run_directory(derived_from_run)
+        source_config = json_file(source_dir / "codex-loop-config.json") or {}
+        apk = source_dir / "original.apk"
+        if not apk.is_file() or sha256(apk) != str(source_config.get("apk_sha256") or ""):
+            raise ValueError("The reassessment source APK is missing or has changed.")
+        derived_from_policy_sha256 = str(source_config.get("success_spec_sha256") or "")
+        source_report = json_file(source_dir / "report.json") or {}
+        label = f"{source_report.get('package') or derived_from_run} policy reassessment"
+    else:
+        apk = resolve_workspace_item(str(body.get("apk") or ""))
+        label = apk.name
     if apk.suffix.lower() != ".apk":
         raise ValueError("Select an APK file.")
     transport = str(body.get("transport") or "")
@@ -597,12 +807,21 @@ def parse_start(body: dict) -> tuple[str, dict]:
     reasoning_effort = str(body.get("reasoning_effort") or "")
     if reasoning_effort and reasoning_effort not in REASONING_EFFORTS:
         raise ValueError("Invalid thinking level.")
+    reasoning_mode = str(body.get("reasoning_mode") or "single")
+    if reasoning_mode not in REASONING_MODES:
+        raise ValueError("Invalid reasoning mode.")
+    specialist_count = int(body.get("specialist_count") or 3)
+    if not 2 <= specialist_count <= 3:
+        raise ValueError("Parallel specialist count must be 2 or 3.")
     spec = success_policy(body)
-    return apk.name, {
+    return label, {
         "apk": str(apk), "success_spec": str(spec), "transport": transport, "target": target,
         "max_iterations": maximum, "observation_seconds": observation, "run_seconds": run_seconds,
         "install": bool(body.get("install")), "frida_server": frida_server, "package": package,
         "model": model, "reasoning_effort": reasoning_effort, "readiness_token": readiness_token,
+        "reasoning_mode": reasoning_mode, "specialist_count": specialist_count,
+        "derived_from_run": derived_from_run,
+        "derived_from_policy_sha256": derived_from_policy_sha256,
     }
 
 
@@ -623,13 +842,36 @@ def parse_resume(body: dict) -> tuple[str, dict]:
     reasoning_effort = str(body.get("reasoning_effort") or "")
     if reasoning_effort and reasoning_effort not in REASONING_EFFORTS:
         raise ValueError("Invalid thinking level.")
+    reasoning_mode = str(body.get("reasoning_mode") or "")
+    if reasoning_mode and reasoning_mode not in REASONING_MODES:
+        raise ValueError("Invalid reasoning mode.")
+    specialist_count = int(body.get("specialist_count") or 3)
+    if not 2 <= specialist_count <= 3:
+        raise ValueError("Parallel specialist count must be 2 or 3.")
     frida_server = str(body.get("frida_server") or "")
     if frida_server:
         token(frida_server, "Frida Server path", r"/[A-Za-z0-9_./-]+")
+    policy_hash = str(body.get("success_spec_sha256") or "")
+    if policy_hash:
+        token(policy_hash, "success-policy hash", r"[a-f0-9]{64}")
+        config = json_file(run_dir / "codex-loop-config.json") or {}
+        recorded_hash = str(config.get("success_spec_sha256") or "")
+        if recorded_hash and policy_hash != recorded_hash:
+            raise ValueError("The selected success policy does not match this assessment run.")
     return run_dir.name, {
         "run": str(run_dir), "max_iterations": maximum, "model": model,
         "reasoning_effort": reasoning_effort, "frida_server": frida_server,
+        "reasoning_mode": reasoning_mode, "specialist_count": specialist_count,
+        "success_spec_sha256": policy_hash,
     }
+
+
+def parse_retry(body: dict) -> tuple[str, dict]:
+    label, payload = parse_resume(body)
+    run_dir = Path(payload["run"])
+    if not (run_dir / "codex-loop-result.json").is_file():
+        raise ValueError("Diagnostic retry requires a completed assessment run.")
+    return label, payload
 
 
 @app.after_request
@@ -660,7 +902,11 @@ def upload_too_large(_error):
 
 @app.get("/api/health")
 def health():
-    return jsonify(status="ok", codex_available=bool(shutil.which("codex")))
+    worker_age = time.time() - HEARTBEAT_PATH.stat().st_mtime if HEARTBEAT_PATH.is_file() else None
+    return jsonify(
+        status="ok", codex_available=bool(shutil.which("codex")),
+        worker_available=worker_age is not None and worker_age < 30,
+    )
 
 
 @app.get("/api/overview")
@@ -889,6 +1135,41 @@ def list_runs():
     return jsonify(runs=runs())
 
 
+@app.get("/api/runs/<run_id>/artifacts")
+def list_run_artifacts(run_id: str):
+    try:
+        manifest = artifact_manifest(run_id)
+    except FileNotFoundError as error:
+        return jsonify(error=str(error)), 404
+    manifest.pop("allowed", None)
+    return jsonify(manifest)
+
+
+@app.get("/api/runs/<run_id>/artifacts/content")
+def preview_run_artifact(run_id: str):
+    try:
+        path = resolve_run_artifact(run_id, str(request.args.get("path") or ""))
+    except FileNotFoundError as error:
+        return jsonify(error=str(error)), 404
+    if path.suffix.lower() not in ARTIFACT_PREVIEW_SUFFIXES:
+        return jsonify(error="This artifact is download-only."), 400
+    limit = 1_000_000
+    with path.open("rb") as stream:
+        payload = stream.read(limit + 1)
+    truncated = len(payload) > limit
+    content = payload[:limit].decode("utf-8", errors="replace")
+    return jsonify(path=path.name, content=content, truncated=truncated)
+
+
+@app.get("/api/runs/<run_id>/artifacts/download")
+def download_run_artifact(run_id: str):
+    try:
+        path = resolve_run_artifact(run_id, str(request.args.get("path") or ""))
+    except FileNotFoundError as error:
+        return jsonify(error=str(error)), 404
+    return send_file(path, as_attachment=True, download_name=path.name, max_age=0)
+
+
 @app.get("/api/jobs")
 def list_jobs():
     return jsonify(jobs=jobs())
@@ -912,6 +1193,12 @@ def start():
 def resume():
     label, payload = parse_resume(request.get_json(force=True, silent=False) or {})
     return jsonify(start_job("resume", label, payload)), 202
+
+
+@app.post("/api/retry")
+def retry():
+    label, payload = parse_retry(request.get_json(force=True, silent=False) or {})
+    return jsonify(start_job("retry", label, payload)), 202
 
 
 @app.get("/")

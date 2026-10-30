@@ -4,6 +4,12 @@
 out
 ghidra-projects
 runs
+uploads
+policies/generated
+**/.state
+**/__pycache__
+**/*.pyc
+**/*.log
 *.apk
 *.aab
 *.dex

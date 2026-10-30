@@ -12,8 +12,9 @@ The repository is mounted at `/workspace`. Ghidra user state and ADB keys live i
 
 ## One-command web application
 
-The UI and autonomous reasoning loop run in a Flask/Gunicorn web service, not in
-PowerShell. No OpenAI API key is required. Launch the complete stack with one command:
+The UI runs in a Flask/Gunicorn control service and assessments run in a separate
+durable worker, not in PowerShell. No OpenAI API key is required. Launch the complete
+stack with one command:
 
 ```powershell
 docker compose up -d --build --wait
@@ -32,17 +33,21 @@ The dashboard provides:
 - device discovery through the toolbox container;
 - observation, runtime, Frida Server, and iteration controls;
 - Codex model and thinking-level dropdowns populated from the connected ChatGPT account's model catalog;
-- background start and resume jobs with live stdout/stderr;
+- durable queued start, resume, and diagnostic-retry jobs with live output;
 - a run ledger showing findings, observations, status and resumability;
+- a per-run artifact browser for findings, hooks, comparisons, crash logs, Codex decisions, saved Ghidra results, and success-policy checks;
 - authorization confirmation before every start or resume operation.
 
 Uploaded APKs are stored in the ignored `uploads/` directory and validated as APK/ZIP
 files before a run starts. The default limit is 1024 MB. The host port binds only to
 `127.0.0.1`. The Flask API validates paths under this
 workspace, exposes fixed operations rather than arbitrary shell commands, and keeps
-job state under the ignored `ui/.state/` directory. The web container invokes the
-Python orchestrator and Codex CLI directly. The separate Ghidra service is reachable
-only on the private Compose network and requires a bearer token. Wireless pairing
+job requests and state under the ignored `ui/.state/` directory using atomic writes.
+The dedicated worker claims queued jobs on disk, so restarting the web UI does not
+interrupt an assessment. If the worker itself stops during device interaction, the
+attempt is preserved as `interrupted` instead of silently repeating side effects.
+The separate Ghidra service is reachable only on the private Compose network and
+requires a bearer token. Wireless pairing
 codes are submitted directly to `adb pair` over stdin, cleared from the form after
 every attempt, and never stored in run configuration or job logs.
 
@@ -222,6 +227,8 @@ debugging screen before starting the assessment. Pairing is normally required on
 
 Before **Start assessment** is enabled, run **Device readiness** for the exact target. The wizard checks ADB state, root access, ABI, Android SDK, temporary storage, SELinux, Frida client/server versions, port forwarding and Frida connectivity. You may optionally select a trusted Frida Server binary to push to the configured device path and start it. A successful check issues a ten-minute token bound to the target, transport and Frida path; changing any of those values requires another check. Pairing codes are never included in readiness state.
 
+**Reasoning mode** controls each Codex iteration. **Single agent** explicitly disables multi-agent delegation. **Parallel specialists** enables it and allows two or three read-only reviewers to inspect independent static, runtime, and relevant native evidence concurrently. Specialists inherit the configured read-only Ghidra MCP access but cannot edit the hook or operate the device; only the root agent may update `candidate.js` and return the structured decision. Parallel mode can improve complex evidence review but may use more ChatGPT-plan capacity than single mode.
+
 Each iteration is auditable under `runs/RUN_ID/agent/iteration-N/` and contains the prompt, candidate hook, Codex decision, Codex log, Frida/logcat output, validation result, and combined record. `codex-loop-result.json` records the terminal status and complete history. The loop never rebuilds or resigns the APK, and it directs Codex to request human review for remote attestation or unsupported/high-risk changes.
 
 If a run ends with `max_iterations`, select it in the UI and resume it. The iteration
@@ -229,6 +236,19 @@ count is the number of **additional** attempts. The next iteration is seeded fro
 last validated candidate, prior records remain append-only, and numbering continues.
 The recorded device, package, success specification, run window, and Frida Server
 path are reused. A different Codex model may be selected for the additional attempts.
+
+The **Continue / retry** panel displays the success policy bound to the selected
+assessment, including its checks, repeat threshold, and baseline requirement. The
+policy is hash-verified and cannot be changed during continuation; start a new
+assessment when the success criteria themselves need to change.
+
+Select an assessment under **Continue / retry**, then use **Reassess with a different
+policy** to create that new assessment without uploading the APK again. The form
+copies the prior target and policy as editable starting values, requires a fresh
+device-readiness check, and records the new run's `derived_from_run` and prior policy
+hash. When the APK hash matches, JADX and native static artifacts are copied from the
+source run; observation and every success-policy validation are always rerun from
+scratch.
 
 Resume validates the original APK hash, success-policy hash, previous candidate hash, target transport and target identity. It refuses successful, non-recoverable `human_review`, `no_progress`, corrupted, or operational-error runs. You may supply `-Apk`, `-SuccessSpec`, `-Device`, or `-WirelessConnect` again for clarity, but their identities must match the recorded run. A changed success policy starts a new assessment rather than silently changing the old run's goalposts.
 

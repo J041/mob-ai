@@ -2,17 +2,21 @@ from __future__ import annotations
 
 from io import BytesIO
 import json
+from pathlib import Path
 import subprocess
+import tempfile
 import unittest
 from unittest.mock import patch
 
 from ui.app import (
-    _readiness, app, codex_model_catalog, parse_resume, parse_start,
-    resolve_workspace_item, sign_out_codex, strip_terminal_controls, success_policy,
+    _readiness, app, artifact_manifest, codex_model_catalog, parse_resume, parse_retry, parse_start,
+    infer_attempt_kind, infer_job_run_id, resolve_workspace_item, sign_out_codex,
+    recorded_success_policy, start_job, strip_terminal_controls, success_policy,
 )
 from ui.orchestrator import (
-    WORKSPACE, attempt_fingerprint, codex_config_overrides, codex_reasoning_args,
-    checkpoint_recovery_available, frida_recovery_available,
+    WORKSPACE, LoopRunner, attempt_fingerprint, codex_config_overrides,
+    codex_multi_agent_args, codex_reasoning_args, checkpoint_recovery_available,
+    frida_recovery_available,
 )
 
 
@@ -26,11 +30,74 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()["status"], "ok")
 
+    @patch("ui.app.jobs", return_value=[])
+    @patch("ui.app.codex_authenticated", return_value=True)
+    def test_start_job_is_durably_queued(self, _authenticated, _jobs) -> None:
+        with tempfile.TemporaryDirectory() as temp, patch("ui.app.STATE_ROOT", Path(temp)):
+            state = start_job("start", "sample.apk", {"apk": "/workspace/uploads/sample.apk"})
+            directory = Path(temp) / state["id"]
+            stored = json.loads((directory / "job.json").read_text(encoding="utf-8"))
+            queued_request = json.loads((directory / "request.json").read_text(encoding="utf-8"))
+        self.assertEqual(stored["status"], "queued")
+        self.assertFalse(stored["running"])
+        self.assertEqual(queued_request["payload"]["apk"], "/workspace/uploads/sample.apk")
+
     def test_overview_contract(self) -> None:
         payload = self.client.get("/api/overview").get_json()
         self.assertIn("codex", payload)
         self.assertIn("runs", payload)
         self.assertIn("success_specs", payload)
+
+    def test_reassessment_entry_is_in_continue_workflow(self) -> None:
+        response = self.client.get("/")
+        page = response.get_data(as_text=True)
+        response.close()
+        self.assertIn('id="reassessSelected"', page)
+        self.assertIn('id="reassessmentBanner" hidden', page)
+        self.assertNotIn("â", page)
+
+    def test_attempt_history_uses_nonshrinking_scroll_content(self) -> None:
+        response = self.client.get("/styles.css")
+        styles = response.get_data(as_text=True)
+        response.close()
+        self.assertIn(".job-strip { flex: 0 0 clamp", styles)
+        self.assertIn("display: flex; flex-direction: column", styles)
+        self.assertIn(".job-group { flex: 0 0 auto", styles)
+
+    def test_assessment_rows_share_grid_columns(self) -> None:
+        response = self.client.get("/styles.css")
+        styles = response.get_data(as_text=True)
+        response.close()
+        self.assertIn(".run-row { display: grid; grid-column: 1 / -1; grid-template-columns: subgrid", styles)
+
+    def test_artifact_browser_classifies_previews_and_downloads(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            run = root / "run-123"
+            (run / "frida").mkdir(parents=True)
+            (run / "logs").mkdir()
+            (run / "agent" / "iteration-1").mkdir(parents=True)
+            (run / "ghidra").mkdir()
+            (run / "report.json").write_text('{"package":"com.example"}', encoding="utf-8")
+            (run / "result.json").write_text('{"success":false,"checks":[]}', encoding="utf-8")
+            (run / "frida" / "bypass.js").write_text("Java.perform(() => {});", encoding="utf-8")
+            (run / "logs" / "observation-logcat.log").write_text("SIGBUS", encoding="utf-8")
+            (run / "agent" / "iteration-1" / "decision.json").write_text('{"decision":"continue"}', encoding="utf-8")
+            (run / "ghidra" / "native-analysis.txt").write_text("function guard", encoding="utf-8")
+            with patch("ui.app.RUNS_ROOT", root):
+                manifest = artifact_manifest("run-123")
+                categories = {item["id"]: item["files"] for item in manifest["categories"]}
+                self.assertEqual(categories["hooks"][0]["path"], "frida/bypass.js")
+                self.assertEqual(categories["ghidra"][0]["path"], "ghidra/native-analysis.txt")
+                preview = self.client.get("/api/runs/run-123/artifacts/content?path=logs/observation-logcat.log")
+                download = self.client.get("/api/runs/run-123/artifacts/download?path=frida/bypass.js")
+                traversal = self.client.get("/api/runs/run-123/artifacts/content?path=../outside.txt")
+            self.assertEqual(preview.status_code, 200)
+            self.assertEqual(preview.get_json()["content"], "SIGBUS")
+            self.assertEqual(download.status_code, 200)
+            self.assertIn("attachment", download.headers["Content-Disposition"])
+            download.close()
+            self.assertEqual(traversal.status_code, 404)
 
     def test_start_requires_authorization(self) -> None:
         response = self.client.post("/api/start", json={})
@@ -63,6 +130,34 @@ class WebAppTests(unittest.TestCase):
                 "frida_server": "/data/local/tmp/frida-server",
                 "readiness_token": "ready-token", "policy_preset": "basic",
             })
+
+    @patch("ui.app.success_policy")
+    def test_reassessment_uses_recorded_apk_and_links_source(self, policy) -> None:
+        import hashlib
+        with tempfile.TemporaryDirectory(dir=WORKSPACE / "runs") as temp:
+            source = Path(temp)
+            apk = source / "original.apk"
+            apk.write_bytes(b"PK\x03\x04same-apk")
+            digest = hashlib.sha256(apk.read_bytes()).hexdigest()
+            (source / "report.json").write_text('{"package":"com.example"}', encoding="utf-8")
+            (source / "codex-loop-config.json").write_text(json.dumps({
+                "apk_sha256": digest, "success_spec_sha256": "a" * 64,
+            }), encoding="utf-8")
+            policy.return_value = WORKSPACE / "policies" / "generated" / "policy.json"
+            _readiness["reassess-ready"] = {
+                "target": "emulator-5554", "transport": "adb",
+                "frida_server": "/data/local/tmp/frida-server", "expires": float("inf"),
+            }
+            _, payload = parse_start({
+                "authorized": True, "source_run": source.name, "transport": "adb",
+                "target": "emulator-5554", "max_iterations": 3,
+                "observation_seconds": 15, "run_seconds": 20,
+                "frida_server": "/data/local/tmp/frida-server",
+                "readiness_token": "reassess-ready", "policy_preset": "basic",
+            })
+        self.assertEqual(payload["derived_from_run"], source.name)
+        self.assertEqual(payload["derived_from_policy_sha256"], "a" * 64)
+        self.assertEqual(Path(payload["apk"]).name, "original.apk")
 
     def test_apk_upload_is_stored_under_uploads(self) -> None:
         response = self.client.post(
@@ -181,6 +276,22 @@ class WebAppTests(unittest.TestCase):
         finally:
             path.unlink(missing_ok=True)
 
+    def test_recorded_success_policy_exposes_bound_policy_metadata(self) -> None:
+        path = success_policy({"policy_preset": "basic", "policy_repeat": 2})
+        try:
+            import hashlib
+            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            metadata = recorded_success_policy({
+                "success_spec": str(path.relative_to(WORKSPACE)).replace("\\", "/"),
+                "success_spec_sha256": digest,
+            })
+            self.assertTrue(metadata["valid"])
+            self.assertEqual(metadata["name"], "Basic launch")
+            self.assertEqual(metadata["repeat"], 2)
+            self.assertIn("process_alive", metadata["checks"])
+        finally:
+            path.unlink(missing_ok=True)
+
     @patch("ui.app.codex_authenticated", return_value=True)
     @patch("ui.app.read_connected_account_models", side_effect=RuntimeError("catalog unavailable"))
     @patch("ui.app.read_codex_models")
@@ -210,10 +321,16 @@ class WebAppTests(unittest.TestCase):
             "reasoning_levels": [{"effort": "high", "description": "Deep reasoning"}],
             "default_reasoning_effort": "high",
         }]
+        read_local.return_value = [{
+            "id": "account-model", "model": "account-model",
+            "displayName": "Account Model", "isDefault": True,
+            "defaultReasoningEffort": "high",
+        }]
         catalog = codex_model_catalog(force=True)
         self.assertEqual(catalog["source"], "connected_chatgpt_account")
         self.assertEqual(catalog["models"][0]["id"], "account-model")
-        read_local.assert_not_called()
+        self.assertTrue(catalog["models"][0]["is_default"])
+        read_local.assert_called_once()
 
     @patch("ui.app.resolve_workspace_item")
     def test_resume_accepts_thinking_level(self, resolve) -> None:
@@ -224,6 +341,54 @@ class WebAppTests(unittest.TestCase):
             "reasoning_effort": "xhigh",
         })
         self.assertEqual(request["reasoning_effort"], "xhigh")
+
+    @patch("ui.app.json_file")
+    @patch("ui.app.resolve_workspace_item")
+    def test_resume_rejects_policy_from_another_run(self, resolve, read_json) -> None:
+        resolve.return_value = WORKSPACE / "runs" / "example"
+        read_json.return_value = {"success_spec_sha256": "a" * 64}
+        with self.assertRaisesRegex(ValueError, "does not match"):
+            parse_resume({
+                "authorized": True, "run": "runs/example", "max_iterations": 2,
+                "success_spec_sha256": "b" * 64,
+            })
+
+    @patch("ui.app.resolve_workspace_item")
+    def test_retry_accepts_any_completed_run(self, resolve) -> None:
+        run = WORKSPACE / "runs" / "example"
+        resolve.return_value = run
+        with patch.object(Path, "is_file", return_value=True):
+            label, request = parse_retry({
+                "authorized": True, "run": "runs/example", "max_iterations": 2,
+                "reasoning_effort": "high",
+            })
+        self.assertEqual(label, "example")
+        self.assertEqual(request["run"], str(run))
+
+    @patch("ui.app.resolve_workspace_item")
+    def test_retry_requires_completed_run(self, resolve) -> None:
+        resolve.return_value = WORKSPACE / "runs" / "unfinished"
+        with self.assertRaisesRegex(ValueError, "completed assessment"):
+            parse_retry({"authorized": True, "run": "runs/unfinished", "max_iterations": 1})
+
+    @patch("ui.app.resolve_workspace_item")
+    def test_resume_accepts_parallel_specialists(self, resolve) -> None:
+        resolve.return_value = WORKSPACE / "runs" / "example"
+        _, request = parse_resume({
+            "authorized": True, "run": "runs/example", "max_iterations": 2,
+            "reasoning_mode": "parallel", "specialist_count": 2,
+        })
+        self.assertEqual(request["reasoning_mode"], "parallel")
+        self.assertEqual(request["specialist_count"], 2)
+
+    @patch("ui.app.resolve_workspace_item")
+    def test_resume_rejects_invalid_parallel_specialist_count(self, resolve) -> None:
+        resolve.return_value = WORKSPACE / "runs" / "example"
+        with self.assertRaisesRegex(ValueError, "specialist count"):
+            parse_resume({
+                "authorized": True, "run": "runs/example", "max_iterations": 2,
+                "reasoning_mode": "parallel", "specialist_count": 8,
+            })
 
     @patch("ui.app.resolve_workspace_item")
     def test_resume_accepts_device_frida_server_path(self, resolve) -> None:
@@ -259,6 +424,20 @@ class WebAppTests(unittest.TestCase):
         )
         self.assertEqual(codex_reasoning_args({}), [])
 
+    def test_codex_multi_agent_feature_is_explicit_per_mode(self) -> None:
+        self.assertEqual(codex_multi_agent_args({"reasoning_mode": "parallel"}), ["--enable", "multi_agent"])
+        self.assertEqual(codex_multi_agent_args({"reasoning_mode": "single"}), ["--disable", "multi_agent"])
+
+    def test_parallel_prompt_bounds_specialists_and_writes(self) -> None:
+        run = WORKSPACE / "runs" / "example"
+        prompt = LoopRunner._prompt(
+            run, run / "agent" / "iteration-1" / "candidate.js", None, 1, 1, 3,
+            reasoning_mode="parallel", specialist_count=3,
+        )
+        self.assertIn("no more than 3 read-only subagents", prompt)
+        self.assertIn("root agent is the only writer", prompt)
+        self.assertIn("native specialist", prompt)
+
     def test_auth_output_strips_terminal_controls(self) -> None:
         value = "\x1b[94mhttps://auth.openai.com/codex/device\x1b[0m\r\n\x1b[90mABCD-EFGHIJ\x1b[0m"
         self.assertEqual(
@@ -280,6 +459,19 @@ class WebAppTests(unittest.TestCase):
     def test_workspace_path_cannot_escape(self) -> None:
         with self.assertRaises(ValueError):
             resolve_workspace_item("../outside.apk")
+
+    def test_job_history_infers_run_and_recovery_kind(self) -> None:
+        log = (
+            "+ python3 pipeline.py --resume /workspace/runs/20261028T144917Z-239cb4621bdb "
+            "--observation-mode only --start-frida-server /data/local/tmp/frida-server\n"
+            "Run directory: /workspace/runs/20261028T144917Z-239cb4621bdb\n"
+        )
+        state = {"kind": "resume"}
+        self.assertEqual(infer_job_run_id(state, log), "20261028T144917Z-239cb4621bdb")
+        self.assertEqual(infer_attempt_kind(state, log), "frida_recovery")
+
+    def test_initial_job_kind_is_preserved(self) -> None:
+        self.assertEqual(infer_attempt_kind({"kind": "start"}, ""), "initial")
 
     def test_attempt_fingerprint_is_stable_and_sensitive(self) -> None:
         first = attempt_fingerprint("abc", {"success": False})

@@ -188,6 +188,10 @@ def codex_reasoning_args(config: dict[str, Any]) -> list[str]:
     return ["--config", f"model_reasoning_effort={json.dumps(effort)}"] if effort else []
 
 
+def codex_multi_agent_args(config: dict[str, Any]) -> list[str]:
+    return ["--enable", "multi_agent"] if config.get("reasoning_mode") == "parallel" else ["--disable", "multi_agent"]
+
+
 class LoopRunner:
     def __init__(self, log: TextIO):
         self.log = log
@@ -209,6 +213,10 @@ class LoopRunner:
             "start_frida_server": request.get("frida_server") or "",
             "model": request.get("model") or "",
             "reasoning_effort": request.get("reasoning_effort") or "",
+            "reasoning_mode": request.get("reasoning_mode") or "single",
+            "specialist_count": int(request.get("specialist_count") or 3),
+            "derived_from_run": str(request.get("derived_from_run") or ""),
+            "derived_from_policy_sha256": str(request.get("derived_from_policy_sha256") or ""),
         }
         command = pipeline_args(
             container_path(apk), "--authorized", "--strategy", "frida",
@@ -216,6 +224,16 @@ class LoopRunner:
             "--run-seconds", str(config["run_seconds"]), "--success-spec", container_path(success_spec),
             *target_args(config),
         )
+        if config["derived_from_run"]:
+            source_run = (RUNS_ROOT / config["derived_from_run"]).resolve()
+            try:
+                source_run.relative_to(RUNS_ROOT.resolve())
+            except ValueError as error:
+                raise LoopError("Reassessment source escaped the runs directory.") from error
+            source_apk = source_run / "original.apk"
+            if not source_run.is_dir() or not source_apk.is_file() or sha256(source_apk) != config["apk_sha256"]:
+                raise LoopError("Reassessment source does not contain the same APK.")
+            command.extend(["--reuse-static", container_path(source_run)])
         if request.get("install"):
             command.append("--install")
         if config["start_frida_server"]:
@@ -255,7 +273,7 @@ class LoopRunner:
         )
         return status, run_dir
 
-    def resume(self, request: dict[str, Any]) -> tuple[str, Path]:
+    def _load_existing_run(self, request: dict[str, Any]) -> tuple[Path, dict[str, Any], dict[str, Any], list[Any]]:
         run_dir = Path(request["run"]).resolve()
         try:
             run_dir.relative_to(RUNS_ROOT.resolve())
@@ -269,6 +287,9 @@ class LoopRunner:
         if missing:
             raise LoopError(f"Cannot resume; required artifact is missing: {missing[0]}")
         config = read_json(run_dir / "codex-loop-config.json")
+        requested_policy_hash = str(request.get("success_spec_sha256") or "")
+        if requested_policy_hash and requested_policy_hash != str(config.get("success_spec_sha256") or ""):
+            raise LoopError("The selected success policy does not match this assessment run.")
         summary = read_json(run_dir / "codex-loop-result.json")
         if config.get("version") != 1:
             raise LoopError("Unsupported loop configuration version.")
@@ -278,6 +299,10 @@ class LoopRunner:
         if not spec.is_file() or sha256(spec) != config["success_spec_sha256"]:
             raise LoopError("The recorded success policy is missing or has changed.")
         records = list(summary.get("iterations") or [])
+        return run_dir, config, summary, records
+
+    def resume(self, request: dict[str, Any]) -> tuple[str, Path]:
+        run_dir, config, summary, records = self._load_existing_run(request)
         if checkpoint_recovery_available(summary):
             resumed_frida = str(request.get("frida_server") or config.get("start_frida_server") or "")
             checkpoint = summary.get("checkpoint") or {}
@@ -287,12 +312,16 @@ class LoopRunner:
                     additional=int(request["max_iterations"]),
                     model=str(request.get("model") or ""),
                     reasoning_effort=str(request.get("reasoning_effort") or ""),
+                    reasoning_mode=str(request.get("reasoning_mode") or ""),
+                    specialist_count=int(request.get("specialist_count") or 3),
                 )
             return self._recover_validation(
                 run_dir, config, records, checkpoint,
                 additional=int(request["max_iterations"]),
                 model=str(request.get("model") or ""),
                 reasoning_effort=str(request.get("reasoning_effort") or ""),
+                reasoning_mode=str(request.get("reasoning_mode") or ""),
+                specialist_count=int(request.get("specialist_count") or 3),
             )
         if summary.get("status") == "human_review" and frida_recovery_available(summary):
             frida_server = str(request.get("frida_server") or "")
@@ -303,6 +332,8 @@ class LoopRunner:
                 additional=int(request["max_iterations"]),
                 model=str(request.get("model") or ""),
                 reasoning_effort=str(request.get("reasoning_effort") or ""),
+                reasoning_mode=str(request.get("reasoning_mode") or ""),
+                specialist_count=int(request.get("specialist_count") or 3),
             )
         if not records:
             raise LoopError("The prior run has no completed iteration records.")
@@ -323,6 +354,9 @@ class LoopRunner:
             resumed_config["model"] = request["model"]
         if request.get("reasoning_effort"):
             resumed_config["reasoning_effort"] = request["reasoning_effort"]
+        if request.get("reasoning_mode"):
+            resumed_config["reasoning_mode"] = request["reasoning_mode"]
+            resumed_config["specialist_count"] = int(request.get("specialist_count") or 3)
         status = self._iterations(
             run_dir, resumed_config, records, start_iteration=start,
             additional=int(request["max_iterations"]), previous_candidate=previous_candidate,
@@ -330,9 +364,109 @@ class LoopRunner:
         )
         return status, run_dir
 
+    def retry_with_diagnostics(self, request: dict[str, Any]) -> tuple[str, Path]:
+        """Rerun observation for any completed run while preserving its evidence."""
+        run_dir, config, _summary, records = self._load_existing_run(request)
+        retry_number = 1
+        while (run_dir / "agent" / f"diagnostic-retry-{retry_number}").exists():
+            retry_number += 1
+        retry_dir = run_dir / "agent" / f"diagnostic-retry-{retry_number}"
+        before_dir = retry_dir / "before"
+        after_dir = retry_dir / "after"
+        retry_dir.mkdir(parents=True)
+        archived = {
+            "result.json", "observations.json", "adaptive-plan.json", "codex-loop-result.json",
+            "logs/observation-frida.log", "logs/observation-logcat.log",
+            "logs/diagnostic-crash-buffer.log", "logs/diagnostic-exit-info.log",
+            "logs/diagnostic-native-crashes.log", "logs/diagnostic-tombstone-access.log",
+        }
+        for relative in archived:
+            source = run_dir / relative
+            if source.is_file():
+                destination = before_dir / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, destination)
+        write_json(retry_dir / "request.json", {
+            "retry": retry_number,
+            "mode": "diagnostics",
+            "previous_status": _summary.get("status") or "unknown",
+            "started_utc": datetime.now(timezone.utc).isoformat(),
+        })
+        result_path = run_dir / "result.json"
+        result_path.unlink(missing_ok=True)
+        command = pipeline_args(
+            "--authorized", "--strategy", "frida", "--resume", container_path(run_dir),
+            "--observation-mode", "only", "--diagnostics",
+            "--observation-seconds", str(config["observation_seconds"]),
+            "--run-seconds", str(config["run_seconds"]),
+            "--success-spec", f"/workspace/{config['success_spec']}",
+            *target_args(config),
+        )
+        frida_server = str(request.get("frida_server") or config.get("start_frida_server") or "")
+        if frida_server:
+            command.extend(["--start-frida-server", frida_server])
+        if config.get("package"):
+            command.extend(["--package", config["package"]])
+        exit_code, _ = run_logged(command, self.log, artifact=retry_dir / "pipeline.log")
+        if exit_code not in {0, 1} or not result_path.is_file():
+            previous_result = before_dir / "result.json"
+            if previous_result.is_file():
+                shutil.copy2(previous_result, result_path)
+            detail = "Diagnostic retry failed operationally; verify device and Frida readiness, then retry again."
+            write_summary(
+                run_dir, "environment_error", records, detail,
+                checkpoint={"stage": "observation"}, reason="diagnostic_retry_failure",
+            )
+            return "environment_error", run_dir
+
+        recovered = read_json(result_path)
+        for relative in archived - {"codex-loop-result.json"}:
+            source = run_dir / relative
+            if source.is_file():
+                destination = after_dir / relative
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, destination)
+        previous_log = (before_dir / "logs" / "observation-logcat.log").read_text(encoding="utf-8", errors="replace") if (before_dir / "logs" / "observation-logcat.log").is_file() else ""
+        current_log = (run_dir / "logs" / "observation-logcat.log").read_text(encoding="utf-8", errors="replace") if (run_dir / "logs" / "observation-logcat.log").is_file() else ""
+        signal_pattern = re.compile(r"SIG[A-Z]+|BUS_[A-Z]+", re.I)
+        write_json(retry_dir / "comparison.json", {
+            "retry": retry_number,
+            "previous_signals": sorted(set(signal_pattern.findall(previous_log))),
+            "current_signals": sorted(set(signal_pattern.findall(current_log))),
+            "same_success_result": bool((_summary.get("status") in {"success", "success_without_bypass"}) == bool(recovered.get("success"))),
+            "diagnostic_files": (read_json(run_dir / "observations.json").get("diagnostics") or {}) if (run_dir / "observations.json").is_file() else {},
+        })
+
+        resumed_config = dict(config)
+        resumed_config["start_frida_server"] = frida_server
+        resumed_config["package"] = str(recovered.get("package") or resumed_config.get("package") or "")
+        resumed_config["baseline"] = {"passed": bool(recovered.get("success")), "checks": recovered.get("checks") or []}
+        history = list(resumed_config.get("diagnostic_retry_history") or [])
+        history.append({"retry": retry_number, "directory": workspace_relative(retry_dir), "completed_utc": datetime.now(timezone.utc).isoformat()})
+        resumed_config["diagnostic_retry_history"] = history
+        for field in ("model", "reasoning_effort", "reasoning_mode"):
+            if request.get(field):
+                resumed_config[field] = request[field]
+        if request.get("reasoning_mode"):
+            resumed_config["specialist_count"] = int(request.get("specialist_count") or 3)
+        write_json(run_dir / "codex-loop-config.json", resumed_config)
+        if recovered.get("success"):
+            write_summary(run_dir, "success_without_bypass", records, f"Diagnostic retry {retry_number} satisfied the recorded success policy.")
+            return "success_without_bypass", run_dir
+        last_iteration = max((int(item["iteration"]) for item in records), default=0)
+        previous_candidate = run_dir / "agent" / f"iteration-{last_iteration}" / "candidate.js"
+        if not previous_candidate.is_file():
+            previous_candidate = None
+        return self._iterations(
+            run_dir, resumed_config, records, start_iteration=last_iteration + 1,
+            additional=int(request["max_iterations"]), previous_candidate=previous_candidate,
+            previous_fingerprint=None, restart_frida=False,
+        ), run_dir
+
     def _recover_observation(
         self, run_dir: Path, config: dict[str, Any], records: list[Any], frida_server: str, *,
         additional: int, model: str, reasoning_effort: str,
+        reasoning_mode: str, specialist_count: int,
     ) -> tuple[str, Path]:
         recovery_number = 1
         while (run_dir / "agent" / f"checkpoint-recovery-{recovery_number}").exists():
@@ -399,6 +533,9 @@ class LoopRunner:
             resumed_config["model"] = model
         if reasoning_effort:
             resumed_config["reasoning_effort"] = reasoning_effort
+        if reasoning_mode:
+            resumed_config["reasoning_mode"] = reasoning_mode
+            resumed_config["specialist_count"] = specialist_count
         write_json(run_dir / "codex-loop-config.json", resumed_config)
         if recovered.get("success"):
             write_summary(
@@ -420,6 +557,7 @@ class LoopRunner:
     def _recover_validation(
         self, run_dir: Path, config: dict[str, Any], records: list[Any], checkpoint: dict[str, Any], *,
         additional: int, model: str, reasoning_effort: str,
+        reasoning_mode: str, specialist_count: int,
     ) -> tuple[str, Path]:
         iteration = int(checkpoint.get("iteration") or 0)
         candidate_value = str(checkpoint.get("candidate") or "")
@@ -489,6 +627,9 @@ class LoopRunner:
             resumed_config["model"] = model
         if reasoning_effort:
             resumed_config["reasoning_effort"] = reasoning_effort
+        if reasoning_mode:
+            resumed_config["reasoning_mode"] = reasoning_mode
+            resumed_config["specialist_count"] = specialist_count
         status = self._iterations(
             run_dir, resumed_config, records, start_iteration=iteration + 1,
             additional=additional, previous_candidate=candidate,
@@ -518,7 +659,11 @@ class LoopRunner:
             else:
                 shutil.copy2(run_dir / "frida" / "bypass-level-1.js", candidate)
             prior_dir = agent_dir / f"iteration-{iteration - 1}" if iteration > 1 else None
-            prompt = self._prompt(run_dir, candidate, prior_dir, iteration, start_iteration, end_iteration)
+            prompt = self._prompt(
+                run_dir, candidate, prior_dir, iteration, start_iteration, end_iteration,
+                reasoning_mode=str(config.get("reasoning_mode") or "single"),
+                specialist_count=int(config.get("specialist_count") or 3),
+            )
             prompt_path = iteration_dir / "prompt.txt"
             decision_path = iteration_dir / "decision.json"
             codex_log = iteration_dir / "codex.log"
@@ -526,6 +671,7 @@ class LoopRunner:
             protected = {prompt_path: sha256(prompt_path), config_path: sha256(config_path)}
             command = [
                 CODEX, "exec", "--sandbox", "workspace-write", "--skip-git-repo-check",
+                *codex_multi_agent_args(config),
                 "--color", "never", "--config", 'approval_policy="never"',
                 *codex_config_overrides(),
                 *codex_reasoning_args(config),
@@ -615,8 +761,17 @@ class LoopRunner:
     @staticmethod
     def _prompt(
         run_dir: Path, candidate: Path, prior_dir: Path | None,
-        iteration: int, start_iteration: int, end_iteration: int,
+        iteration: int, start_iteration: int, end_iteration: int, *,
+        reasoning_mode: str, specialist_count: int,
     ) -> str:
+        if reasoning_mode == "parallel":
+            delegation = f"""Parallel specialist mode is enabled. Spawn no more than {specialist_count} read-only subagents for independent evidence review, then wait for them and synthesize their findings before deciding:
+- static specialist: JADX Java/Kotlin detector evidence;
+- runtime specialist: observations, Frida output, logcat, and success-check failures;
+- native specialist when native evidence exists: suspicious libraries through read-only Ghidra MCP.
+With only two useful scopes, do not create an unnecessary third specialist. Subagents must not edit candidate.js or any other file, run device tools, or claim success. The root agent is the only writer and remains responsible for the final structured decision."""
+        else:
+            delegation = "Single-agent mode is enabled. Do not spawn subagents; inspect and decide within this root session."
         return f"""You are the reasoning step in an explicitly authorized Android application assessment loop.
 
 Iteration: {iteration} (this invocation covers {start_iteration} through {end_iteration})
@@ -624,6 +779,8 @@ Read-only run evidence directory: {run_dir}
 Editable candidate hook: {candidate}
 Previous iteration evidence: {prior_dir or 'none'}
 Ghidra MCP container path prefix for this run: {container_path(run_dir)}
+
+{delegation}
 
 Goal: make the smallest evidence-based change to the candidate Frida hook that can satisfy the success policy. Inspect report.json, observations.json, adaptive-plan.json, JADX output, and prior Frida/logcat/validation records. If native evidence is relevant, use read-only Ghidra MCP tools for native libraries from this run.
 

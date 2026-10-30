@@ -119,7 +119,7 @@ def scan_native(apk: Path, run_dir: Path) -> list[dict[str, object]]:
     return findings
 
 
-def prepare(apk: Path, runs: Path) -> tuple[Path, dict[str, object]]:
+def prepare(apk: Path, runs: Path, reuse_static: Path | None = None) -> tuple[Path, dict[str, object]]:
     digest = sha256(apk)
     stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     run_dir = runs / f"{stamp}-{digest[:12]}"
@@ -127,6 +127,26 @@ def prepare(apk: Path, runs: Path) -> tuple[Path, dict[str, object]]:
     original = run_dir / "original.apk"
     shutil.copy2(apk, original)
     original.chmod(0o444)
+    if reuse_static is not None:
+        source = reuse_static.resolve()
+        source_report = source / "report.json"
+        source_apk = source / "original.apk"
+        if not source_report.is_file() or not source_apk.is_file() or sha256(source_apk) != digest:
+            raise RuntimeError("Static-analysis reuse requires a prior run with the same APK hash")
+        metadata = json.loads(source_report.read_text(encoding="utf-8"))
+        for name in ("jadx", "native"):
+            prior = source / name
+            if prior.is_dir():
+                shutil.copytree(prior, run_dir / name, copy_function=shutil.copy2)
+        metadata.update({
+            "created_utc": stamp,
+            "authorization_asserted": True,
+            "source": str(apk.resolve()),
+            "sha256": digest,
+            "static_reused_from": str(source),
+        })
+        (run_dir / "report.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+        return run_dir, metadata
     decoded = run_dir / "jadx"
     run(["jadx", "--show-bad-code", "-d", str(decoded), str(original)], log=run_dir / "logs" / "jadx.log", check=False)
     findings = scan(decoded) + scan_native(original, run_dir)
@@ -260,11 +280,26 @@ def run_observation(args: argparse.Namespace, run_dir: Path, package: str) -> di
         log.write_text(frida_output, encoding="utf-8", errors="replace")
     logcat = adb(args, "logcat", "-d", "-t", "500", check=False).stdout
     (run_dir / "logs" / "observation-logcat.log").write_text(logcat, encoding="utf-8", errors="replace")
+    diagnostic_files: dict[str, str] = {}
+    if getattr(args, "diagnostics", False):
+        diagnostic_commands = {
+            "crash_buffer": ("logcat", "-b", "crash", "-d", "-t", "1000"),
+            "exit_info": ("shell", "dumpsys", "activity", "exit-info", package),
+            "native_crashes": ("shell", "dumpsys", "dropbox", "--print", "data_app_native_crash"),
+            "tombstone_access": ("shell", "ls", "-lt", "/data/tombstones"),
+        }
+        for name, command in diagnostic_commands.items():
+            output = adb(args, *command, check=False)
+            content = "\n".join(part for part in (output.stdout, output.stderr) if part)
+            destination = run_dir / "logs" / f"diagnostic-{name.replace('_', '-')}.log"
+            destination.write_text(content, encoding="utf-8", errors="replace")
+            diagnostic_files[name] = str(destination.relative_to(run_dir))
     events = parse_observation_events(frida_output)
     summary: dict[str, object] = {
         "duration_seconds": args.observation_seconds,
         "event_count": len(events),
         "events": events,
+        "diagnostics": diagnostic_files,
     }
     (run_dir / "observations.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     print(f"Observation events captured: {len(events)}")
@@ -561,11 +596,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--success-spec", type=Path, help="JSON success policy with all/any structured checks")
     parser.add_argument("--observation-mode", choices=("off", "before", "only"), default="before", help="run non-mutating discovery before adaptive bypasses")
     parser.add_argument("--observation-seconds", type=int, default=15)
+    parser.add_argument("--diagnostics", action="store_true", help="capture Android crash-buffer, exit-info, and available tombstone evidence")
     parser.add_argument("--candidate-script", type=Path, help="execute one reviewed .js candidate inside the resumed run")
     parser.add_argument("--frida-endpoint", default="127.0.0.1:27042", help="frida-server host:port")
     parser.add_argument("--start-frida-server", help="device path to an already-installed frida-server (requires su)")
     parser.add_argument("--patch-script", help="reviewed Python patch receiving the apktool directory")
     parser.add_argument("--resume", type=Path, help="resume an existing run directory")
+    parser.add_argument("--reuse-static", type=Path, help="reuse JADX/native static artifacts from a prior run of the identical APK")
     parser.add_argument("--runs", type=Path, default=Path("/workspace/runs"))
     return parser.parse_args()
 
@@ -593,7 +630,7 @@ def main() -> int:
         if not args.apk or not args.apk.is_file():
             print("An existing APK path is required unless --resume is used.", file=sys.stderr)
             return 2
-        run_dir, metadata = prepare(args.apk.resolve(), args.runs.resolve())
+        run_dir, metadata = prepare(args.apk.resolve(), args.runs.resolve(), args.reuse_static)
     print(f"Run directory: {run_dir}")
     print(f"Static findings: {len(metadata['findings'])}")
     strategy = args.strategy
