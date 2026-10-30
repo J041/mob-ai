@@ -1,0 +1,27 @@
+{
+  "version": 2,
+  "name": "Expected screen reached without a detection warning",
+  "mode": "all",
+  "baseline_required": true,
+  "repeat": 2,
+  "min_passes": 2,
+  "checks": [
+    {
+      "type": "process_alive"
+    },
+    {
+      "type": "foreground_package"
+    },
+    {
+      "type": "no_crash"
+    },
+    {
+      "type": "activity_reached",
+      "activity": ".MainActivity"
+    },
+    {
+      "type": "ui_text_not_regex",
+      "pattern": "root(?:ed)?|device compromised|frida detected"
+    }
+  ]
+}

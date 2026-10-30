@@ -1,0 +1,10 @@
+.git
+.agents
+.codex
+out
+ghidra-projects
+runs
+*.apk
+*.aab
+*.dex
+*.so

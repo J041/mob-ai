@@ -1,0 +1,8 @@
+[mcp_servers.ghidra]
+command = "C:\\Windows\\System32\\cmd.exe"
+args = ["/c", "C:\\Users\\realHacker1\\Downloads\\mob-ai\\scripts\\ghidra-mcp.cmd"]
+enabled = true
+required = false
+startup_timeout_sec = 180
+tool_timeout_sec = 300
+default_tools_approval_mode = "auto"

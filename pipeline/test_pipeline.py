@@ -1,0 +1,227 @@
+import argparse
+import json
+import subprocess
+import tempfile
+from pathlib import Path
+import unittest
+import zipfile
+from unittest import mock
+
+import pipeline
+
+
+class PipelineTests(unittest.TestCase):
+    def test_find_package_and_scan(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            resources = root / "resources"
+            resources.mkdir()
+            (resources / "AndroidManifest.xml").write_text('<manifest package="com.example.lab"/>', encoding="utf-8")
+            (root / "Detector.java").write_text('RootBeer root; Debug.isDebuggerConnected();', encoding="utf-8")
+            self.assertEqual(pipeline.find_package(root), "com.example.lab")
+            kinds = {item["kind"] for item in pipeline.scan(root)}
+            self.assertEqual(kinds, {"root_framework", "debugger"})
+
+    def test_native_scan_extracts_only_matching_library(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            apk = root / "sample.apk"
+            with zipfile.ZipFile(apk, "w") as archive:
+                archive.writestr("lib/arm64-v8a/libguard.so", b"prefix TracerPid suffix")
+                archive.writestr("lib/arm64-v8a/libclean.so", b"nothing interesting")
+            findings = pipeline.scan_native(apk, root / "run")
+            self.assertEqual(len(findings), 1)
+            self.assertTrue((root / "run/native/arm64-v8a/libguard.so").is_file())
+            self.assertFalse((root / "run/native/arm64-v8a/libclean.so").exists())
+
+    def test_generated_hooks_preserve_manual_edits(self):
+        with tempfile.TemporaryDirectory() as temp:
+            run_dir = Path(temp)
+            scripts = pipeline.make_frida_scripts(run_dir, 3)
+            self.assertEqual(len(scripts), 3)
+            self.assertNotIn("{{LEVEL}}", scripts[0].read_text(encoding="utf-8"))
+            scripts[0].write_text("manual", encoding="utf-8")
+            pipeline.make_frida_scripts(run_dir, 3)
+            self.assertEqual(scripts[0].read_text(encoding="utf-8"), "manual")
+            pipeline.make_frida_scripts(run_dir, 3, {"properties"})
+            self.assertEqual(scripts[0].read_text(encoding="utf-8"), "manual")
+
+    def test_generated_hooks_adapt_when_unedited(self):
+        with tempfile.TemporaryDirectory() as temp:
+            run_dir = Path(temp)
+            scripts = pipeline.make_frida_scripts(run_dir, 3, {"properties"})
+            self.assertIn('["properties"]', scripts[0].read_text(encoding="utf-8"))
+            pipeline.make_frida_scripts(run_dir, 3, {"anti-frida"})
+            self.assertIn('["anti-frida"]', scripts[2].read_text(encoding="utf-8"))
+            plan = json.loads((run_dir / "adaptive-plan.json").read_text(encoding="utf-8"))
+            self.assertEqual(plan["selected_modules"], ["anti-frida"])
+
+    def test_observation_events_drive_modules(self):
+        output = 'noise\nMOB_AI_EVENT {"source":"mob-ai-observe","kind":"native-file","detail":"open:/system/bin/su"}\n'
+        events = pipeline.parse_observation_events(output)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(pipeline.infer_modules({"findings": []}, events), {"native-files"})
+
+    def test_timeout_output_decodes_bytes(self):
+        error = subprocess.TimeoutExpired(["frida"], 1, output=b"MOB_AI_EVENT {}\n")
+        self.assertEqual(pipeline.timeout_output(error), "MOB_AI_EVENT {}\n")
+
+    def test_structured_success_policy(self):
+        args = argparse.Namespace(device="serial", success_regex=None)
+        spec = {
+            "mode": "all",
+            "checks": [
+                {"type": "process_alive"},
+                {"type": "foreground_package"},
+                {"type": "log_not_regex", "pattern": "FATAL EXCEPTION"},
+                {"type": "frida_regex", "pattern": "ready"},
+            ],
+        }
+        responses = [
+            subprocess.CompletedProcess([], 0, "1234\n"),
+            subprocess.CompletedProcess([], 0, "mResumedActivity: com.example.lab/.MainActivity\n"),
+        ]
+        with mock.patch.object(pipeline, "adb", side_effect=responses):
+            passed, checks = pipeline.evaluate_success(args, "com.example.lab", "ready", "healthy", spec)
+        self.assertTrue(passed)
+        self.assertTrue(all(check["passed"] for check in checks))
+
+    def test_success_policy_v2_repeat_and_ui_checks(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "policy.json"
+            path.write_text(json.dumps({
+                "mode": "all",
+                "baseline_required": True,
+                "repeat": 2,
+                "min_passes": 2,
+                "checks": [
+                    {"type": "no_crash"},
+                    {"type": "activity_reached", "activity": ".HomeActivity"},
+                    {"type": "ui_text_regex", "pattern": "Welcome"},
+                    {"type": "ui_text_not_regex", "pattern": "root detected"},
+                ],
+            }), encoding="utf-8")
+            policy = pipeline.load_success_spec(path)
+        self.assertEqual(policy["repeat"], 2)
+        self.assertEqual(policy["min_passes"], 2)
+        self.assertTrue(policy["baseline_required"])
+
+    def test_ui_text_policy_uses_uiautomator_hierarchy(self):
+        args = argparse.Namespace(device="serial", success_regex=None)
+        spec = {"mode": "all", "checks": [
+            {"type": "ui_text_regex", "pattern": "Dashboard"},
+            {"type": "ui_text_not_regex", "pattern": "root detected"},
+        ]}
+        responses = [
+            subprocess.CompletedProcess([], 0, "UI hierarchy dumped"),
+            subprocess.CompletedProcess([], 0, '<node text="Dashboard"/>'),
+            subprocess.CompletedProcess([], 0, ""),
+        ]
+        with mock.patch.object(pipeline, "adb", side_effect=responses) as adb:
+            passed, checks = pipeline.evaluate_success(args, "com.example", "", "", spec)
+        self.assertTrue(passed)
+        self.assertEqual(adb.call_count, 3)
+        self.assertTrue(all(check["passed"] for check in checks))
+
+    def test_repeat_validation_requires_multiple_passes(self):
+        with tempfile.TemporaryDirectory() as temp:
+            run_dir = Path(temp)
+            (run_dir / "logs").mkdir()
+            script = run_dir / "candidate.js"
+            script.write_text("'use strict';", encoding="utf-8")
+            args = argparse.Namespace(
+                device="serial", success_regex=None,
+                frida_endpoint="127.0.0.1:27042", run_seconds=1,
+            )
+            spec = {
+                "mode": "all", "repeat": 2, "min_passes": 2,
+                "checks": [{"type": "log_regex", "pattern": "ready"}],
+            }
+
+            def fake_run(command, **kwargs):
+                kwargs["log"].write_text("frida output", encoding="utf-8")
+                return subprocess.CompletedProcess(command, 0, "")
+
+            def fake_adb(_args, *command, **_kwargs):
+                output = "ready" if command[:2] == ("logcat", "-d") else ""
+                return subprocess.CompletedProcess(command, 0, output)
+
+            with mock.patch.object(pipeline, "run", side_effect=fake_run) as run, \
+                    mock.patch.object(pipeline, "adb", side_effect=fake_adb):
+                passed, attempts = pipeline.run_frida(args, run_dir, "com.example", [script], spec)
+        self.assertTrue(passed)
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(attempts[0]["pass_count"], 2)
+        self.assertEqual(len(attempts[0]["repetitions"]), 2)
+
+    def test_candidate_must_be_inside_run(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            run_dir = root / "run"
+            run_dir.mkdir()
+            outside = root / "outside.js"
+            outside.write_text("'use strict';", encoding="utf-8")
+            with self.assertRaisesRegex(RuntimeError, "inside the selected run"):
+                pipeline.validate_candidate_script(run_dir, outside)
+
+    def test_candidate_inside_run_is_compiled(self):
+        with tempfile.TemporaryDirectory() as temp:
+            run_dir = Path(temp)
+            candidate = run_dir / "candidate.js"
+            candidate.write_text("'use strict';", encoding="utf-8")
+            fake_frida = mock.Mock()
+            with mock.patch.dict("sys.modules", {"frida": fake_frida}):
+                self.assertEqual(pipeline.validate_candidate_script(run_dir, candidate), candidate)
+            fake_frida.Compiler.return_value.build.assert_called_once_with(str(candidate))
+
+    def test_wireless_endpoint_validation(self):
+        self.assertEqual(pipeline.validate_adb_endpoint("192.168.1.20:37123"), "192.168.1.20:37123")
+        self.assertEqual(pipeline.validate_adb_endpoint("[2001:db8::1]:5555"), "[2001:db8::1]:5555")
+        for invalid in ("192.168.1.20", "host:0", "host:65536", "host:port", "host;command:5555"):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(RuntimeError):
+                    pipeline.validate_adb_endpoint(invalid)
+
+    def test_wireless_pair_connect_and_select(self):
+        args = argparse.Namespace(
+            wireless_connect="192.168.1.20:38888",
+            wireless_pair="192.168.1.20:37777",
+            wireless_pair_code="123456",
+            device=None,
+        )
+        calls = []
+
+        def fake_run(command, **kwargs):
+            calls.append((command, kwargs))
+            if command[1] == "pair":
+                output = "Successfully paired to 192.168.1.20:37777\n"
+            elif command[1] == "connect":
+                output = "connected to 192.168.1.20:38888\n"
+            else:
+                output = "device\n"
+            return subprocess.CompletedProcess(command, 0, output)
+
+        with mock.patch.object(pipeline, "run", side_effect=fake_run):
+            pipeline.setup_wireless(args)
+        self.assertEqual(args.device, "192.168.1.20:38888")
+        self.assertEqual(calls[0][0], ["adb", "pair", "192.168.1.20:37777"])
+        self.assertEqual(calls[0][1]["input_text"], "123456\n")
+        self.assertNotIn("123456", calls[0][1]["display"])
+
+    def test_prepare_device_rejects_missing_frida_server(self):
+        args = argparse.Namespace(
+            device="serial", install=False,
+            start_frida_server="/data/local/tmp/missing-frida-server",
+            frida_endpoint="127.0.0.1:27042",
+        )
+        responses = [
+            subprocess.CompletedProcess([], 0, "device\n"),
+            subprocess.CompletedProcess([], 1, ""),
+        ]
+        with mock.patch.object(pipeline, "adb", side_effect=responses):
+            with self.assertRaisesRegex(RuntimeError, "missing or not executable"):
+                pipeline.prepare_device(args, Path("sample.apk"))
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,0 +1,66 @@
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+.codex/auth.json
+adbkey
+adbkey.pub
+*.jks
+*.keystore
+local.properties
+
+# Assessment runtime data and uploaded samples
+runs/
+uploads/
+policies/generated/
+**/.state/
+
+# Reverse-engineering outputs and binary samples
+out/
+build/
+.gradle/
+ghidra-projects/
+*.gpr
+*.rep/
+*.apk
+*.aab
+*.apks
+*.xapk
+*.dex
+*.odex
+*.vdex
+*.so
+
+# Python caches, environments, and test output
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.venv/
+venv/
+
+# Node tooling
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+*.swp
+*~
+
+# Editor and operating-system metadata
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db
+Desktop.ini

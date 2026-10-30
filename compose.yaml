@@ -1,0 +1,100 @@
+name: mob-ai
+
+services:
+  reverse-engineering:
+    build:
+      context: .
+      args:
+        JADX_VERSION: ${JADX_VERSION:-1.5.6}
+        GHIDRA_VERSION: ${GHIDRA_VERSION:-12.1.4}
+        GHIDRA_SHA256: ${GHIDRA_SHA256:-ddac49f903da9d5bac833e5cc79395098b9c33cfd3279be5f31bd00387d2d4db}
+        GHIDRA_MCP_VERSION: ${GHIDRA_MCP_VERSION:-7.0.0}
+        GHIDRA_MCP_SHA256: ${GHIDRA_MCP_SHA256:-d133c4c869a0d9f605c1c9426bf5d9064772a6947ccecde0f42fbbffecf1d812}
+        GHIDRA_MCP_BRIDGE_SHA256: ${GHIDRA_MCP_BRIDGE_SHA256:-a75050061d0d1514d4b11e6288ea7575c09ab6125a1394c33fe349fb7658bbae}
+        FRIDA_TOOLS_VERSION: ${FRIDA_TOOLS_VERSION:-14.11.0}
+        APKTOOL_VERSION: ${APKTOOL_VERSION:-3.0.3}
+        UBER_APK_SIGNER_VERSION: ${UBER_APK_SIGNER_VERSION:-1.3.0}
+        CODEX_CLI_VERSION: ${CODEX_CLI_VERSION:-0.162.1}
+    image: mob-ai-toolbox:local
+    init: true
+    stdin_open: true
+    tty: true
+    working_dir: /workspace
+    volumes:
+      - .:/workspace
+      - adb-keys:/home/analyst/.android
+      - ghidra-state:/home/analyst/.ghidra
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    environment:
+      # For a TCP/emulator target, override this with e.g. 192.168.1.20:5555.
+      ANDROID_SERIAL: ${ANDROID_SERIAL:-}
+      GHIDRA_MCP_FILE_ROOT: /workspace
+      GHIDRA_MCP_ALLOW_SCRIPTS: "0"
+      GHIDRA_MCP_BIND_HOST: "0.0.0.0"
+      # The port is private to this Compose network, but Ghidra MCP also
+      # requires a bearer token for every non-loopback listener.
+      GHIDRA_MCP_AUTH_TOKEN: ${GHIDRA_MCP_AUTH_TOKEN:-mob-ai-private-compose-token}
+      JAVA_OPTS: ${GHIDRA_MCP_JAVA_OPTS:--Xmx4g -XX:+UseG1GC}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS -H \"Authorization: Bearer $${GHIDRA_MCP_AUTH_TOKEN}\" http://127.0.0.1:8089/check_connection >/dev/null"]
+      interval: 5s
+      timeout: 3s
+      retries: 24
+      start_period: 15s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
+  web:
+    image: mob-ai-toolbox:local
+    command:
+      - gunicorn
+      - --bind
+      - 0.0.0.0:8787
+      - --workers
+      - "1"
+      - --threads
+      - "8"
+      - --timeout
+      - "0"
+      - ui.app:app
+    init: true
+    working_dir: /workspace
+    depends_on:
+      reverse-engineering:
+        condition: service_healthy
+    volumes:
+      - .:/workspace
+      - adb-keys:/home/analyst/.android
+      - codex-state:/home/analyst/.codex
+    ports:
+      - "127.0.0.1:${MOB_AI_UI_PORT:-8787}:8787"
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    environment:
+      GHIDRA_MCP_URL: http://reverse-engineering:8089
+      GHIDRA_MCP_AUTH_TOKEN: ${GHIDRA_MCP_AUTH_TOKEN:-mob-ai-private-compose-token}
+      MOB_AI_MAX_UPLOAD_MB: ${MOB_AI_MAX_UPLOAD_MB:-1024}
+      PYTHONUNBUFFERED: "1"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8787/api/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 24
+      start_period: 10s
+    security_opt:
+      - no-new-privileges:true
+      # Codex workspace-write uses Bubblewrap to create its own user/mount
+      # namespace. Docker's default seccomp profile blocks that namespace
+      # bootstrap; capabilities remain fully dropped and Bubblewrap supplies
+      # the narrower per-iteration filesystem boundary.
+      - seccomp=unconfined
+    cap_drop:
+      - ALL
+
+volumes:
+  adb-keys:
+  ghidra-state:
+  codex-state:

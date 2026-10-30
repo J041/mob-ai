@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "decision": {
+      "type": "string",
+      "enum": ["updated", "no_change", "human_review"]
+    },
+    "rationale": {
+      "type": "string"
+    },
+    "changes_made": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "evidence_used": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "remaining_risks": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  },
+  "required": [
+    "decision",
+    "rationale",
+    "changes_made",
+    "evidence_used",
+    "remaining_risks"
+  ],
+  "additionalProperties": false
+}

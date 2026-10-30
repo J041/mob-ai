@@ -1,0 +1,9 @@
+{
+  "name": "Mobile reverse engineering (JADX + Ghidra + ADB)",
+  "dockerComposeFile": "../compose.yaml",
+  "service": "reverse-engineering",
+  "workspaceFolder": "/workspace",
+  "remoteUser": "analyst",
+  "shutdownAction": "stopCompose",
+  "overrideCommand": false
+}

@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Mob-AI Control Room</title>
+  <meta name="description" content="Local control room for authorized mobile application assessment runs.">
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="shell">
+    <aside class="rail" aria-label="Workspace navigation">
+      <div class="brand" aria-label="Mob-AI">
+        <span class="brand-mark">M</span>
+        <span class="brand-copy"><strong>Mob-AI</strong><small>Control Room</small></span>
+      </div>
+      <nav>
+        <a class="nav-item active" href="#launch"><span>01</span>Launch</a>
+        <a class="nav-item" href="#activity"><span>02</span>Activity</a>
+        <a class="nav-item" href="#runs"><span>03</span>Runs</a>
+      </nav>
+    </aside>
+
+    <main>
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">AUTHORIZED MOBILE ASSESSMENT</p>
+          <h1>Operations overview</h1>
+        </div>
+        <div class="top-actions">
+          <button class="auth-pill" id="codexAuth" type="button">CODEX · CHECKING</button>
+          <button class="button ghost" id="discoverDevices" type="button">Discover devices</button>
+          <button class="button icon-button" id="refreshAll" type="button" aria-label="Refresh dashboard">↻</button>
+        </div>
+      </header>
+
+      <section class="metric-grid" aria-label="Assessment metrics">
+        <article class="metric"><span>APK inventory</span><strong id="apkCount">—</strong><small>local uploads</small></article>
+        <article class="metric"><span>Recorded runs</span><strong id="runCount">—</strong><small>append-only evidence</small></article>
+        <article class="metric"><span>Active agents</span><strong id="activeCount">—</strong><small>bounded Codex loops</small></article>
+        <article class="metric accent"><span>Device state</span><strong id="deviceCount">—</strong><small id="deviceCaption">not queried</small></article>
+      </section>
+
+      <section class="launch-grid" id="launch">
+        <article class="panel launch-panel">
+          <div class="panel-heading">
+            <div><p class="kicker">MISSION SETUP</p><h2>Start or continue an assessment</h2></div>
+            <div class="segmented" role="tablist" aria-label="Assessment mode">
+              <button class="segment active" role="tab" aria-selected="true" data-tab="new">New run</button>
+              <button class="segment" role="tab" aria-selected="false" data-tab="resume">Resume</button>
+            </div>
+          </div>
+
+          <form id="newForm" class="form-grid tab-panel active" data-panel="new">
+            <label class="field span-2 upload-field">
+              <span>APK upload <em>stored locally under uploads/</em></span>
+              <input name="apk_file" type="file" accept=".apk,application/vnd.android.package-archive" required>
+              <small id="apkUploadStatus">Choose the APK you are authorized to assess.</small>
+            </label>
+            <div class="policy-builder span-2">
+              <div class="policy-heading">
+                <div><strong>Success policy</strong><small>Define observable proof that the bypass worked.</small></div>
+                <label class="field"><span>Preset</span><select name="policy_preset" id="policyPreset">
+                  <option value="basic">Basic launch</option>
+                  <option value="detection_removed" selected>Detection warning removed</option>
+                  <option value="screen_reached">Expected screen reached</option>
+                  <option value="custom">Custom generated policy</option>
+                  <option value="advanced">Advanced JSON policy</option>
+                </select></label>
+              </div>
+              <div class="policy-fields" id="generatedPolicyFields">
+                <label class="field policy-activity"><span>Expected activity <em>optional</em></span><input name="expected_activity" placeholder=".MainActivity or com.example/.HomeActivity"></label>
+                <label class="field policy-expected"><span>Expected visible text <em>regex, optional</em></span><input name="expected_ui_pattern" placeholder="Welcome|Dashboard|Account ready"></label>
+                <label class="field policy-forbidden span-2"><span>Detection warning to reject <em>regex</em></span><input name="forbidden_ui_pattern" value="root(?:ed)?|device compromised|frida|hook(?:ing)? detected"></label>
+                <label class="field"><span>Repeat validation</span><select name="policy_repeat"><option value="1">1 run</option><option value="2" selected>2 runs</option><option value="3">3 runs</option></select></label>
+                <div class="policy-proof"><b>Baseline differential</b><span>The initial no-bypass observation must fail before a hooked attempt can demonstrate improvement.</span></div>
+              </div>
+              <label class="field advanced-policy" id="advancedPolicy" hidden><span>Existing JSON policy</span><input name="success_spec" list="specOptions" value="pipeline/success-spec.example.json"><datalist id="specOptions"></datalist></label>
+              <div class="policy-summary" id="policySummary"></div>
+            </div>
+            <div class="field span-2"><span>Target transport</span><div class="radio-row"><label><input type="radio" name="transport" value="adb" checked> ADB serial</label><label><input type="radio" name="transport" value="wireless"> Wireless</label></div></div>
+            <div class="wireless-pairing span-2" id="wirelessPairing" hidden>
+              <div class="pairing-heading"><div><strong>Pair wireless debugging</strong><small>Use the pairing port shown under “Pair device with pairing code”.</small></div><span>ONE-TIME</span></div>
+              <div class="pairing-fields">
+                <label class="field"><span>Pairing address</span><input name="pair_endpoint" placeholder="192.168.1.20:PAIRING_PORT" autocomplete="off"></label>
+                <label class="field"><span>Six-digit pairing code</span><input name="pair_code" type="password" inputmode="numeric" pattern="[0-9]{6}" minlength="6" maxlength="6" autocomplete="one-time-code" placeholder="••••••"></label>
+                <button class="button pair-button" id="pairDevice" type="button">Pair device</button>
+              </div>
+              <p id="pairingStatus">The pairing code is submitted once over stdin and is never saved.</p>
+            </div>
+            <label class="field span-2"><span id="targetLabel">Device target</span><input name="target" list="deviceOptions" placeholder="emulator-5554" required><datalist id="deviceOptions"></datalist><small id="targetHint">Use the exact serial shown by ADB.</small></label>
+            <section class="readiness span-2" id="readinessPanel">
+              <div class="readiness-heading">
+                <div><strong>Device readiness</strong><small>Validate the exact target before APK analysis begins.</small></div>
+                <span class="readiness-state" id="readinessState">NOT CHECKED</span>
+              </div>
+              <div class="readiness-controls">
+                <label class="field upload-field"><span>Frida Server binary <em>optional deploy</em></span><input name="frida_binary" type="file"><small>Choose a trusted binary matching the device ABI and Frida client version.</small></label>
+                <label class="switch-field readiness-start"><input name="start_frida" type="checkbox" checked><span class="switch"></span><span>Start and verify Frida</span></label>
+                <button class="button" id="runReadiness" type="button">Run readiness</button>
+              </div>
+              <input name="readiness_token" id="readinessToken" type="hidden">
+              <div class="readiness-results" id="readinessResults"><p>Checks ADB, root, ABI, Android SDK, storage, SELinux, Frida versions and connectivity.</p></div>
+            </section>
+            <label class="field"><span>Iterations</span><input name="max_iterations" type="number" value="3" min="1" max="10" required></label>
+            <label class="field"><span>Observation</span><div class="unit-input"><input name="observation_seconds" type="number" value="15" min="1" max="600" required><b>sec</b></div></label>
+            <label class="field"><span>Test window</span><div class="unit-input"><input name="run_seconds" type="number" value="20" min="1" max="600" required><b>sec</b></div></label>
+            <label class="field"><span>Codex model</span><select name="model" class="model-select"><option value="">Account default</option></select></label>
+            <label class="field"><span>Thinking level</span><select name="reasoning_effort" class="reasoning-select"><option value="">Model default</option></select></label>
+            <label class="field span-2"><span>Frida Server path <em>optional</em></span><input name="frida_server" value="/data/local/tmp/frida-server"></label>
+            <label class="field"><span>Package override</span><input name="package" placeholder="auto-detect"></label>
+            <label class="switch-field"><input name="install" type="checkbox" checked><span class="switch"></span><span>Install APK</span></label>
+            <label class="authorization span-2"><input name="authorized" type="checkbox" required><span>I confirm ownership or explicit authorization to test this APK and selected device.</span></label>
+            <div class="form-footer span-2"><p>Observation runs first. Codex edits isolated candidate hooks; validation remains deterministic.</p><button class="button primary" type="submit">Start assessment <span>→</span></button></div>
+          </form>
+
+          <form id="resumeForm" class="form-grid tab-panel" data-panel="resume">
+            <label class="field span-2"><span>Continuable run</span><select name="run" id="resumeRun" required><option value="">Select a continuable run</option></select></label>
+            <label class="field"><span>Additional iterations</span><input name="max_iterations" type="number" value="3" min="1" max="10" required></label>
+            <label class="field"><span>Codex model <em>optional override</em></span><select name="model" class="model-select"><option value="">Recorded model</option></select></label>
+            <label class="field"><span>Thinking level <em>optional override</em></span><select name="reasoning_effort" class="reasoning-select"><option value="">Recorded level</option></select></label>
+            <label class="field span-2" id="resumeFridaField" hidden><span>Updated Frida Server path</span><input name="frida_server" id="resumeFridaServer" placeholder="/data/local/tmp/frida-server"></label>
+            <div class="resume-summary span-2" id="resumeSummary"><span>↳</span><p>Select a run to see its last known state.</p></div>
+            <label class="authorization span-2"><input name="authorized" type="checkbox" required><span>I confirm authorization remains valid for this device and APK.</span></label>
+            <div class="form-footer span-2"><p>The previous candidate, validation delta, target, and policy hashes will be verified before continuation.</p><button class="button primary" type="submit">Continue loop <span>→</span></button></div>
+          </form>
+        </article>
+
+        <article class="panel activity-panel" id="activity">
+          <div class="panel-heading compact"><div><p class="kicker">LIVE ACTIVITY</p><h2>Agent console</h2></div><span class="live-pill" id="livePill">IDLE</span></div>
+          <div class="job-strip" id="jobStrip"><p>No jobs started from this dashboard.</p></div>
+          <pre class="console" id="consoleOutput" tabindex="0"><code><span class="console-muted">Waiting for an assessment…</span></code></pre>
+          <div class="console-footer"><span id="jobLabel">No active process</span><button class="text-button" type="button" id="copyLog">Copy log</button></div>
+        </article>
+      </section>
+
+      <section class="panel runs-panel" id="runs">
+        <div class="panel-heading"><div><p class="kicker">EVIDENCE LEDGER</p><h2>Assessment runs</h2></div><span class="muted" id="lastRefresh">Not refreshed</span></div>
+        <div class="run-list" id="runList"><div class="empty">No assessment runs found.</div></div>
+      </section>
+    </main>
+  </div>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <dialog class="auth-dialog" id="authDialog">
+    <div class="dialog-heading">
+      <div><p class="kicker">CODEX AUTHENTICATION</p><h2>Connect your ChatGPT account</h2></div>
+      <button class="dialog-close" id="closeAuth" type="button" aria-label="Close">×</button>
+    </div>
+    <p class="dialog-copy">Use your ChatGPT plan for the Codex reasoning loop. A browser sign-in code will appear below. Authentication persists in the private Docker volume.</p>
+    <pre class="auth-output" id="authOutput">Checking Codex sign-in status…</pre>
+    <div class="auth-helpers">
+      <a class="auth-link" id="authLink" target="_blank" rel="noopener noreferrer" hidden>Open ChatGPT sign-in ↗</a>
+      <button class="text-button" id="copyAuthCode" type="button" hidden>Copy one-time code</button>
+    </div>
+    <div class="dialog-actions">
+      <span id="authStatus">Not connected</span>
+      <div class="dialog-action-buttons">
+        <button class="button danger" id="signOutAuth" type="button" hidden>Sign out</button>
+        <button class="button primary" id="startAuth" type="button">Continue with ChatGPT <span>→</span></button>
+      </div>
+    </div>
+  </dialog>
+  <script src="/app.js" defer></script>
+</body>
+</html>
