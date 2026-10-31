@@ -11,7 +11,7 @@ import subprocess
 from typing import Any, TextIO
 import zipfile
 
-from pipeline.pipeline import scan_native
+from pipeline.pipeline import group_native_libraries, scan_native
 from ui.providers import ProviderRequest, provider_adapter, validate_provider_output
 
 
@@ -47,6 +47,34 @@ def workspace_relative(path: Path) -> str:
         return path.resolve().relative_to(WORKSPACE).as_posix()
     except ValueError as error:
         raise LoopError(f"Artifact escaped the workspace: {path}") from error
+
+
+def normalize_android_abi(value: str) -> str:
+    aliases = {
+        "arm64": "arm64-v8a", "aarch64": "arm64-v8a",
+        "arm": "armeabi-v7a", "armeabi": "armeabi-v7a",
+        "x64": "x86_64", "amd64": "x86_64",
+    }
+    normalized = value.strip().lower().replace("'", "").replace('"', "")
+    return aliases.get(normalized, normalized)
+
+
+def recorded_device_abi(run_dir: Path) -> str:
+    result_path = run_dir / "result.json"
+    if result_path.is_file():
+        value = read_json(result_path)
+        if isinstance(value, dict) and value.get("device_abi"):
+            return normalize_android_abi(str(value["device_abi"]))
+    logs = run_dir / "logs"
+    if logs.is_dir():
+        pattern = re.compile(r"\bABI\s*:\s*['\"]?([A-Za-z0-9_-]+)", re.I)
+        for path in sorted(logs.glob("*.log")):
+            if path.stat().st_size > 5_000_000:
+                continue
+            match = pattern.search(path.read_text(encoding="utf-8", errors="ignore"))
+            if match:
+                return normalize_android_abi(match.group(1))
+    return ""
 
 
 def container_path(path: Path) -> str:
@@ -819,16 +847,20 @@ class LoopRunner:
                 if not isinstance(item, dict) or item.get("kind") != "native_indicator"
             ]
             report["native_libraries"] = scan_native(run_dir / "original.apk", run_dir / "jadx")
-            write_json(run_dir / "report.json", report)
+        report["native_library_groups"] = group_native_libraries(report.get("native_libraries") or [])
+        write_json(run_dir / "report.json", report)
         inventory = report.get("native_libraries") or []
         if not isinstance(inventory, list):
             raise LoopError("The native library inventory is invalid.")
-        available = {
-            str(item.get("archive_path")): item
-            for item in inventory
-            if isinstance(item, dict) and item.get("archive_path")
+        groups = report.get("native_library_groups") or []
+        if not isinstance(groups, list):
+            raise LoopError("The grouped native library inventory is invalid.")
+        available_groups = {
+            str(item.get("library")): item
+            for item in groups
+            if isinstance(item, dict) and item.get("library")
         }
-        if not available:
+        if not available_groups:
             value = {
                 "provider": str(config.get("provider") or "codex"),
                 "model": str(config.get("model") or ""),
@@ -851,14 +883,16 @@ class LoopRunner:
         response_path = selection_dir / "decision.json"
         provider = str(config.get("provider") or "codex")
         adapter = provider_adapter(provider)
+        runtime_abi = recorded_device_abi(run_dir)
         prompt = f"""You are the native-target triage step in an explicitly authorized Android assessment.
 
 Read-only assessment evidence: {run_dir}
-Native inventory: {run_dir / 'report.json'} under the native_libraries field
+Logical native inventory: {run_dir / 'report.json'} under the native_library_groups field
+Recorded device ABI: {runtime_abi or 'unknown'}
 Runtime evidence: observations.json, result.json, logs/, and any diagnostic crash records
 Static evidence: JADX sources and AndroidManifest.xml below {run_dir / 'jadx'}
 
-Select at most five native libraries that genuinely warrant Ghidra analysis. Base the selection on causal evidence such as application-owned names, System.loadLibrary call sites, native/JNI declarations, protected application startup, crash context, or relationships to observed checks. Raw string matches may be supporting context but must never be the sole reason for selection. Prefer the ABI matching runtime evidence and avoid duplicate architectures unless an ABI comparison is specifically justified. Select only exact archive_path values present in report.json. An empty selection is valid when native analysis is not justified.
+Select at most five logical library names that genuinely warrant Ghidra analysis. All ABI variants of one library are one selection slot. Base the selection on causal evidence such as application-owned names, System.loadLibrary call sites, native/JNI declarations, protected application startup, crash context, or relationships to observed checks. Raw string matches may be supporting context but must never be the sole reason for selection. The orchestrator automatically selects the variant matching the recorded device ABI. Request other available ABIs only through cross_abi with a specific comparison reason; those variants do not consume extra library slots. Select only exact library values present in native_library_groups. An empty selection is valid when native analysis is not justified.
 
 Do not edit any file, invoke a device, or claim assessment success. Return only the required structured selection.
 """
@@ -887,32 +921,71 @@ Do not edit any file, invoke a device, or claim assessment success. Return only 
         seen: set[str] = set()
         with zipfile.ZipFile(run_dir / "original.apk") as archive:
             archive_names = set(archive.namelist())
+
+            def extract_variant(variant: dict[str, Any], library: str) -> dict[str, Any]:
+                archive_path = str(variant.get("archive_path") or "")
+                abi = normalize_android_abi(str(variant.get("abi") or ""))
+                if archive_path not in archive_names or not abi:
+                    raise LoopError(f"Native inventory variant is unavailable for {library}: {archive_path}")
+                destination = run_dir / "native" / "selected" / abi / library
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(archive.read(archive_path))
+                if sha256(destination) != str(variant.get("sha256") or ""):
+                    raise LoopError(f"Extracted native library hash mismatch: {archive_path}")
+                return {
+                    "archive_path": archive_path, "abi": abi, "name": library,
+                    "sha256": variant.get("sha256"), "extracted": workspace_relative(destination),
+                }
+
             for raw in raw_selected:
                 if not isinstance(raw, dict):
                     raise LoopError("Native selection contained a non-object target.")
-                archive_path = str(raw.get("archive_path") or "")
+                library = str(raw.get("library") or "")
                 priority = str(raw.get("priority") or "")
                 reason = str(raw.get("reason") or "").strip()
-                if archive_path not in available or archive_path not in archive_names:
-                    raise LoopError(f"Native selection referenced a library outside the inventory: {archive_path}")
-                if archive_path in seen or priority not in {"high", "medium", "low"} or not reason:
-                    raise LoopError(f"Native selection metadata is invalid for {archive_path}.")
-                seen.add(archive_path)
-                inventory_item = available[archive_path]
-                destination = run_dir / "native" / "selected" / str(inventory_item["abi"]) / str(inventory_item["name"])
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                destination.write_bytes(archive.read(archive_path))
-                if sha256(destination) != str(inventory_item.get("sha256") or ""):
-                    raise LoopError(f"Extracted native library hash mismatch: {archive_path}")
+                if library not in available_groups:
+                    raise LoopError(f"Native selection referenced a library outside the grouped inventory: {library}")
+                if library in seen or priority not in {"high", "medium", "low"} or not reason:
+                    raise LoopError(f"Native selection metadata is invalid for {library}.")
+                seen.add(library)
+                group = available_groups[library]
+                variants = [item for item in group.get("variants", []) if isinstance(item, dict)]
+                by_abi = {normalize_android_abi(str(item.get("abi") or "")): item for item in variants}
+                if runtime_abi and runtime_abi in by_abi:
+                    primary_abi = runtime_abi
+                elif len(by_abi) == 1:
+                    primary_abi = next(iter(by_abi))
+                else:
+                    raise LoopError(
+                        f"Cannot select the matching ABI for {library}; recorded device ABI is "
+                        f"{runtime_abi or 'unknown'} and available variants are {', '.join(sorted(by_abi))}."
+                    )
+                primary = extract_variant(by_abi[primary_abi], library)
+                cross_value = raw.get("cross_abi")
+                cross_result: dict[str, Any] | None = None
+                if cross_value is not None:
+                    if not isinstance(cross_value, dict):
+                        raise LoopError(f"Cross-ABI request is invalid for {library}.")
+                    cross_reason = str(cross_value.get("reason") or "").strip()
+                    requested = cross_value.get("abis")
+                    if not cross_reason or not isinstance(requested, list) or not requested:
+                        raise LoopError(f"Cross-ABI comparison requires ABIs and a reason for {library}.")
+                    normalized = [normalize_android_abi(str(value)) for value in requested]
+                    if len(set(normalized)) != len(normalized) or primary_abi in normalized:
+                        raise LoopError(f"Cross-ABI comparison duplicates a variant for {library}.")
+                    if any(abi not in by_abi for abi in normalized):
+                        raise LoopError(f"Cross-ABI comparison references an unavailable variant for {library}.")
+                    cross_result = {
+                        "reason": cross_reason,
+                        "variants": [extract_variant(by_abi[abi], library) for abi in normalized],
+                    }
                 selected.append({
-                    "archive_path": archive_path,
-                    "abi": inventory_item["abi"],
-                    "name": inventory_item["name"],
-                    "sha256": inventory_item["sha256"],
+                    "library": library,
                     "priority": priority,
                     "reason": reason,
-                    "load_references": inventory_item.get("load_references") or [],
-                    "extracted": workspace_relative(destination),
+                    "load_references": group.get("load_references") or [],
+                    "primary": primary,
+                    **({"cross_abi": cross_result} if cross_result else {}),
                 })
 
         value = {
@@ -921,6 +994,7 @@ Do not edit any file, invoke a device, or claim assessment success. Return only 
             "rationale": str(decision.get("rationale") or ""),
             "evidence_used": decision.get("evidence_used") or [],
             "selected": selected,
+            "device_abi": runtime_abi,
             "created_utc": datetime.now(timezone.utc).isoformat(),
         }
         write_json(selection_path, value)
@@ -938,10 +1012,18 @@ Do not edit any file, invoke a device, or claim assessment success. Return only 
         selection = read_json(selection_path) if selection_path.is_file() else {"selected": []}
         selected_targets = selection.get("selected") or []
         if selected_targets:
-            rendered_targets = "\n".join(
-                f"- {item.get('extracted')} [{item.get('priority')}]: {item.get('reason')}"
-                for item in selected_targets if isinstance(item, dict)
-            )
+            rendered: list[str] = []
+            for item in selected_targets:
+                if not isinstance(item, dict):
+                    continue
+                primary = item.get("primary") if isinstance(item.get("primary"), dict) else item
+                rendered.append(f"- {primary.get('extracted')} [{item.get('priority')}]: {item.get('reason')}")
+                cross = item.get("cross_abi")
+                if isinstance(cross, dict):
+                    for variant in cross.get("variants") or []:
+                        if isinstance(variant, dict):
+                            rendered.append(f"  comparison: {variant.get('extracted')} ({cross.get('reason')})")
+            rendered_targets = "\n".join(rendered)
             native_guidance = f"""Codex/provider native triage selected these exact targets:
 {rendered_targets}
 Use Ghidra MCP for these targets when native evidence affects the decision. If list_instances is empty, import or open the selected binary through the MCP tools and wait for analysis instead of treating an empty instance list as completed native review. Import is authorized only for these isolated run artifacts; do not patch a binary."""

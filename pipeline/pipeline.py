@@ -148,6 +148,33 @@ def scan_native(apk: Path, decoded: Path | None = None) -> list[dict[str, object
     return sorted(libraries, key=lambda item: (str(item["abi"]), str(item["name"])))
 
 
+def group_native_libraries(libraries: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Group equivalent APK libraries across ABIs into logical analysis targets."""
+    grouped: dict[str, dict[str, object]] = {}
+    for item in libraries:
+        if not isinstance(item, dict):
+            continue
+        name = str(item.get("name") or "")
+        archive_path = str(item.get("archive_path") or "")
+        abi = str(item.get("abi") or "")
+        if not name or not archive_path or not abi:
+            continue
+        group = grouped.setdefault(name, {
+            "library": name,
+            "load_references": [],
+            "variants": [],
+        })
+        references = set(group["load_references"])
+        references.update(str(value) for value in item.get("load_references", []) if value)
+        group["load_references"] = sorted(references)[:20]
+        group["variants"].append({
+            key: item[key] for key in ("archive_path", "abi", "size", "sha256") if key in item
+        })
+    for group in grouped.values():
+        group["variants"] = sorted(group["variants"], key=lambda item: str(item.get("abi", "")))
+    return sorted(grouped.values(), key=lambda item: str(item["library"]))
+
+
 def prepare(apk: Path, runs: Path, reuse_static: Path | None = None) -> tuple[Path, dict[str, object]]:
     digest = sha256(apk)
     stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -174,6 +201,7 @@ def prepare(apk: Path, runs: Path, reuse_static: Path | None = None) -> tuple[Pa
         ]
         if not isinstance(metadata.get("native_libraries"), list):
             metadata["native_libraries"] = scan_native(original, run_dir / "jadx")
+        metadata["native_library_groups"] = group_native_libraries(metadata["native_libraries"])
         metadata.update({
             "created_utc": stamp,
             "authorization_asserted": True,
@@ -195,6 +223,7 @@ def prepare(apk: Path, runs: Path, reuse_static: Path | None = None) -> tuple[Pa
         "package": find_package(decoded),
         "findings": findings,
         "native_libraries": native_libraries,
+        "native_library_groups": group_native_libraries(native_libraries),
     }
     (run_dir / "report.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
     return run_dir, metadata
@@ -338,6 +367,12 @@ def run_observation(args: argparse.Namespace, run_dir: Path, package: str) -> di
 
 def adb(args: argparse.Namespace, *extra: str, check: bool = True) -> subprocess.CompletedProcess[str]:
     return run(["adb", "-s", args.device, *extra], check=check)
+
+
+def device_abi(args: argparse.Namespace) -> str:
+    """Return the selected device's primary Android ABI, when ADB exposes it."""
+    result = adb(args, "shell", "getprop", "ro.product.cpu.abi", check=False)
+    return result.stdout.strip() if result.returncode == 0 else ""
 
 
 def validate_adb_endpoint(value: str) -> str:
@@ -687,6 +722,7 @@ def main() -> int:
     if not package:
         raise RuntimeError("Package name was not detected; pass --package explicitly.")
     prepare_device(args, run_dir / "original.apk")
+    runtime_abi = device_abi(args)
     observation: dict[str, object] | None = None
     events: list[dict[str, object]] = []
     if args.observation_mode != "off":
@@ -723,6 +759,7 @@ def main() -> int:
             success, checks = bool(baseline["passed"]), list(baseline["checks"])
         summary = {
             "strategy": "observation", "device": args.device,
+            "device_abi": runtime_abi,
             "transport": "wireless" if args.wireless_connect else "adb",
             "package": package, "observation_events": len(events),
             "adaptive_modules": sorted(modules), "success": success, "checks": checks,
@@ -735,6 +772,7 @@ def main() -> int:
     if baseline and baseline["passed"] and success_spec.get("baseline_required"):
         summary = {
             "strategy": "observation", "device": args.device,
+            "device_abi": runtime_abi,
             "transport": "wireless" if args.wireless_connect else "adb",
             "package": package, "observation_events": len(events),
             "adaptive_modules": sorted(modules), "success": True,
@@ -747,6 +785,7 @@ def main() -> int:
     success, attempts = run_frida(args, run_dir, str(package), scripts, success_spec)
     summary = {
         "strategy": "frida", "device": args.device,
+        "device_abi": runtime_abi,
         "transport": "wireless" if args.wireless_connect else "adb",
         "package": package, "observation_events": len(events),
         "adaptive_modules": sorted(modules), "success": success,

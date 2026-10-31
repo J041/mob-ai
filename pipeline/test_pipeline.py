@@ -59,11 +59,16 @@ class PipelineTests(unittest.TestCase):
             with zipfile.ZipFile(apk, "w") as archive:
                 archive.writestr("lib/arm64-v8a/libguard.so", b"prefix TracerPid suffix")
                 archive.writestr("lib/arm64-v8a/libclean.so", b"nothing interesting")
+                archive.writestr("lib/x86_64/libclean.so", b"same logical library, other ABI")
             libraries = pipeline.scan_native(apk, decoded)
-            self.assertEqual([item["name"] for item in libraries], ["libclean.so", "libguard.so"])
+            self.assertEqual([item["name"] for item in libraries], ["libclean.so", "libguard.so", "libclean.so"])
             clean = next(item for item in libraries if item["name"] == "libclean.so")
             self.assertEqual(clean["load_references"], ["sources/Example.java"])
             self.assertNotIn("matches", clean)
+            groups = pipeline.group_native_libraries(libraries)
+            self.assertEqual([item["library"] for item in groups], ["libclean.so", "libguard.so"])
+            clean_group = next(item for item in groups if item["library"] == "libclean.so")
+            self.assertEqual([item["abi"] for item in clean_group["variants"]], ["arm64-v8a", "x86_64"])
 
     def test_generated_hooks_preserve_manual_edits(self):
         with tempfile.TemporaryDirectory() as temp:

@@ -13,11 +13,25 @@
       "items": {
         "type": "object",
         "properties": {
-          "archive_path": { "type": "string" },
+          "library": { "type": "string" },
           "priority": { "type": "string", "enum": ["high", "medium", "low"] },
-          "reason": { "type": "string" }
+          "reason": { "type": "string" },
+          "cross_abi": {
+            "type": "object",
+            "properties": {
+              "abis": {
+                "type": "array",
+                "minItems": 1,
+                "uniqueItems": true,
+                "items": { "type": "string" }
+              },
+              "reason": { "type": "string" }
+            },
+            "required": ["abis", "reason"],
+            "additionalProperties": false
+          }
         },
-        "required": ["archive_path", "priority", "reason"],
+        "required": ["library", "priority", "reason"],
         "additionalProperties": false
       }
     }

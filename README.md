@@ -213,12 +213,15 @@ is reached. The provider runs with only the current iteration directory writable
 access and validation remain under the deterministic orchestrator.
 
 Before the first hook decision, static preparation records a complete bounded inventory of
-APK native libraries, including ABI, hash, size, and decompiled `loadLibrary` references.
+APK native libraries, including ABI, hash, size, and decompiled `loadLibrary` references,
+and groups duplicate ABI variants under one logical library name.
 The selected reasoning provider then performs a separate read-only native-triage pass and
-chooses at most five exact libraries using Java/JNI load sites, application ownership, crash
+chooses at most five logical libraries using Java/JNI load sites, application ownership, crash
 evidence, protected startup, and runtime observations. Raw string matches cannot select a
-library by themselves. The validated result is stored in `native-selection.json`; only those
-hash-verified libraries are extracted under `native/selected/` and offered to the Ghidra
+library by themselves. The orchestrator extracts the variant matching the recorded device ABI.
+The provider may request additional ABI variants only with an explicit comparison reason; those
+variants remain part of the same logical selection slot. The validated result is stored in
+`native-selection.json`; only those hash-verified libraries are extracted under `native/selected/` and offered to the Ghidra
 specialist. If Ghidra has no open instance, the iteration prompt requires the specialist to
 import or open a selected binary rather than treating an empty instance list as analysis.
 

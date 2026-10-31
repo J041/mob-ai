@@ -591,9 +591,13 @@ class WebAppTests(unittest.TestCase):
                     "rationale": "Application startup explicitly loads the protection library.",
                     "evidence_used": ["ProtectedApplication.java System.loadLibrary call"],
                     "selected": [{
-                        "archive_path": "lib/arm64-v8a/libdexprotector.so",
+                        "library": "libdexprotector.so",
                         "priority": "high",
                         "reason": "Loaded by protected application startup before the crash.",
+                        "cross_abi": {
+                            "abis": ["x86_64"],
+                            "reason": "Compare exported detector behavior across architectures.",
+                        },
                     }],
                 }), encoding="utf-8")
                 return True
@@ -602,22 +606,33 @@ class WebAppTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir=WORKSPACE) as temp:
             run = Path(temp)
             payload = b"native-protection-library"
+            x86_payload = b"native-protection-library-x86"
             with zipfile.ZipFile(run / "original.apk", "w") as archive:
                 archive.writestr("lib/arm64-v8a/libdexprotector.so", payload)
+                archive.writestr("lib/x86_64/libdexprotector.so", x86_payload)
             (run / "report.json").write_text(json.dumps({
                 "native_libraries": [{
                     "archive_path": "lib/arm64-v8a/libdexprotector.so",
                     "abi": "arm64-v8a", "name": "libdexprotector.so",
                     "size": len(payload), "sha256": hashlib.sha256(payload).hexdigest(),
                     "load_references": ["sources/ProtectedApplication.java"],
+                }, {
+                    "archive_path": "lib/x86_64/libdexprotector.so",
+                    "abi": "x86_64", "name": "libdexprotector.so",
+                    "size": len(x86_payload), "sha256": hashlib.sha256(x86_payload).hexdigest(),
+                    "load_references": ["sources/ProtectedApplication.java"],
                 }],
             }), encoding="utf-8")
+            (run / "result.json").write_text(json.dumps({"device_abi": "arm64-v8a"}), encoding="utf-8")
             selection = LoopRunner(StringIO())._ensure_native_selection(run, {
                 "provider": "codex", "model": "test-model", "reasoning_effort": "high",
             })
-            extracted = WORKSPACE / selection["selected"][0]["extracted"]
+            extracted = WORKSPACE / selection["selected"][0]["primary"]["extracted"]
             self.assertEqual(extracted.read_bytes(), payload)
             self.assertEqual(selection["selected"][0]["priority"], "high")
+            comparison = WORKSPACE / selection["selected"][0]["cross_abi"]["variants"][0]["extracted"]
+            self.assertEqual(comparison.read_bytes(), x86_payload)
+            self.assertEqual(len(selection["selected"]), 1)
             self.assertTrue((run / "native-selection.json").is_file())
 
     def test_auth_output_strips_terminal_controls(self) -> None:
