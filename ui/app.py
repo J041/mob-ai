@@ -71,12 +71,12 @@ DEFAULT_REASONING_LEVELS = [
 ANSI_ESCAPE = re.compile(r"\x1B(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1B\\))")
 ARTIFACT_PREVIEW_SUFFIXES = {".json", ".log", ".txt", ".js", ".md", ".toml", ".xml", ".yaml", ".yml", ".csv"}
 ARTIFACT_CATEGORIES = (
-    ("findings", "Findings", "Static and runtime discovery reports.", ("report.json", "adaptive-plan.json", "observations.json")),
+    ("findings", "Findings", "Static and runtime discovery reports.", ("report.json", "adaptive-plan.json", "observations.json", "native-selection.json")),
     ("hooks", "Generated hooks", "Generated and Codex-refined Frida scripts.", ("frida/*.js", "agent/iteration-*/candidate.js")),
     ("comparisons", "Attempt comparisons", "Before/after evidence from diagnostic retries.", ("agent/diagnostic-retry-*/comparison.json",)),
     ("logs", "Logcat and crash reports", "Runtime, crash-buffer, exit-info and tombstone evidence.", ("logs/*.log", "agent/**/logs/*.log", "agent/**/pipeline.log")),
-    ("decisions", "Agent decisions", "Structured decisions, iteration records and provider execution logs.", ("codex-loop-result.json", "agent/iteration-*/decision.json", "agent/iteration-*/record.json", "agent/iteration-*/codex.log", "agent/iteration-*/claude.log")),
-    ("ghidra", "Ghidra results", "Saved native-analysis results produced through Ghidra.", ("ghidra/**/*", "ghidra-results/**/*", "agent/**/ghidra-*")),
+    ("decisions", "Agent decisions", "Structured native triage, iteration records and provider execution logs.", ("codex-loop-result.json", "agent/native-selection/**/*", "agent/iteration-*/decision.json", "agent/iteration-*/record.json", "agent/iteration-*/codex.log", "agent/iteration-*/claude.log")),
+    ("ghidra", "Ghidra results", "Selected native inputs and saved analysis results produced through Ghidra.", ("native/selected/**/*", "ghidra/**/*", "ghidra-results/**/*", "agent/**/ghidra-*")),
     ("success", "Success-policy checks", "Recorded policy, baseline and validation outcomes.", ("result.json", "codex-loop-config.json", "agent/**/result.json")),
     ("assistant", "Assistant conversation", "Run-scoped questions, cited answers and read-only agent logs.", ("assistant/**/*",)),
 )
@@ -263,14 +263,16 @@ def resolve_run_artifact(run_id: str, relative: str) -> Path:
     normalized = PurePosixPath(str(relative).replace("\\", "/")).as_posix().lstrip("/")
     parts = PurePosixPath(normalized).parts
     allowed = any((
-        normalized in {"report.json", "adaptive-plan.json", "observations.json", "codex-loop-result.json", "result.json", "codex-loop-config.json"},
+        normalized in {"report.json", "adaptive-plan.json", "observations.json", "native-selection.json", "codex-loop-result.json", "result.json", "codex-loop-config.json"},
         len(parts) == 2 and parts[0] == "frida" and normalized.endswith(".js"),
         len(parts) == 3 and parts[0] == "agent" and parts[1].startswith("iteration-") and parts[2] in {"candidate.js", "decision.json", "record.json", "codex.log", "claude.log", "result.json", "provider-mcp.json"},
         len(parts) == 3 and parts[0] == "agent" and parts[1].startswith("diagnostic-retry-") and parts[2] in {"comparison.json", "pipeline.log", "result.json"},
         bool(parts) and parts[0] == "logs" and normalized.endswith(".log"),
         len(parts) >= 3 and parts[0] == "agent" and "logs" in parts[2:] and normalized.endswith(".log"),
         len(parts) >= 3 and parts[0] == "agent" and parts[-1] in {"pipeline.log", "result.json"},
+        len(parts) >= 4 and parts[0:2] == ("agent", "native-selection") and normalized.endswith((".json", ".txt", ".log")),
         bool(parts) and parts[0] in {"ghidra", "ghidra-results"},
+        len(parts) >= 4 and parts[0:2] == ("native", "selected"),
         len(parts) >= 3 and parts[0] == "agent" and parts[-1].startswith("ghidra-"),
         len(parts) >= 2 and parts[0] == "assistant" and normalized.endswith((".json", ".jsonl", ".txt", ".log")),
     ))

@@ -26,6 +26,7 @@ class PipelineTests(unittest.TestCase):
             (source / "native" / "libguard.so").write_bytes(b"native")
             (source / "report.json").write_text(json.dumps({
                 "package": "com.example", "findings": [{"kind": "root_check"}],
+                "native_libraries": [],
                 "sha256": pipeline.sha256(apk),
             }), encoding="utf-8")
             with mock.patch.object(pipeline, "run") as run:
@@ -47,17 +48,22 @@ class PipelineTests(unittest.TestCase):
             kinds = {item["kind"] for item in pipeline.scan(root)}
             self.assertEqual(kinds, {"root_framework", "debugger"})
 
-    def test_native_scan_extracts_only_matching_library(self):
+    def test_native_scan_inventories_all_libraries_without_string_selection(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             apk = root / "sample.apk"
+            decoded = root / "decoded"
+            source = decoded / "sources" / "Example.java"
+            source.parent.mkdir(parents=True)
+            source.write_text('class Example { void load() { System.loadLibrary("clean"); } }', encoding="utf-8")
             with zipfile.ZipFile(apk, "w") as archive:
                 archive.writestr("lib/arm64-v8a/libguard.so", b"prefix TracerPid suffix")
                 archive.writestr("lib/arm64-v8a/libclean.so", b"nothing interesting")
-            findings = pipeline.scan_native(apk, root / "run")
-            self.assertEqual(len(findings), 1)
-            self.assertTrue((root / "run/native/arm64-v8a/libguard.so").is_file())
-            self.assertFalse((root / "run/native/arm64-v8a/libclean.so").exists())
+            libraries = pipeline.scan_native(apk, decoded)
+            self.assertEqual([item["name"] for item in libraries], ["libclean.so", "libguard.so"])
+            clean = next(item for item in libraries if item["name"] == "libclean.so")
+            self.assertEqual(clean["load_references"], ["sources/Example.java"])
+            self.assertNotIn("matches", clean)
 
     def test_generated_hooks_preserve_manual_edits(self):
         with tempfile.TemporaryDirectory() as temp:

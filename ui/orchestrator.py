@@ -9,7 +9,9 @@ import re
 import shutil
 import subprocess
 from typing import Any, TextIO
+import zipfile
 
+from pipeline.pipeline import scan_native
 from ui.providers import ProviderRequest, provider_adapter, validate_provider_output
 
 
@@ -17,6 +19,7 @@ WORKSPACE = Path(os.environ.get("MOB_AI_WORKSPACE", "/workspace")).resolve()
 RUNS_ROOT = WORKSPACE / "runs"
 PIPELINE = WORKSPACE / "pipeline" / "pipeline.py"
 DECISION_SCHEMA = WORKSPACE / "pipeline" / "codex-decision.schema.json"
+NATIVE_SELECTION_SCHEMA = WORKSPACE / "pipeline" / "native-selection.schema.json"
 CODEX = shutil.which("codex") or "codex"
 GHIDRA_BRIDGE = "/opt/ghidra-mcp/venv/bin/bridge-mcp-ghidra"
 GHIDRA_URL = os.environ.get("GHIDRA_MCP_URL", "http://reverse-engineering:8089")
@@ -665,6 +668,15 @@ class LoopRunner:
         restart_frida: bool,
     ) -> str:
         agent_dir = run_dir / "agent"
+        try:
+            self._ensure_native_selection(run_dir, config)
+        except (LoopError, OSError, zipfile.BadZipFile, json.JSONDecodeError) as error:
+            write_summary(
+                run_dir, "provider_error", records,
+                f"Native target selection failed before iteration {start_iteration}: {error}",
+                reason="native_selection_failure",
+            )
+            return "provider_error"
         end_iteration = start_iteration + additional - 1
         for iteration in range(start_iteration, end_iteration + 1):
             iteration_dir = agent_dir / f"iteration-{iteration}"
@@ -791,12 +803,150 @@ class LoopRunner:
         write_summary(run_dir, "max_iterations", records, f"The policy did not pass within this invocation's {additional} attempts.")
         return "max_iterations"
 
+    def _ensure_native_selection(self, run_dir: Path, config: dict[str, Any]) -> dict[str, Any]:
+        """Ask the selected reasoning provider to choose bounded native-analysis targets."""
+        selection_path = run_dir / "native-selection.json"
+        if selection_path.is_file():
+            value = read_json(selection_path)
+            if not isinstance(value, dict) or not isinstance(value.get("selected"), list):
+                raise LoopError("The recorded native selection is invalid.")
+            return value
+
+        report = read_json(run_dir / "report.json")
+        if "native_libraries" not in report:
+            report["findings"] = [
+                item for item in report.get("findings", [])
+                if not isinstance(item, dict) or item.get("kind") != "native_indicator"
+            ]
+            report["native_libraries"] = scan_native(run_dir / "original.apk", run_dir / "jadx")
+            write_json(run_dir / "report.json", report)
+        inventory = report.get("native_libraries") or []
+        if not isinstance(inventory, list):
+            raise LoopError("The native library inventory is invalid.")
+        available = {
+            str(item.get("archive_path")): item
+            for item in inventory
+            if isinstance(item, dict) and item.get("archive_path")
+        }
+        if not available:
+            value = {
+                "provider": str(config.get("provider") or "codex"),
+                "model": str(config.get("model") or ""),
+                "rationale": "The APK contains no bounded native libraries to analyze.",
+                "evidence_used": ["report.json native_libraries inventory"],
+                "selected": [],
+                "created_utc": datetime.now(timezone.utc).isoformat(),
+            }
+            write_json(selection_path, value)
+            return value
+
+        selection_root = run_dir / "agent" / "native-selection"
+        selection_root.mkdir(parents=True, exist_ok=True)
+        attempt = 1
+        while (selection_root / f"attempt-{attempt}").exists():
+            attempt += 1
+        selection_dir = selection_root / f"attempt-{attempt}"
+        selection_dir.mkdir()
+        prompt_path = selection_dir / "prompt.txt"
+        response_path = selection_dir / "decision.json"
+        provider = str(config.get("provider") or "codex")
+        adapter = provider_adapter(provider)
+        prompt = f"""You are the native-target triage step in an explicitly authorized Android assessment.
+
+Read-only assessment evidence: {run_dir}
+Native inventory: {run_dir / 'report.json'} under the native_libraries field
+Runtime evidence: observations.json, result.json, logs/, and any diagnostic crash records
+Static evidence: JADX sources and AndroidManifest.xml below {run_dir / 'jadx'}
+
+Select at most five native libraries that genuinely warrant Ghidra analysis. Base the selection on causal evidence such as application-owned names, System.loadLibrary call sites, native/JNI declarations, protected application startup, crash context, or relationships to observed checks. Raw string matches may be supporting context but must never be the sole reason for selection. Prefer the ABI matching runtime evidence and avoid duplicate architectures unless an ABI comparison is specifically justified. Select only exact archive_path values present in report.json. An empty selection is valid when native analysis is not justified.
+
+Do not edit any file, invoke a device, or claim assessment success. Return only the required structured selection.
+"""
+        prompt_path.write_text(prompt, encoding="utf-8")
+        request = ProviderRequest(
+            provider=provider, prompt=prompt, cwd=selection_dir,
+            schema_path=NATIVE_SELECTION_SCHEMA, output_path=response_path,
+            model=str(config.get("model") or ""),
+            reasoning_effort=str(config.get("reasoning_effort") or ""),
+            reasoning_mode="single", writable=False,
+            extra_args=("--config", "mcp_servers.ghidra.enabled=false") if provider == "codex" else (),
+        )
+        command, provider_prompt = adapter.prepare(request)
+        exit_code, output = run_logged(
+            command, self.log, cwd=selection_dir, input_text=provider_prompt,
+            artifact=selection_dir / f"{provider}.log",
+        )
+        if not adapter.finalize(request, exit_code, output) or not validate_provider_output(response_path, NATIVE_SELECTION_SCHEMA):
+            raise LoopError(f"{adapter.label} did not return a valid native target selection.")
+        decision = read_json(response_path)
+        raw_selected = decision.get("selected") or []
+        if not isinstance(raw_selected, list) or len(raw_selected) > 5:
+            raise LoopError("Native selection exceeded the five-library limit.")
+
+        selected: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        with zipfile.ZipFile(run_dir / "original.apk") as archive:
+            archive_names = set(archive.namelist())
+            for raw in raw_selected:
+                if not isinstance(raw, dict):
+                    raise LoopError("Native selection contained a non-object target.")
+                archive_path = str(raw.get("archive_path") or "")
+                priority = str(raw.get("priority") or "")
+                reason = str(raw.get("reason") or "").strip()
+                if archive_path not in available or archive_path not in archive_names:
+                    raise LoopError(f"Native selection referenced a library outside the inventory: {archive_path}")
+                if archive_path in seen or priority not in {"high", "medium", "low"} or not reason:
+                    raise LoopError(f"Native selection metadata is invalid for {archive_path}.")
+                seen.add(archive_path)
+                inventory_item = available[archive_path]
+                destination = run_dir / "native" / "selected" / str(inventory_item["abi"]) / str(inventory_item["name"])
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(archive.read(archive_path))
+                if sha256(destination) != str(inventory_item.get("sha256") or ""):
+                    raise LoopError(f"Extracted native library hash mismatch: {archive_path}")
+                selected.append({
+                    "archive_path": archive_path,
+                    "abi": inventory_item["abi"],
+                    "name": inventory_item["name"],
+                    "sha256": inventory_item["sha256"],
+                    "priority": priority,
+                    "reason": reason,
+                    "load_references": inventory_item.get("load_references") or [],
+                    "extracted": workspace_relative(destination),
+                })
+
+        value = {
+            "provider": provider,
+            "model": str(config.get("model") or ""),
+            "rationale": str(decision.get("rationale") or ""),
+            "evidence_used": decision.get("evidence_used") or [],
+            "selected": selected,
+            "created_utc": datetime.now(timezone.utc).isoformat(),
+        }
+        write_json(selection_path, value)
+        config["native_selection"] = workspace_relative(selection_path)
+        write_json(run_dir / "codex-loop-config.json", config)
+        return value
+
     @staticmethod
     def _prompt(
         run_dir: Path, candidate: Path, prior_dir: Path | None,
         iteration: int, start_iteration: int, end_iteration: int, *,
         reasoning_mode: str, specialist_count: int,
     ) -> str:
+        selection_path = run_dir / "native-selection.json"
+        selection = read_json(selection_path) if selection_path.is_file() else {"selected": []}
+        selected_targets = selection.get("selected") or []
+        if selected_targets:
+            rendered_targets = "\n".join(
+                f"- {item.get('extracted')} [{item.get('priority')}]: {item.get('reason')}"
+                for item in selected_targets if isinstance(item, dict)
+            )
+            native_guidance = f"""Codex/provider native triage selected these exact targets:
+{rendered_targets}
+Use Ghidra MCP for these targets when native evidence affects the decision. If list_instances is empty, import or open the selected binary through the MCP tools and wait for analysis instead of treating an empty instance list as completed native review. Import is authorized only for these isolated run artifacts; do not patch a binary."""
+        else:
+            native_guidance = "Native triage selected no Ghidra targets. Do not infer a native detector from raw string matches alone."
         if reasoning_mode == "parallel":
             delegation = f"""Parallel specialist mode is enabled. Spawn no more than {specialist_count} read-only subagents for independent evidence review, then wait for them and synthesize their findings before deciding:
 - static specialist: JADX Java/Kotlin detector evidence;
@@ -812,8 +962,11 @@ Read-only run evidence directory: {run_dir}
 Editable candidate hook: {candidate}
 Previous iteration evidence: {prior_dir or 'none'}
 Ghidra MCP container path prefix for this run: {container_path(run_dir)}
+Native target selection: {container_path(selection_path)}
 
 {delegation}
+
+{native_guidance}
 
 Goal: make the smallest evidence-based change to the candidate Frida hook that can satisfy the success policy. Inspect report.json, observations.json, adaptive-plan.json, JADX output, and prior Frida/logcat/validation records. If native evidence is relevant, use read-only Ghidra MCP tools for native libraries from this run.
 

@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "rationale": { "type": "string" },
+    "evidence_used": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "selected": {
+      "type": "array",
+      "maxItems": 5,
+      "items": {
+        "type": "object",
+        "properties": {
+          "archive_path": { "type": "string" },
+          "priority": { "type": "string", "enum": ["high", "medium", "low"] },
+          "reason": { "type": "string" }
+        },
+        "required": ["archive_path", "priority", "reason"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["rationale", "evidence_used", "selected"],
+  "additionalProperties": false
+}

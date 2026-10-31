@@ -212,6 +212,16 @@ the provider requests human review, two attempts make no progress, or the iterat
 is reached. The provider runs with only the current iteration directory writable; device
 access and validation remain under the deterministic orchestrator.
 
+Before the first hook decision, static preparation records a complete bounded inventory of
+APK native libraries, including ABI, hash, size, and decompiled `loadLibrary` references.
+The selected reasoning provider then performs a separate read-only native-triage pass and
+chooses at most five exact libraries using Java/JNI load sites, application ownership, crash
+evidence, protected startup, and runtime observations. Raw string matches cannot select a
+library by themselves. The validated result is stored in `native-selection.json`; only those
+hash-verified libraries are extracted under `native/selected/` and offered to the Ghidra
+specialist. If Ghidra has no open instance, the iteration prompt requires the specialist to
+import or open a selected binary rather than treating an empty instance list as analysis.
+
 Prerequisites are Docker Desktop, a connected ChatGPT or Claude account, an
 authorized test device, and a compatible running or startable Frida Server. The UI
 builds an auditable policy from **Basic launch**, **Detection warning removed**,
@@ -236,7 +246,7 @@ host history rather than proof that Android has not subsequently revoked the pai
 
 **Reasoning mode** controls each provider iteration. **Single agent** disables delegation. **Parallel specialists** allows two or three read-only reviewers to inspect independent static, runtime, and relevant native evidence when supported by the selected provider. Specialists cannot edit the hook or operate the device; only the root agent may update `candidate.js` and return the structured decision.
 
-Each iteration is auditable under `runs/RUN_ID/agent/iteration-N/` and contains the prompt, candidate hook, provider decision and log, Frida/logcat output, validation result, and combined record. `codex-loop-result.json` retains its compatibility filename and records the terminal status and complete history. The loop never rebuilds or resigns the APK, and it directs the provider to request human review for remote attestation or unsupported/high-risk changes.
+Native triage is auditable under append-only `runs/RUN_ID/agent/native-selection/attempt-N/` directories, with its final validated selection at `runs/RUN_ID/native-selection.json`. Each hook iteration is auditable under `runs/RUN_ID/agent/iteration-N/` and contains the prompt, candidate hook, provider decision and log, Frida/logcat output, validation result, and combined record. `codex-loop-result.json` retains its compatibility filename and records the terminal status and complete history. The loop never rebuilds or resigns the APK, and it directs the provider to request human review for remote attestation or unsupported/high-risk changes.
 
 Reasoning execution is normalized in `ui/providers.py`. CLI providers receive the same
 prompt, JSON schema, model/effort selection, working directory, and access mode, then

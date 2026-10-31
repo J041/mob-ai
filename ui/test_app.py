@@ -1,12 +1,14 @@
 from __future__ import annotations
 
-from io import BytesIO
+from io import BytesIO, StringIO
+import hashlib
 import json
 from pathlib import Path
 import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
+import zipfile
 
 from ui.app import (
     _readiness, app, artifact_manifest, codex_model_catalog, parse_resume, parse_retry, parse_start,
@@ -572,6 +574,51 @@ class WebAppTests(unittest.TestCase):
         self.assertIn("no more than 3 read-only subagents", prompt)
         self.assertIn("root agent is the only writer", prompt)
         self.assertIn("native specialist", prompt)
+
+    @patch("ui.orchestrator.run_logged", return_value=(0, ""))
+    @patch("ui.orchestrator.provider_adapter")
+    def test_native_selection_is_provider_chosen_bounded_and_extracted(self, adapter_factory, _run_logged) -> None:
+        class FakeAdapter:
+            label = "Codex"
+
+            @staticmethod
+            def prepare(request):
+                return ["codex", "exec"], request.prompt
+
+            @staticmethod
+            def finalize(request, _exit_code, _output):
+                request.output_path.write_text(json.dumps({
+                    "rationale": "Application startup explicitly loads the protection library.",
+                    "evidence_used": ["ProtectedApplication.java System.loadLibrary call"],
+                    "selected": [{
+                        "archive_path": "lib/arm64-v8a/libdexprotector.so",
+                        "priority": "high",
+                        "reason": "Loaded by protected application startup before the crash.",
+                    }],
+                }), encoding="utf-8")
+                return True
+
+        adapter_factory.return_value = FakeAdapter()
+        with tempfile.TemporaryDirectory(dir=WORKSPACE) as temp:
+            run = Path(temp)
+            payload = b"native-protection-library"
+            with zipfile.ZipFile(run / "original.apk", "w") as archive:
+                archive.writestr("lib/arm64-v8a/libdexprotector.so", payload)
+            (run / "report.json").write_text(json.dumps({
+                "native_libraries": [{
+                    "archive_path": "lib/arm64-v8a/libdexprotector.so",
+                    "abi": "arm64-v8a", "name": "libdexprotector.so",
+                    "size": len(payload), "sha256": hashlib.sha256(payload).hexdigest(),
+                    "load_references": ["sources/ProtectedApplication.java"],
+                }],
+            }), encoding="utf-8")
+            selection = LoopRunner(StringIO())._ensure_native_selection(run, {
+                "provider": "codex", "model": "test-model", "reasoning_effort": "high",
+            })
+            extracted = WORKSPACE / selection["selected"][0]["extracted"]
+            self.assertEqual(extracted.read_bytes(), payload)
+            self.assertEqual(selection["selected"][0]["priority"], "high")
+            self.assertTrue((run / "native-selection.json").is_file())
 
     def test_auth_output_strips_terminal_controls(self) -> None:
         value = "\x1b[94mhttps://auth.openai.com/codex/device\x1b[0m\r\n\x1b[90mABCD-EFGHIJ\x1b[0m"
