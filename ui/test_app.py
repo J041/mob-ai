@@ -19,6 +19,7 @@ from ui.orchestrator import (
     codex_multi_agent_args, codex_reasoning_args, checkpoint_recovery_available,
     frida_recovery_available,
 )
+from ui.providers import ProviderRequest, provider_adapter, validate_provider_output
 
 
 class WebAppTests(unittest.TestCase):
@@ -77,6 +78,30 @@ class WebAppTests(unittest.TestCase):
         response.close()
         self.assertIn('id="assistantDialog"', page)
         self.assertIn('data-assistant-prompt="Propose a bounded rerun', page)
+        self.assertIn('id="claudeAuth"', page)
+        self.assertIn('<option value="claude">Claude</option>', page)
+
+    def test_claude_adapter_normalizes_json_result(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            schema = root / "schema.json"
+            output = root / "response.json"
+            schema.write_text(json.dumps({
+                "type": "object", "properties": {"answer": {"type": "string"}},
+                "required": ["answer"], "additionalProperties": False,
+            }), encoding="utf-8")
+            request = ProviderRequest(
+                provider="claude", prompt="Answer", cwd=root,
+                schema_path=schema, output_path=output, model="sonnet",
+            )
+            adapter = provider_adapter("claude")
+            command, prompt = adapter.prepare(request)
+            completed = adapter.finalize(request, 0, json.dumps({"result": '{"answer":"grounded"}'}))
+            valid = validate_provider_output(output, schema)
+        self.assertIn("--output-format", command)
+        self.assertIn("matching this schema exactly", prompt)
+        self.assertTrue(completed)
+        self.assertTrue(valid)
 
     @patch("ui.app.codex_model_catalog", return_value={"models": [{
         "id": "test-model", "reasoning_levels": [{"effort": "high"}],
@@ -441,6 +466,16 @@ class WebAppTests(unittest.TestCase):
             "reasoning_effort": "xhigh",
         })
         self.assertEqual(request["reasoning_effort"], "xhigh")
+
+    @patch("ui.app.resolve_workspace_item")
+    def test_resume_accepts_claude_provider(self, resolve) -> None:
+        resolve.return_value = WORKSPACE / "runs" / "example"
+        _, request = parse_resume({
+            "authorized": True, "run": "runs/example", "max_iterations": 2,
+            "provider": "claude", "model": "sonnet", "reasoning_effort": "high",
+        })
+        self.assertEqual(request["provider"], "claude")
+        self.assertEqual(request["model"], "sonnet")
 
     @patch("ui.app.json_file")
     @patch("ui.app.resolve_workspace_item")

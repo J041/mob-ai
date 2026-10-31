@@ -18,6 +18,7 @@
         </div>
         <div class="top-actions">
           <button class="auth-pill" id="codexAuth" type="button">CODEX · CHECKING</button>
+          <button class="auth-pill" id="claudeAuth" type="button">CLAUDE · CHECKING</button>
           <button class="button ghost" id="discoverDevices" type="button">Discover devices</button>
           <button class="button icon-button" id="refreshAll" type="button" aria-label="Refresh dashboard">↻</button>
         </div>
@@ -104,14 +105,15 @@
             <label class="field"><span>Iterations</span><input name="max_iterations" type="number" value="3" min="1" max="10" required></label>
             <label class="field"><span>Observation</span><div class="unit-input"><input name="observation_seconds" type="number" value="15" min="1" max="600" required><b>sec</b></div></label>
             <label class="field"><span>Test window</span><div class="unit-input"><input name="run_seconds" type="number" value="20" min="1" max="600" required><b>sec</b></div></label>
-            <label class="field"><span>Codex model</span><select name="model" class="model-select"><option value="">Account default</option></select></label>
+            <label class="field"><span>Reasoning provider</span><select name="provider" class="provider-select"><option value="codex">Codex</option><option value="claude">Claude</option></select></label>
+            <label class="field"><span>Reasoning model</span><select name="model" class="model-select"><option value="">Account default</option></select></label>
             <label class="field"><span>Thinking level</span><select name="reasoning_effort" class="reasoning-select"><option value="">Model default</option></select></label>
             <label class="field"><span>Reasoning mode</span><select name="reasoning_mode" class="reasoning-mode"><option value="single" selected>Single agent</option><option value="parallel">Parallel specialists</option></select></label>
             <label class="field specialist-count" hidden><span>Maximum specialists</span><select name="specialist_count"><option value="2">2 specialists</option><option value="3" selected>3 specialists</option></select><small>Read-only static, runtime and native evidence reviewers.</small></label>
             <label class="field"><span>Package override <em>optional</em></span><input name="package" placeholder="auto-detect"></label>
             <label class="switch-field"><input name="install" type="checkbox" checked><span class="switch"></span><span>Install APK</span></label>
             <label class="authorization span-2"><input name="authorized" type="checkbox" required><span>I confirm ownership or explicit authorization to test this APK and selected device.</span></label>
-            <div class="form-footer span-2"><p>Observation runs first. Codex edits isolated candidate hooks; validation remains deterministic.</p><button class="button primary" type="submit">Start assessment <span>→</span></button></div>
+            <div class="form-footer span-2"><p>Observation runs first. The selected provider edits isolated candidate hooks; validation remains deterministic.</p><button class="button primary" type="submit">Start assessment <span>→</span></button></div>
           </form>
 
           <form id="resumeForm" class="form-grid tab-panel" data-panel="resume">
@@ -124,7 +126,8 @@
               <button class="button policy-reassess" id="reassessSelected" type="button" disabled>Reassess with a different policy <span>&rarr;</span></button>
             </section>
             <label class="field"><span>Iterations for this attempt</span><input name="max_iterations" type="number" value="3" min="1" max="10" required></label>
-            <label class="field"><span>Codex model</span><select name="model" class="model-select"><option value="">Account default</option></select></label>
+            <label class="field"><span>Reasoning provider</span><select name="provider" class="provider-select"><option value="codex">Codex</option><option value="claude">Claude</option></select></label>
+            <label class="field"><span>Reasoning model</span><select name="model" class="model-select"><option value="">Account default</option></select></label>
             <label class="field"><span>Thinking level</span><select name="reasoning_effort" class="reasoning-select"><option value="">Model default</option></select></label>
             <label class="field"><span>Reasoning mode</span><select name="reasoning_mode" class="reasoning-mode"><option value="single">Single agent</option><option value="parallel">Parallel specialists</option></select></label>
             <label class="field specialist-count" hidden><span>Maximum specialists</span><select name="specialist_count"><option value="2">2 specialists</option><option value="3" selected>3 specialists</option></select></label>
@@ -175,6 +178,7 @@
     </div>
     <form class="assistant-shell" id="assistantForm">
       <div class="assistant-controls">
+        <label class="field"><span>Provider</span><select name="provider" class="provider-select"><option value="codex">Codex</option><option value="claude">Claude</option></select></label>
         <label class="field"><span>Model</span><select name="model" class="model-select"><option value="">Account default</option></select></label>
         <label class="field"><span>Thinking level</span><select name="reasoning_effort" class="reasoning-select"><option value="">Model default</option></select></label>
       </div>
@@ -194,10 +198,10 @@
   </dialog>
   <dialog class="auth-dialog" id="authDialog">
     <div class="dialog-heading">
-      <div><p class="kicker">CODEX AUTHENTICATION</p><h2>Connect your ChatGPT account</h2></div>
+      <div><p class="kicker" id="authKicker">PROVIDER AUTHENTICATION</p><h2 id="authTitle">Connect an AI account</h2></div>
       <button class="dialog-close" id="closeAuth" type="button" aria-label="Close">×</button>
     </div>
-    <p class="dialog-copy">Use your ChatGPT plan for the Codex reasoning loop. A browser sign-in code will appear below. Authentication persists in the private Docker volume.</p>
+    <p class="dialog-copy" id="authCopy">Connect the selected reasoning provider. Authentication persists in its private Docker volume.</p>
     <pre class="auth-output" id="authOutput">Checking Codex sign-in status…</pre>
     <div class="auth-helpers">
       <a class="auth-link" id="authLink" target="_blank" rel="noopener noreferrer" hidden>Open ChatGPT sign-in ↗</a>
@@ -207,10 +211,10 @@
       <span id="authStatus">Not connected</span>
       <div class="dialog-action-buttons">
         <button class="button danger" id="signOutAuth" type="button" hidden>Sign out</button>
-        <button class="button primary" id="startAuth" type="button">Continue with ChatGPT <span>→</span></button>
+        <button class="button primary" id="startAuth" type="button">Continue in browser <span>→</span></button>
       </div>
     </div>
   </dialog>
-  <script src="/app.js?v=20261030-wireless-registry" defer></script>
+  <script src="/app.js?v=20261031-provider-claude" defer></script>
 </body>
 </html>

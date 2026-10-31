@@ -10,6 +10,8 @@ import shutil
 import subprocess
 from typing import Any, TextIO
 
+from ui.providers import ProviderRequest, provider_adapter, validate_provider_output
+
 
 WORKSPACE = Path(os.environ.get("MOB_AI_WORKSPACE", "/workspace")).resolve()
 RUNS_ROOT = WORKSPACE / "runs"
@@ -183,6 +185,16 @@ def codex_config_overrides() -> list[str]:
     return result
 
 
+def claude_mcp_config() -> dict[str, Any]:
+    environment = {"GHIDRA_MCP_URL": GHIDRA_URL}
+    if GHIDRA_TOKEN:
+        environment["GHIDRA_MCP_AUTH_TOKEN"] = GHIDRA_TOKEN
+    return {"mcpServers": {"ghidra": {
+        "type": "stdio", "command": GHIDRA_BRIDGE,
+        "args": ["--transport", "stdio"], "env": environment,
+    }}}
+
+
 def codex_reasoning_args(config: dict[str, Any]) -> list[str]:
     effort = str(config.get("reasoning_effort") or "")
     return ["--config", f"model_reasoning_effort={json.dumps(effort)}"] if effort else []
@@ -212,6 +224,7 @@ class LoopRunner:
             "run_seconds": int(request["run_seconds"]),
             "start_frida_server": request.get("frida_server") or "",
             "model": request.get("model") or "",
+            "provider": request.get("provider") or "codex",
             "reasoning_effort": request.get("reasoning_effort") or "",
             "reasoning_mode": request.get("reasoning_mode") or "single",
             "specialist_count": int(request.get("specialist_count") or 3),
@@ -310,6 +323,7 @@ class LoopRunner:
                 return self._recover_observation(
                     run_dir, config, records, resumed_frida,
                     additional=int(request["max_iterations"]),
+                    provider=str(request.get("provider") or ""),
                     model=str(request.get("model") or ""),
                     reasoning_effort=str(request.get("reasoning_effort") or ""),
                     reasoning_mode=str(request.get("reasoning_mode") or ""),
@@ -318,6 +332,7 @@ class LoopRunner:
             return self._recover_validation(
                 run_dir, config, records, checkpoint,
                 additional=int(request["max_iterations"]),
+                provider=str(request.get("provider") or ""),
                 model=str(request.get("model") or ""),
                 reasoning_effort=str(request.get("reasoning_effort") or ""),
                 reasoning_mode=str(request.get("reasoning_mode") or ""),
@@ -330,6 +345,7 @@ class LoopRunner:
             return self._recover_observation(
                 run_dir, config, records, frida_server,
                 additional=int(request["max_iterations"]),
+                provider=str(request.get("provider") or ""),
                 model=str(request.get("model") or ""),
                 reasoning_effort=str(request.get("reasoning_effort") or ""),
                 reasoning_mode=str(request.get("reasoning_mode") or ""),
@@ -352,6 +368,8 @@ class LoopRunner:
         resumed_config = dict(config)
         if request.get("model"):
             resumed_config["model"] = request["model"]
+        if request.get("provider"):
+            resumed_config["provider"] = request["provider"]
         if request.get("reasoning_effort"):
             resumed_config["reasoning_effort"] = request["reasoning_effort"]
         if request.get("reasoning_mode"):
@@ -444,7 +462,7 @@ class LoopRunner:
         history = list(resumed_config.get("diagnostic_retry_history") or [])
         history.append({"retry": retry_number, "directory": workspace_relative(retry_dir), "completed_utc": datetime.now(timezone.utc).isoformat()})
         resumed_config["diagnostic_retry_history"] = history
-        for field in ("model", "reasoning_effort", "reasoning_mode"):
+        for field in ("provider", "model", "reasoning_effort", "reasoning_mode"):
             if request.get(field):
                 resumed_config[field] = request[field]
         if request.get("reasoning_mode"):
@@ -465,7 +483,7 @@ class LoopRunner:
 
     def _recover_observation(
         self, run_dir: Path, config: dict[str, Any], records: list[Any], frida_server: str, *,
-        additional: int, model: str, reasoning_effort: str,
+        additional: int, provider: str, model: str, reasoning_effort: str,
         reasoning_mode: str, specialist_count: int,
     ) -> tuple[str, Path]:
         recovery_number = 1
@@ -529,6 +547,8 @@ class LoopRunner:
             "updated_utc": datetime.now(timezone.utc).isoformat(),
         })
         resumed_config["frida_server_history"] = history
+        if provider:
+            resumed_config["provider"] = provider
         if model:
             resumed_config["model"] = model
         if reasoning_effort:
@@ -556,7 +576,7 @@ class LoopRunner:
 
     def _recover_validation(
         self, run_dir: Path, config: dict[str, Any], records: list[Any], checkpoint: dict[str, Any], *,
-        additional: int, model: str, reasoning_effort: str,
+        additional: int, provider: str, model: str, reasoning_effort: str,
         reasoning_mode: str, specialist_count: int,
     ) -> tuple[str, Path]:
         iteration = int(checkpoint.get("iteration") or 0)
@@ -623,6 +643,8 @@ class LoopRunner:
             )
             return "assessment_failed", run_dir
         resumed_config = dict(config)
+        if provider:
+            resumed_config["provider"] = provider
         if model:
             resumed_config["model"] = model
         if reasoning_effort:
@@ -653,6 +675,11 @@ class LoopRunner:
             codex_dir.mkdir()
             config_path = codex_dir / "config.toml"
             config_path.write_text(codex_config(), encoding="utf-8")
+            provider = str(config.get("provider") or "codex")
+            adapter = provider_adapter(provider)
+            mcp_path = iteration_dir / "provider-mcp.json"
+            if provider == "claude":
+                write_json(mcp_path, claude_mcp_config())
             candidate = iteration_dir / "candidate.js"
             if previous_candidate:
                 shutil.copy2(previous_candidate, candidate)
@@ -666,25 +693,31 @@ class LoopRunner:
             )
             prompt_path = iteration_dir / "prompt.txt"
             decision_path = iteration_dir / "decision.json"
-            codex_log = iteration_dir / "codex.log"
+            provider_log = iteration_dir / f"{provider}.log"
             prompt_path.write_text(prompt, encoding="utf-8")
             protected = {prompt_path: sha256(prompt_path), config_path: sha256(config_path)}
-            command = [
-                CODEX, "exec", "--sandbox", "workspace-write", "--skip-git-repo-check",
-                *codex_multi_agent_args(config),
-                "--color", "never", "--config", 'approval_policy="never"',
-                *codex_config_overrides(),
-                *codex_reasoning_args(config),
-                "--output-schema", str(DECISION_SCHEMA), "--output-last-message", str(decision_path),
-            ]
-            if config.get("model"):
-                command.extend(["--model", config["model"]])
-            command.append("-")
-            exit_code, _ = run_logged(command, self.log, cwd=iteration_dir, input_text=prompt, artifact=codex_log)
-            if exit_code != 0 or not decision_path.is_file():
-                write_summary(run_dir, "codex_error", records, f"Codex failed in iteration {iteration}.")
-                return "codex_error"
-            allowed = {candidate.resolve(), prompt_path.resolve(), decision_path.resolve(), codex_log.resolve(), config_path.resolve()}
+            if mcp_path.is_file():
+                protected[mcp_path] = sha256(mcp_path)
+            provider_request = ProviderRequest(
+                provider=provider, prompt=prompt, cwd=iteration_dir,
+                schema_path=DECISION_SCHEMA, output_path=decision_path,
+                model=str(config.get("model") or ""),
+                reasoning_effort=str(config.get("reasoning_effort") or ""),
+                reasoning_mode=str(config.get("reasoning_mode") or "single"),
+                writable=True, mcp_config=mcp_path if mcp_path.is_file() else None,
+                extra_args=tuple(codex_config_overrides()) if provider == "codex" else (),
+            )
+            command, provider_prompt = adapter.prepare(provider_request)
+            exit_code, output = run_logged(
+                command, self.log, cwd=iteration_dir, input_text=provider_prompt, artifact=provider_log,
+            )
+            completed = adapter.finalize(provider_request, exit_code, output)
+            if not completed or not validate_provider_output(decision_path, DECISION_SCHEMA):
+                write_summary(run_dir, "provider_error", records, f"{adapter.label} failed in iteration {iteration}.")
+                return "provider_error"
+            allowed = {candidate.resolve(), prompt_path.resolve(), decision_path.resolve(), provider_log.resolve(), config_path.resolve()}
+            if mcp_path.is_file():
+                allowed.add(mcp_path.resolve())
             unexpected = [path for path in iteration_dir.rglob("*") if path.is_file() and path.resolve() not in allowed]
             if any(sha256(path) != digest for path, digest in protected.items()) or unexpected:
                 write_summary(run_dir, "codex_boundary_error", records, f"Codex wrote outside candidate.js in iteration {iteration}.")

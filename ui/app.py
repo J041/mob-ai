@@ -26,6 +26,7 @@ from ui.orchestrator import (
     sha256, workspace_relative, write_json,
 )
 from ui.job_queue import HEARTBEAT_PATH, STATE_ROOT, atomic_write_json
+from ui.providers import PROVIDER_IDS, ProviderRequest, provider_adapter, validate_provider_output
 
 
 STATIC_ROOT = WORKSPACE / "ui" / "dist"
@@ -45,6 +46,9 @@ _auth_process: subprocess.Popen | None = None
 _auth_state = {"running": False, "output": "", "exit_code": None, "started_utc": None}
 _auth_cache = {"checked": 0.0, "authenticated": False, "detail": "Not checked."}
 _model_cache = {"checked": 0.0, "models": [], "source": "not_checked"}
+_claude_auth_process: subprocess.Popen | None = None
+_claude_auth_state = {"running": False, "output": "", "exit_code": None, "started_utc": None}
+_claude_auth_cache = {"checked": 0.0, "authenticated": False, "detail": "Not checked."}
 _readiness: dict[str, dict] = {}
 
 
@@ -71,7 +75,7 @@ ARTIFACT_CATEGORIES = (
     ("hooks", "Generated hooks", "Generated and Codex-refined Frida scripts.", ("frida/*.js", "agent/iteration-*/candidate.js")),
     ("comparisons", "Attempt comparisons", "Before/after evidence from diagnostic retries.", ("agent/diagnostic-retry-*/comparison.json",)),
     ("logs", "Logcat and crash reports", "Runtime, crash-buffer, exit-info and tombstone evidence.", ("logs/*.log", "agent/**/logs/*.log", "agent/**/pipeline.log")),
-    ("decisions", "Codex decisions", "Structured decisions, iteration records and Codex execution logs.", ("codex-loop-result.json", "agent/iteration-*/decision.json", "agent/iteration-*/record.json", "agent/iteration-*/codex.log")),
+    ("decisions", "Agent decisions", "Structured decisions, iteration records and provider execution logs.", ("codex-loop-result.json", "agent/iteration-*/decision.json", "agent/iteration-*/record.json", "agent/iteration-*/codex.log", "agent/iteration-*/claude.log")),
     ("ghidra", "Ghidra results", "Saved native-analysis results produced through Ghidra.", ("ghidra/**/*", "ghidra-results/**/*", "agent/**/ghidra-*")),
     ("success", "Success-policy checks", "Recorded policy, baseline and validation outcomes.", ("result.json", "codex-loop-config.json", "agent/**/result.json")),
     ("assistant", "Assistant conversation", "Run-scoped questions, cited answers and read-only agent logs.", ("assistant/**/*",)),
@@ -261,7 +265,7 @@ def resolve_run_artifact(run_id: str, relative: str) -> Path:
     allowed = any((
         normalized in {"report.json", "adaptive-plan.json", "observations.json", "codex-loop-result.json", "result.json", "codex-loop-config.json"},
         len(parts) == 2 and parts[0] == "frida" and normalized.endswith(".js"),
-        len(parts) == 3 and parts[0] == "agent" and parts[1].startswith("iteration-") and parts[2] in {"candidate.js", "decision.json", "record.json", "codex.log", "result.json"},
+        len(parts) == 3 and parts[0] == "agent" and parts[1].startswith("iteration-") and parts[2] in {"candidate.js", "decision.json", "record.json", "codex.log", "claude.log", "result.json", "provider-mcp.json"},
         len(parts) == 3 and parts[0] == "agent" and parts[1].startswith("diagnostic-retry-") and parts[2] in {"comparison.json", "pipeline.log", "result.json"},
         bool(parts) and parts[0] == "logs" and normalized.endswith(".log"),
         len(parts) >= 3 and parts[0] == "agent" and "logs" in parts[2:] and normalized.endswith(".log"),
@@ -390,7 +394,7 @@ def assistant_evidence_snapshot(
     text_suffixes = ARTIFACT_PREVIEW_SUFFIXES | {".smali", ".java", ".kt"}
     candidates: list[tuple[float, str, str]] = []
     for relative in allowed:
-        if relative.startswith("assistant/") or relative.endswith("codex.log"):
+        if relative.startswith("assistant/") or relative.endswith(("codex.log", "claude.log")):
             continue
         path = (run_dir / relative).resolve()
         try:
@@ -484,15 +488,19 @@ def run_assistant_turn(run_id: str, body: dict, progress=None) -> dict:
     question = str(body.get("question") or "").strip()
     if not 1 <= len(question) <= 4000:
         raise ValueError("Question must contain between 1 and 4000 characters.")
-    if not codex_authenticated():
-        raise ValueError("Connect a ChatGPT account before asking the run assistant.")
+    run_dir = resolve_run_directory(run_id)
+    config = json_file(run_dir / "codex-loop-config.json") or {}
+    provider = str(body.get("provider") or config.get("provider") or "codex")
+    if provider not in PROVIDER_IDS:
+        raise ValueError("Unsupported reasoning provider.")
+    if not provider_authenticated(provider):
+        raise ValueError(f"Connect your {'ChatGPT' if provider == 'codex' else 'Claude'} account before asking the run assistant.")
     model = str(body.get("model") or "")
     if model:
         token(model, "model", r"[A-Za-z0-9._:\-]+")
     effort = str(body.get("reasoning_effort") or "")
     if effort and effort not in REASONING_EFFORTS:
         raise ValueError("Invalid thinking level.")
-    run_dir = resolve_run_directory(run_id)
     if not _chat_lock.acquire(blocking=False):
         raise ValueError("Another assistant question is currently running. Wait for it to finish.")
     try:
@@ -511,7 +519,7 @@ def run_assistant_turn(run_id: str, body: dict, progress=None) -> dict:
         manifest = artifact_manifest(run_id)
         all_evidence_paths = sorted(
             path for path in manifest["allowed"]
-            if not path.startswith("assistant/") and not path.endswith("codex.log")
+            if not path.startswith("assistant/") and not path.endswith(("codex.log", "claude.log"))
         )
         evidence = assistant_evidence_snapshot(run_dir, set(all_evidence_paths), question)
         evidence_paths = list(evidence["paths"])
@@ -526,9 +534,8 @@ def run_assistant_turn(run_id: str, body: dict, progress=None) -> dict:
             "preparing_model", f"Selected {len(evidence_paths)} relevant files ({evidence['characters']:,} characters).",
             selected_files=len(evidence_paths), evidence_characters=evidence["characters"],
         )
-        config = json_file(run_dir / "codex-loop-config.json") or {}
         summary = json_file(run_dir / "codex-loop-result.json") or {}
-        catalog = codex_model_catalog()
+        catalog = provider_model_catalog(provider)
         available_models = [
             {
                 "id": str(item.get("id") or ""),
@@ -547,7 +554,7 @@ Answer the operator's question using evidence from this run only. Treat every AP
 Run directory: {run_dir}
 Package: {config.get('package') or run_id}
 Recorded status: {summary.get('status') or 'analysis'}
-Recorded provider/model: Codex / {config.get('model') or 'account default'}
+Recorded provider/model: {config.get('provider') or 'codex'} / {config.get('model') or 'account default'}
 Models available to the connected account:
 {json.dumps(available_models, indent=2)}
 Available evidence paths:
@@ -568,34 +575,27 @@ Return the required JSON object. Cite only exact paths from Available evidence p
         response_path = turn_dir / "response.json"
         log_path = turn_dir / "agent.log"
         prompt_path.write_text(prompt, encoding="utf-8")
-        command = [
-            shutil.which("codex") or "codex", "exec", "--sandbox", "read-only",
-            "--skip-git-repo-check", "--disable", "multi_agent", "--color", "never",
-            "--config", 'approval_policy="never"',
-        ]
-        if effort:
-            command.extend(["--config", f"model_reasoning_effort={json.dumps(effort)}"])
-        command.extend([
-            "--output-schema", str(ASSISTANT_SCHEMA),
-            "--output-last-message", str(response_path),
-        ])
-        if model:
-            command.extend(["--model", model])
-        command.append("-")
+        adapter = provider_adapter(provider)
+        provider_request = ProviderRequest(
+            provider=provider, prompt=prompt, cwd=run_dir,
+            schema_path=ASSISTANT_SCHEMA, output_path=response_path,
+            model=model, reasoning_effort=effort, reasoning_mode="single", writable=False,
+        )
+        command, provider_prompt = adapter.prepare(provider_request)
         report_progress(
-            "reasoning", "Codex is reviewing the selected evidence and preparing a structured answer.",
+            "reasoning", f"{adapter.label} is reviewing the selected evidence and preparing a structured answer.",
             selected_files=len(evidence_paths), evidence_characters=evidence["characters"],
         )
         try:
             result = subprocess.run(
-                command, cwd=run_dir, input=prompt, text=True,
+                command, cwd=run_dir, input=provider_prompt, text=True,
                 capture_output=True, timeout=300,
             )
         except subprocess.TimeoutExpired as error:
             log_path.write_text(strip_terminal_controls((error.stdout or "") + (error.stderr or "")), encoding="utf-8")
             raise ValueError("The run assistant timed out after five minutes.") from error
         log_path.write_text(strip_terminal_controls((result.stdout or "") + (result.stderr or "")), encoding="utf-8")
-        if result.returncode != 0 or not response_path.is_file():
+        if not adapter.finalize(provider_request, result.returncode, result.stdout or "") or not validate_provider_output(response_path, ASSISTANT_SCHEMA):
             raise ValueError("The run assistant failed. Inspect its agent log in Artifacts.")
         report_progress("finalizing", "Validating citations and the suggested action.")
         response = read_json(response_path)
@@ -638,11 +638,12 @@ Return the required JSON object. Cite only exact paths from Available evidence p
             "reasoning_effort": action_effort,
             "reasoning_mode": action_mode,
             "specialist_count": max(2, min(3, int(action.get("specialist_count") or 3))),
+            "provider": provider,
         }
         turn = {
             "id": uuid.uuid4().hex,
             "created_utc": utc_now(),
-            "provider": "codex",
+            "provider": provider,
             "model": model or "account-default",
             "reasoning_effort": effort or "model-default",
             "question": question,
@@ -681,9 +682,11 @@ def start_assistant_request(run_id: str, body: dict) -> dict:
     question = str(body.get("question") or "").strip()
     if not 1 <= len(question) <= 4000:
         raise ValueError("Question must contain between 1 and 4000 characters.")
-    if not codex_authenticated():
-        raise ValueError("Connect a ChatGPT account before asking the run assistant.")
-    resolve_run_directory(run_id)
+    run_dir = resolve_run_directory(run_id)
+    config = json_file(run_dir / "codex-loop-config.json") or {}
+    provider = str(body.get("provider") or config.get("provider") or "codex")
+    if provider not in PROVIDER_IDS or not provider_authenticated(provider):
+        raise ValueError(f"Connect your {'ChatGPT' if provider == 'codex' else 'Claude'} account before asking the run assistant.")
     if _chat_lock.locked():
         raise ValueError("Another assistant question is currently running. Wait for it to finish.")
     request_id = uuid.uuid4().hex
@@ -1060,6 +1063,123 @@ def sign_out_codex() -> dict:
     return auth_state()
 
 
+def claude_login_status(*, force: bool = False) -> dict:
+    now = time.monotonic()
+    with _auth_lock:
+        if not force and now - float(_claude_auth_cache["checked"]) < 10:
+            return dict(_claude_auth_cache)
+    try:
+        result = subprocess.run(["claude", "auth", "status", "--json"], text=True, capture_output=True, timeout=15)
+        detail = strip_terminal_controls(result.stdout or result.stderr or "Not signed in.").strip()
+        authenticated = result.returncode == 0
+        if authenticated:
+            try:
+                payload = json.loads(result.stdout)
+                authenticated = bool(payload.get("loggedIn", payload.get("authenticated", True)))
+                detail = str(payload.get("email") or payload.get("subscriptionType") or "Claude account connected.")
+            except json.JSONDecodeError:
+                pass
+    except (OSError, subprocess.SubprocessError) as error:
+        authenticated, detail = False, f"Claude login status failed: {error}"
+    with _auth_lock:
+        _claude_auth_cache.update({"checked": now, "authenticated": authenticated, "detail": detail})
+        return dict(_claude_auth_cache)
+
+
+def claude_auth_state() -> dict:
+    login = claude_login_status()
+    with _auth_lock:
+        flow = dict(_claude_auth_state)
+    return {
+        "id": "claude", "label": "Claude", "account_label": "Claude.ai",
+        "available": bool(shutil.which("claude")), "authenticated": login["authenticated"],
+        "detail": login["detail"], "device_flow": flow,
+    }
+
+
+def start_claude_auth() -> dict:
+    global _claude_auth_process
+    if claude_login_status(force=True)["authenticated"]:
+        return claude_auth_state()
+    with _auth_lock:
+        if _claude_auth_state["running"]:
+            return claude_auth_state()
+        _claude_auth_state.update({
+            "running": True, "output": "Starting Claude browser sign-in…",
+            "exit_code": None, "started_utc": utc_now(),
+        })
+        try:
+            environment = os.environ.copy()
+            environment.update({"NO_COLOR": "1", "DISABLE_AUTOUPDATER": "1"})
+            _claude_auth_process = subprocess.Popen(
+                ["claude", "auth", "login"], text=True, stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT, bufsize=1, env=environment,
+            )
+        except OSError as error:
+            _claude_auth_state.update({"running": False, "output": str(error), "exit_code": 2})
+            raise ValueError(f"Could not start Claude sign-in: {error}") from error
+
+    def collect() -> None:
+        global _claude_auth_process
+        assert _claude_auth_process is not None and _claude_auth_process.stdout is not None
+        chunks: list[str] = []
+        for line in _claude_auth_process.stdout:
+            chunks.append(line)
+            with _auth_lock:
+                _claude_auth_state["output"] = strip_terminal_controls("".join(chunks))[-16_000:]
+        exit_code = _claude_auth_process.wait()
+        with _auth_lock:
+            _claude_auth_state.update({"running": False, "exit_code": exit_code})
+            _claude_auth_process = None
+            _claude_auth_cache["checked"] = 0.0
+
+    threading.Thread(target=collect, name="mob-ai-claude-login", daemon=True).start()
+    return claude_auth_state()
+
+
+def sign_out_claude() -> dict:
+    with _auth_lock:
+        if _claude_auth_state["running"]:
+            raise ValueError("Wait for the current Claude sign-in attempt to finish before signing out.")
+    result = subprocess.run(["claude", "auth", "logout"], text=True, capture_output=True, timeout=30)
+    if result.returncode != 0:
+        raise ValueError(strip_terminal_controls(result.stderr or result.stdout or "Claude logout failed.").strip())
+    with _auth_lock:
+        _claude_auth_cache.update({"checked": time.monotonic(), "authenticated": False, "detail": "Not signed in."})
+        _claude_auth_state.update({"running": False, "output": "", "exit_code": None, "started_utc": None})
+    return claude_auth_state()
+
+
+def provider_auth_state(provider: str) -> dict:
+    if provider == "codex":
+        return {"id": "codex", "label": "Codex", "account_label": "ChatGPT", **auth_state()}
+    if provider == "claude":
+        return claude_auth_state()
+    raise ValueError("Unsupported reasoning provider.")
+
+
+def provider_authenticated(provider: str) -> bool:
+    if provider == "codex":
+        return codex_authenticated()
+    if provider == "claude":
+        return bool(claude_login_status()["authenticated"])
+    return False
+
+
+def provider_model_catalog(provider: str, *, force: bool = False) -> dict:
+    if provider == "codex":
+        return codex_model_catalog(force=force)
+    if provider != "claude":
+        raise ValueError("Unsupported reasoning provider.")
+    if not claude_login_status(force=force)["authenticated"]:
+        return {"provider": "claude", "models": [], "source": "authentication_required"}
+    levels = [dict(level) for level in DEFAULT_REASONING_LEVELS if level["effort"] in {"low", "medium", "high"}]
+    return {"provider": "claude", "source": "claude_code", "models": [
+        {"id": "sonnet", "display_name": "Claude Sonnet", "is_default": True, "reasoning_levels": levels, "default_reasoning_effort": "high"},
+        {"id": "opus", "display_name": "Claude Opus", "is_default": False, "reasoning_levels": levels, "default_reasoning_effort": "high"},
+    ]}
+
+
 def runs() -> list[dict]:
     if not RUNS_ROOT.is_dir():
         return []
@@ -1108,6 +1228,7 @@ def runs() -> list[dict]:
             "reason": str((loop.get("reason") if loop else "") or ""),
             "frida_server": str(config.get("start_frida_server") if config else ""),
             "reasoning_mode": str((config.get("reasoning_mode") if config else "single") or "single"),
+            "provider": str((config.get("provider") if config else "codex") or "codex"),
             "model": actual_model,
             "reasoning_effort": actual_effort,
             "specialist_count": int(config.get("specialist_count") or 3) if config else 3,
@@ -1212,8 +1333,12 @@ def resume_attempt_kind(run_dir: Path) -> str:
 
 
 def start_job(kind: str, label: str, payload: dict) -> dict:
-    if not codex_authenticated():
-        raise ValueError("Codex is not signed in. Connect a ChatGPT account from the dashboard first.")
+    provider = str(payload.get("provider") or "codex")
+    if provider not in PROVIDER_IDS:
+        raise ValueError("Unsupported reasoning provider.")
+    if not provider_authenticated(provider):
+        account = "ChatGPT" if provider == "codex" else "Claude"
+        raise ValueError(f"{account} is not connected. Connect it from the dashboard first.")
     run_id = Path(payload["run"]).name if kind in {"resume", "retry"} else ""
     existing = jobs() if run_id else []
     related = [job for job in existing if job.get("run_id") == run_id]
@@ -1286,6 +1411,9 @@ def parse_start(body: dict) -> tuple[str, dict]:
     package = str(body.get("package") or "")
     if package:
         token(package, "package name", r"[A-Za-z0-9_.]+")
+    provider = str(body.get("provider") or "codex")
+    if provider not in PROVIDER_IDS:
+        raise ValueError("Unsupported reasoning provider.")
     model = str(body.get("model") or "")
     if model:
         token(model, "model", r"[A-Za-z0-9._:\-]+")
@@ -1303,7 +1431,7 @@ def parse_start(body: dict) -> tuple[str, dict]:
         "apk": str(apk), "success_spec": str(spec), "transport": transport, "target": target,
         "max_iterations": maximum, "observation_seconds": observation, "run_seconds": run_seconds,
         "install": bool(body.get("install")), "frida_server": frida_server, "package": package,
-        "model": model, "reasoning_effort": reasoning_effort, "readiness_token": readiness_token,
+        "provider": provider, "model": model, "reasoning_effort": reasoning_effort, "readiness_token": readiness_token,
         "reasoning_mode": reasoning_mode, "specialist_count": specialist_count,
         "derived_from_run": derived_from_run,
         "derived_from_policy_sha256": derived_from_policy_sha256,
@@ -1321,6 +1449,9 @@ def parse_resume(body: dict) -> tuple[str, dict]:
     maximum = int(body.get("max_iterations") or 0)
     if not 1 <= maximum <= 10:
         raise ValueError("Additional iterations must be between 1 and 10.")
+    provider = str(body.get("provider") or "codex")
+    if provider not in PROVIDER_IDS:
+        raise ValueError("Unsupported reasoning provider.")
     model = str(body.get("model") or "")
     if model:
         token(model, "model", r"[A-Za-z0-9._:\-]+")
@@ -1344,7 +1475,7 @@ def parse_resume(body: dict) -> tuple[str, dict]:
         if recorded_hash and policy_hash != recorded_hash:
             raise ValueError("The selected success policy does not match this assessment run.")
     return run_dir.name, {
-        "run": str(run_dir), "max_iterations": maximum, "model": model,
+        "run": str(run_dir), "max_iterations": maximum, "provider": provider, "model": model,
         "reasoning_effort": reasoning_effort, "frida_server": frida_server,
         "reasoning_mode": reasoning_mode, "specialist_count": specialist_count,
         "success_spec_sha256": policy_hash,
@@ -1389,7 +1520,7 @@ def upload_too_large(_error):
 def health():
     worker_age = time.time() - HEARTBEAT_PATH.stat().st_mtime if HEARTBEAT_PATH.is_file() else None
     return jsonify(
-        status="ok", codex_available=bool(shutil.which("codex")),
+        status="ok", codex_available=bool(shutil.which("codex")), claude_available=bool(shutil.which("claude")),
         worker_available=worker_age is not None and worker_age < 30,
     )
 
@@ -1402,15 +1533,50 @@ def overview():
     example = WORKSPACE / "pipeline" / "success-spec.example.json"
     if example.is_file():
         specs.append({"name": example.name, "path": workspace_relative(example)})
+    codex_state = provider_auth_state("codex")
+    claude_state = provider_auth_state("claude")
+    codex_models = provider_model_catalog("codex")
+    claude_models = provider_model_catalog("claude")
     return jsonify(
         apks=apks, success_specs=specs, runs=runs(), jobs=jobs(),
-        codex=auth_state(), models=codex_model_catalog(),
+        codex=codex_state, models=codex_models,
+        providers={"codex": codex_state, "claude": claude_state},
+        model_catalogs={"codex": codex_models, "claude": claude_models},
     )
 
 
 @app.get("/api/models")
 def models():
-    return jsonify(codex_model_catalog(force=request.args.get("refresh") == "1"))
+    provider = str(request.args.get("provider") or "codex")
+    return jsonify(provider_model_catalog(provider, force=request.args.get("refresh") == "1"))
+
+
+@app.get("/api/providers")
+def providers():
+    return jsonify(providers={provider: provider_auth_state(provider) for provider in sorted(PROVIDER_IDS)})
+
+
+@app.get("/api/providers/<provider>/auth")
+def get_provider_auth(provider: str):
+    return jsonify(provider_auth_state(provider))
+
+
+@app.post("/api/providers/<provider>/auth/login")
+def begin_provider_auth(provider: str):
+    if provider == "codex":
+        return jsonify(start_device_auth()), 202
+    if provider == "claude":
+        return jsonify(start_claude_auth()), 202
+    raise ValueError("Unsupported reasoning provider.")
+
+
+@app.post("/api/providers/<provider>/auth/logout")
+def logout_provider_auth(provider: str):
+    if provider == "codex":
+        return jsonify(sign_out_codex())
+    if provider == "claude":
+        return jsonify(sign_out_claude())
+    raise ValueError("Unsupported reasoning provider.")
 
 
 @app.get("/api/auth")

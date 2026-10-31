@@ -10,6 +10,8 @@ ARG FRIDA_TOOLS_VERSION=14.11.0
 ARG APKTOOL_VERSION=3.0.3
 ARG UBER_APK_SIGNER_VERSION=1.3.0
 ARG CODEX_CLI_VERSION=0.162.1
+ARG CLAUDE_CODE_VERSION=2.1.316
+ARG NODE_VERSION=22.23.4
 ARG ANDROID_PLATFORM_TOOLS_URL=https://dl.google.com/android/repository/platform-tools-latest-linux.zip
 
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -20,7 +22,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        bash bubblewrap ca-certificates curl file git jq nodejs npm openssh-client python3 python3-pip python3-venv tini unzip xz-utils \
+        bash bubblewrap ca-certificates curl file git jq openssh-client python3 python3-pip python3-venv tini unzip xz-utils \
     && rm -rf /var/lib/apt/lists/*
 
 # The GitHub API lookup avoids baking release-date-dependent Ghidra filenames into
@@ -48,9 +50,24 @@ RUN set -eux; \
     rm /tmp/platform-tools.zip
 
 RUN set -eux; \
+    case "$(dpkg --print-architecture)" in \
+      amd64) node_arch=x64 ;; \
+      arm64) node_arch=arm64 ;; \
+      *) echo "Unsupported Node architecture" >&2; exit 1 ;; \
+    esac; \
+    node_archive="node-v${NODE_VERSION}-linux-${node_arch}.tar.xz"; \
+    curl -fL "https://nodejs.org/dist/v${NODE_VERSION}/${node_archive}" -o "/tmp/${node_archive}"; \
+    curl -fL "https://nodejs.org/dist/v${NODE_VERSION}/SHASUMS256.txt" -o /tmp/node-shasums.txt; \
+    grep "  ${node_archive}$" /tmp/node-shasums.txt > /tmp/node-sha256.txt; \
+    (cd /tmp && sha256sum -c node-sha256.txt); \
+    tar -xJf "/tmp/${node_archive}" -C /usr/local --strip-components=1; \
+    rm "/tmp/${node_archive}" /tmp/node-shasums.txt /tmp/node-sha256.txt; \
+    node --version; \
+    npm --version; \
     python3 -m pip install --no-cache-dir --break-system-packages "frida-tools==${FRIDA_TOOLS_VERSION}" "Flask==3.1.2" "gunicorn==23.0.0"; \
-    npm install --global "@openai/codex@${CODEX_CLI_VERSION}"; \
+    npm install --global "@openai/codex@${CODEX_CLI_VERSION}" "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"; \
     codex --version; \
+    claude --version; \
     curl -fL "https://github.com/iBotPeaches/Apktool/releases/download/v${APKTOOL_VERSION}/apktool_${APKTOOL_VERSION}.jar" -o /opt/apktool.jar; \
     printf '%s\n' '#!/bin/sh' 'exec java -jar /opt/apktool.jar "$@"' > /usr/local/bin/apktool; \
     chmod 0755 /usr/local/bin/apktool; \
@@ -82,11 +99,13 @@ RUN set -eux; \
     else \
       useradd --create-home --shell /bin/bash --uid 1000 analyst; \
     fi; \
-    mkdir -p /workspace /home/analyst/.android /home/analyst/.ghidra /home/analyst/.codex; \
+    mkdir -p /workspace /home/analyst/.android /home/analyst/.ghidra /home/analyst/.codex /home/analyst/.claude; \
     chown -R analyst:analyst /workspace /home/analyst
 
 WORKDIR /workspace
 USER analyst
+
+ENV DISABLE_AUTOUPDATER=1
 
 # Ghidra MCP is the long-running service; Compose's init process forwards signals.
 # Other analysis tools remain available through `docker compose exec`.

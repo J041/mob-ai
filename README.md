@@ -6,7 +6,7 @@ A non-root Docker environment containing:
 - Ghidra 12.1.4 (`analyzeHeadless` and `ghidraRun`), aligned with Ghidra MCP 7.0.0
 - the latest Android SDK Platform Tools at image build time (`adb`)
 - Frida command-line tools, Apktool, and Uber APK Signer
-- Codex CLI 0.162.1, Java 21, Python 3, Node.js, Git, and common file utilities
+- Codex CLI 0.162.1, Claude Code 2.1.316, Java 21, Python 3, Node.js 22.23.4 LTS, Git, and common file utilities
 
 The repository is mounted at `/workspace`. Ghidra user state and ADB keys live in named volumes, so rebuilding the image does not discard them.
 
@@ -21,9 +21,9 @@ docker compose up -d --build --wait
 ```
 
 On Windows, `.\scripts\ui.cmd` is an equivalent one-command launcher. Open
-`http://127.0.0.1:8787/`, select **Codex · Connect ChatGPT**, and complete the
-browser/device sign-in with your ChatGPT account. The login persists in the private
-`codex-state` Docker volume. To use another port or change the upload limit, copy
+`http://127.0.0.1:8787/`, then connect either **Codex · ChatGPT** or
+**Claude · Claude.ai** from the dashboard. Each login persists in its own private
+Docker volume (`codex-state` or `claude-state`). To use another port or change the upload limit, copy
 `.env.example` to `.env` and edit it. Stop the application with `docker compose down`.
 
 The dashboard provides:
@@ -32,7 +32,7 @@ The dashboard provides:
 - emulator, ADB serial, or wireless targets with in-UI pairing;
 - device discovery through the toolbox container;
 - observation, runtime, Frida Server, and iteration controls;
-- Codex model and thinking-level dropdowns populated from the connected ChatGPT account's model catalog;
+- provider, model, and thinking-level selection for connected Codex and Claude accounts;
 - durable queued start, resume, and diagnostic-retry jobs with live output;
 - a run ledger showing findings, observations, status and resumability;
 - a per-run artifact browser for findings, hooks, comparisons, crash logs, Codex decisions, saved Ghidra results, and success-policy checks;
@@ -203,16 +203,16 @@ A success specification has `mode: "all"` or `mode: "any"` and a non-empty `chec
 
 Every criterion and its result is stored under `attempts[].repetitions[].checks` in `result.json`. `--success-regex` remains available for simple and backward-compatible checks, but cannot be combined with `--success-spec`.
 
-### Autonomous Codex reasoning loop
+### Autonomous provider reasoning loop
 
-The Python loop performs observation, asks headless Codex to make one narrowly
+The Python loop performs observation, asks the selected headless provider to make one narrowly
 scoped candidate-hook change, validates it on the selected device, and feeds the
 recorded failure into the next attempt. It stops when the success policy passes,
-Codex requests human review, two attempts make no progress, or the iteration limit
-is reached. Codex runs with only the current iteration directory writable; device
+the provider requests human review, two attempts make no progress, or the iteration limit
+is reached. The provider runs with only the current iteration directory writable; device
 access and validation remain under the deterministic orchestrator.
 
-Prerequisites are Docker Desktop, a ChatGPT account connected from the dashboard, an
+Prerequisites are Docker Desktop, a connected ChatGPT or Claude account, an
 authorized test device, and a compatible running or startable Frida Server. The UI
 builds an auditable policy from **Basic launch**, **Detection warning removed**,
 **Expected screen reached**, or **Custom** presets. It records the no-bypass baseline
@@ -234,9 +234,15 @@ and **Offline** devices. Pairing and last-used connection endpoints and timestam
 be retained; six-digit pairing codes are never stored. A previously paired label is
 host history rather than proof that Android has not subsequently revoked the pairing.
 
-**Reasoning mode** controls each Codex iteration. **Single agent** explicitly disables multi-agent delegation. **Parallel specialists** enables it and allows two or three read-only reviewers to inspect independent static, runtime, and relevant native evidence concurrently. Specialists inherit the configured read-only Ghidra MCP access but cannot edit the hook or operate the device; only the root agent may update `candidate.js` and return the structured decision. Parallel mode can improve complex evidence review but may use more ChatGPT-plan capacity than single mode.
+**Reasoning mode** controls each provider iteration. **Single agent** disables delegation. **Parallel specialists** allows two or three read-only reviewers to inspect independent static, runtime, and relevant native evidence when supported by the selected provider. Specialists cannot edit the hook or operate the device; only the root agent may update `candidate.js` and return the structured decision.
 
-Each iteration is auditable under `runs/RUN_ID/agent/iteration-N/` and contains the prompt, candidate hook, Codex decision, Codex log, Frida/logcat output, validation result, and combined record. `codex-loop-result.json` records the terminal status and complete history. The loop never rebuilds or resigns the APK, and it directs Codex to request human review for remote attestation or unsupported/high-risk changes.
+Each iteration is auditable under `runs/RUN_ID/agent/iteration-N/` and contains the prompt, candidate hook, provider decision and log, Frida/logcat output, validation result, and combined record. `codex-loop-result.json` retains its compatibility filename and records the terminal status and complete history. The loop never rebuilds or resigns the APK, and it directs the provider to request human review for remote attestation or unsupported/high-risk changes.
+
+Reasoning execution is normalized in `ui/providers.py`. CLI providers receive the same
+prompt, JSON schema, model/effort selection, working directory, and access mode, then
+return the same validated JSON object. This is the extension point for a future
+self-hosted adapter: add its transport and authentication/model catalog while preserving
+schema validation, the candidate-only write boundary, and deterministic device validation.
 
 Each assessment row also exposes **Ask assistant**. The run assistant operates in a
 read-only sandbox and answers questions from that run's recorded artifacts, with

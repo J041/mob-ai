@@ -308,7 +308,7 @@ input::placeholder { color: #465358; }
 .assistant-heading { min-height: 82px; display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; padding: 19px 21px; border-bottom: 1px solid var(--line-soft); }
 .assistant-heading small { display: block; margin-top: 5px; color: var(--muted); font: 9px var(--mono); }
 .assistant-shell { height: calc(100% - 82px); display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto auto; }
-.assistant-controls { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; padding: 13px 16px; border-bottom: 1px solid var(--line-soft); }
+.assistant-controls { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; padding: 13px 16px; border-bottom: 1px solid var(--line-soft); }
 .assistant-suggestions { display: flex; flex-wrap: wrap; gap: 7px; padding: 10px 16px; border-bottom: 1px solid var(--line-soft); }
 .assistant-suggestions button, .assistant-citation { border: 1px solid var(--line); border-radius: 999px; padding: 6px 9px; color: #b8c8c7; background: transparent; cursor: pointer; font-size: 9px; }
 .assistant-suggestions button:hover, .assistant-citation:hover { color: var(--green); border-color: #536b3c; }

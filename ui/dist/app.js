@@ -1,6 +1,6 @@
 'use strict';
 
-const state = { overview: null, devices: [], selectedJob: null, poll: null, authPoll: null, readiness: null, continuationMode: 'resume', expandedRuns: new Set(), knownAttemptRuns: new Set(), jobStripScroll: 0, artifactRun: null, artifactManifest: null, artifactCategory: null, artifactPath: null, artifactPreviewCache: new Map(), assistantRun: null, assistantTurns: [] };
+const state = { overview: null, devices: [], selectedJob: null, poll: null, authPoll: null, authProvider: 'codex', readiness: null, continuationMode: 'resume', expandedRuns: new Set(), knownAttemptRuns: new Set(), jobStripScroll: 0, artifactRun: null, artifactManifest: null, artifactCategory: null, artifactPath: null, artifactPreviewCache: new Map(), assistantRun: null, assistantTurns: [] };
 const $ = selector => document.querySelector(selector);
 const $$ = selector => [...document.querySelectorAll(selector)];
 
@@ -50,14 +50,21 @@ function setTab(name) {
   $$('.tab-panel').forEach(panel => panel.classList.toggle('active', panel.dataset.panel === name));
 }
 
-function renderModelOptions(catalog) {
-  const models = catalog?.models || [];
-  const authenticationRequired = catalog?.source === 'authentication_required';
-  const defaultModel = models.find(model => model.is_default) || models[0];
+function providerCatalog(form) {
+  const provider = form?.elements?.provider?.value || 'codex';
+  return state.overview?.model_catalogs?.[provider] || (provider === 'codex' ? state.overview?.models : null);
+}
+
+function renderModelOptions() {
   $$('.model-select').forEach(select => {
+    const catalog = providerCatalog(select.form);
+    const provider = select.form?.elements?.provider?.value || 'codex';
+    const models = catalog?.models || [];
+    const authenticationRequired = catalog?.source === 'authentication_required';
+    const defaultModel = models.find(model => model.is_default) || models[0];
     const previous = select.value;
     const firstLabel = authenticationRequired
-      ? 'Connect ChatGPT account'
+      ? `Connect ${provider === 'codex' ? 'ChatGPT' : 'Claude'} account`
       : 'Account default';
     select.replaceChildren();
     option(select, '', firstLabel);
@@ -74,7 +81,7 @@ function renderModelOptions(catalog) {
       : defaultModel?.id || '';
     select.disabled = authenticationRequired;
     select.title = authenticationRequired
-      ? 'Connect your ChatGPT account using the button at the top of the page.'
+      ? `Connect your ${provider === 'codex' ? 'ChatGPT' : 'Claude'} account using the button at the top of the page.`
       : catalog?.source === 'connected_chatgpt_account'
       ? 'Models available to the connected ChatGPT account.'
       : catalog?.source === 'codex_app_server'
@@ -89,7 +96,7 @@ function reasoningLabel(level) {
   return names[level.effort] || level.effort;
 }
 
-function renderReasoningOptions(modelSelect, catalog = state.overview?.models) {
+function renderReasoningOptions(modelSelect, catalog = providerCatalog(modelSelect.form)) {
   const select = modelSelect.form.querySelector('.reasoning-select');
   if (!select) return;
   const previous = select.value;
@@ -102,7 +109,7 @@ function renderReasoningOptions(modelSelect, catalog = state.overview?.models) {
     levels = [...seen.values()];
   }
   const defaultLabel = authenticationRequired
-    ? 'Connect ChatGPT account'
+    ? `Connect ${(modelSelect.form?.elements?.provider?.value || 'codex') === 'codex' ? 'ChatGPT' : 'Claude'} account`
     : modelSelect.closest('#resumeForm')
     ? 'Model default'
     : `Model default${model?.default_reasoning_effort ? ` · ${reasoningLabel({ effort: model.default_reasoning_effort })}` : ''}`;
@@ -118,7 +125,7 @@ function renderReasoningOptions(modelSelect, catalog = state.overview?.models) {
     : [...select.options].some(item => item.value === actualDefault) ? actualDefault : '';
   select.disabled = authenticationRequired;
   select.title = authenticationRequired
-    ? 'Connect your ChatGPT account to choose a thinking level.'
+    ? 'Connect the selected provider account to choose a thinking level.'
     : model
     ? `Thinking levels supported by ${model.display_name}.`
     : 'Choose a model first for its exact supported thinking levels.';
@@ -129,11 +136,14 @@ function renderOverview(data) {
   $('#apkCount').textContent = data.apks.length;
   $('#runCount').textContent = data.runs.length;
   $('#activeCount').textContent = data.jobs.filter(job => job.running).length;
-  const auth = $('#codexAuth');
-  const ready = Boolean(data.codex?.available && data.codex?.authenticated);
-  auth.textContent = ready ? 'CODEX · CHATGPT CONNECTED' : 'CODEX · CONNECT CHATGPT';
-  auth.className = `auth-pill ${ready ? 'ready' : 'missing'}`;
-  renderModelOptions(data.models);
+  [['codex', '#codexAuth', 'CHATGPT'], ['claude', '#claudeAuth', 'CLAUDE']].forEach(([provider, selector, account]) => {
+    const auth = $(selector);
+    const providerState = data.providers?.[provider] || (provider === 'codex' ? data.codex : null);
+    const ready = Boolean(providerState?.available && providerState?.authenticated);
+    auth.textContent = ready ? `${provider.toUpperCase()} · ${account} CONNECTED` : `${provider.toUpperCase()} · CONNECT ${account}`;
+    auth.className = `auth-pill ${ready ? 'ready' : 'missing'}`;
+  });
+  renderModelOptions();
 
   const specOptions = $('#specOptions');
   specOptions.replaceChildren();
@@ -238,6 +248,8 @@ function beginReassessment(runId) {
   form.elements.observation_seconds.value = run.observation_seconds || 15;
   form.elements.run_seconds.value = run.run_seconds || 20;
   form.elements.frida_server.value = run.frida_server || '/data/local/tmp/frida-server';
+  form.elements.provider.value = run.provider || 'codex';
+  renderModelOptions();
   form.elements.model.value = run.model || '';
   renderReasoningOptions(form.elements.model);
   form.elements.reasoning_effort.value = run.reasoning_effort || '';
@@ -302,6 +314,11 @@ async function openRunAssistant(runId) {
   $('#assistantSubtitle').textContent = `${run.id} · ${String(run.status || 'analysis').replaceAll('_', ' ')}`;
   $('#assistantMessages').innerHTML = '<p class="assistant-empty">Loading conversation…</p>';
   const dialog = $('#assistantDialog');
+  const form = $('#assistantForm');
+  form.elements.provider.value = run.provider || 'codex';
+  renderModelOptions();
+  if (run.model && [...form.elements.model.options].some(item => item.value === run.model)) form.elements.model.value = run.model;
+  renderReasoningOptions(form.elements.model);
   if (!dialog.open) dialog.showModal();
   try {
     const payload = await api(`/api/runs/${encodeURIComponent(runId)}/assistant`);
@@ -323,6 +340,8 @@ function prepareAssistantRerun(turnId) {
   setTab('resume');
   $('#resumeRun').value = run.path;
   populateContinuationValues(run);
+  form.elements.provider.value = action.provider || run.provider || 'codex';
+  renderModelOptions();
   form.elements.max_iterations.value = String(Math.max(1, Math.min(10, Number(action.additional_iterations || 3))));
   if (action.model) {
     if (![...form.elements.model.options].some(item => item.value === action.model)) option(form.elements.model, action.model, `${action.model} · suggested`);
@@ -790,8 +809,9 @@ async function submitForm(form, endpoint) {
   const button = form.querySelector('button[type="submit"]');
   button.disabled = true;
   try {
-    if (!state.overview?.codex?.authenticated) throw new Error('Connect your ChatGPT account before starting an assessment.');
     const payload = formJson(form);
+    const providerState = state.overview?.providers?.[payload.provider || 'codex'];
+    if (!providerState?.authenticated) throw new Error(`Connect your ${(payload.provider || 'codex') === 'codex' ? 'ChatGPT' : 'Claude'} account before starting an assessment.`);
     if (endpoint === '/api/start') {
       if (!payload.readiness_token) throw new Error('Run device readiness and resolve every required check before starting.');
       if (!payload.source_run) {
@@ -813,17 +833,22 @@ async function submitForm(form, endpoint) {
 }
 
 function renderAuth(data) {
+  const provider = data.id || state.authProvider;
+  const account = data.account_label || (provider === 'codex' ? 'ChatGPT' : 'Claude');
   const flow = data.device_flow || {};
   const cleanOutput = String(flow.output || '').replace(/\u001b(?:\[[0-?]*[ -/]*[@-~]|\][^\u0007]*(?:\u0007|\u001b\\))/g, '');
-  $('#authStatus').textContent = data.authenticated ? 'ChatGPT account connected' : (flow.running ? 'Waiting for browser authorization…' : 'Not connected');
-  $('#authOutput').textContent = data.authenticated ? (data.detail || 'Logged in with ChatGPT.') : (cleanOutput || data.detail || 'Select Continue with ChatGPT to begin.');
+  $('#authKicker').textContent = `${provider.toUpperCase()} AUTHENTICATION`;
+  $('#authTitle').textContent = `Connect your ${account} account`;
+  $('#authCopy').textContent = `Use your ${account} account for the ${data.label || provider} reasoning provider. Browser authentication persists in a private Docker volume.`;
+  $('#authStatus').textContent = data.authenticated ? `${account} account connected` : (flow.running ? 'Waiting for browser authorization…' : 'Not connected');
+  $('#authOutput').textContent = data.authenticated ? (data.detail || `Logged in with ${account}.`) : (cleanOutput || data.detail || `Select Continue with ${account} to begin.`);
   const start = $('#startAuth');
   start.disabled = Boolean(flow.running || data.authenticated);
-  start.textContent = data.authenticated ? 'Connected' : (flow.running ? 'Waiting for sign-in…' : 'Continue with ChatGPT');
+  start.textContent = data.authenticated ? 'Connected' : (flow.running ? 'Waiting for sign-in…' : `Continue with ${account}`);
   const signOut = $('#signOutAuth');
   signOut.hidden = !data.authenticated;
   signOut.disabled = false;
-  const match = cleanOutput.match(/https:\/\/auth\.openai\.com\/[^\s\u001b]+/);
+  const match = cleanOutput.match(/https:\/\/[^\s\u001b]+/);
   const link = $('#authLink');
   if (match && !data.authenticated) {
     link.href = match[0].replace(/[),.;]+$/, '');
@@ -842,18 +867,19 @@ function renderAuth(data) {
 }
 
 async function refreshAuth() {
-  try { renderAuth(await api('/api/auth')); }
+  try { renderAuth(await api(`/api/providers/${encodeURIComponent(state.authProvider)}/auth`)); }
   catch (error) { toast(error.message, true); }
 }
 
-async function openAuth() {
+async function openAuth(provider = 'codex') {
+  state.authProvider = provider;
   $('#authDialog').showModal();
   await refreshAuth();
 }
 
 async function beginAuth() {
   $('#startAuth').disabled = true;
-  try { renderAuth(await api('/api/auth/device', { method: 'POST' })); }
+  try { renderAuth(await api(`/api/providers/${encodeURIComponent(state.authProvider)}/auth/login`, { method: 'POST' })); }
   catch (error) { toast(error.message, true); $('#startAuth').disabled = false; }
 }
 
@@ -862,10 +888,11 @@ async function signOutAuth() {
   button.disabled = true;
   button.textContent = 'Signing out…';
   try {
-    const auth = await api('/api/auth/logout', { method: 'POST' });
+    const account = state.authProvider === 'codex' ? 'ChatGPT' : 'Claude';
+    const auth = await api(`/api/providers/${encodeURIComponent(state.authProvider)}/auth/logout`, { method: 'POST' });
     renderAuth(auth);
     await refreshOverview(true);
-    toast('ChatGPT account signed out.');
+    toast(`${account} account signed out.`);
   } catch (error) {
     toast(error.message, true);
     button.disabled = false;
@@ -911,11 +938,11 @@ function updateResumeSummary() {
   if (state.continuationMode === 'resume' && !run.continuable) state.continuationMode = 'retry';
   if (fridaRecovery) fridaInput.value = run.frida_server || '/data/local/tmp/frida-server';
   const continuationAction = run.frida_recoverable
-    ? 'The failed observation will be archived, Frida will restart from this path, and observation will rerun before Codex continues.'
+    ? 'The failed observation will be archived, Frida will restart from this path, and observation will rerun before the reasoning provider continues.'
     : run.checkpoint_recoverable
     ? `The failed ${run.recovery_stage} checkpoint will retry without repeating completed analysis.`
     : 'Ready for additional iterations.';
-  const diagnosticAction = 'Existing evidence will be archived. Observation will rerun with Android crash-buffer, process-exit and available tombstone diagnostics before Codex continues.';
+  const diagnosticAction = 'Existing evidence will be archived. Observation will rerun with Android crash-buffer, process-exit and available tombstone diagnostics before the reasoning provider continues.';
   const action = state.continuationMode === 'retry' ? diagnosticAction : continuationAction;
   $('#continuationSubmit').innerHTML = state.continuationMode === 'retry' ? 'Rerun / retry <span>→</span>' : 'Continue loop <span>→</span>';
   $('#continuationHint').textContent = state.continuationMode === 'retry'
@@ -928,6 +955,8 @@ function updateResumeSummary() {
 function populateContinuationValues(run) {
   if (!run) return;
   const form = $('#resumeForm');
+  form.elements.provider.value = run.provider || 'codex';
+  renderModelOptions();
   const model = form.elements.model;
   if (run.model && ![...model.options].some(item => item.value === run.model)) {
     option(model, run.model, run.model);
@@ -965,6 +994,7 @@ async function askRunAssistant(event) {
       method: 'POST',
       body: JSON.stringify({
         question,
+        provider: form.elements.provider.value,
         model: form.elements.model.value,
         reasoning_effort: form.elements.reasoning_effort.value,
       }),
@@ -1017,6 +1047,11 @@ $$('.model-select').forEach(select => select.addEventListener('change', () => {
   if (reasoning) reasoning.value = '';
   renderReasoningOptions(select);
 }));
+$$('.provider-select').forEach(select => select.addEventListener('change', () => {
+  const model = select.form.querySelector('.model-select');
+  if (model) model.value = '';
+  renderModelOptions();
+}));
 $$('.reasoning-mode').forEach(select => {
   select.addEventListener('change', () => updateReasoningMode(select));
   updateReasoningMode(select);
@@ -1034,7 +1069,8 @@ $('#copyLog').addEventListener('click', async () => {
   try { await navigator.clipboard.writeText($('#consoleOutput').textContent); toast('Console copied.'); }
   catch (_) { toast('Clipboard access was unavailable.', true); }
 });
-$('#codexAuth').addEventListener('click', openAuth);
+$('#codexAuth').addEventListener('click', () => openAuth('codex'));
+$('#claudeAuth').addEventListener('click', () => openAuth('claude'));
 $('#startAuth').addEventListener('click', beginAuth);
 $('#signOutAuth').addEventListener('click', signOutAuth);
 $('#closeArtifacts').addEventListener('click', () => { state.artifactRun = null; $('#artifactDialog').close(); });
