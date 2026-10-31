@@ -632,6 +632,7 @@ class WebAppTests(unittest.TestCase):
                         "added": [{
                             "library": "liblater.so", "priority": "medium",
                             "reason": "JNI evidence links it to the unresolved startup stage.",
+                            "cross_abi": None,
                         }],
                     }), encoding="utf-8")
                     return True
@@ -651,6 +652,7 @@ class WebAppTests(unittest.TestCase):
                         "library": "libnext.so",
                         "priority": "medium",
                         "reason": "Loaded later in the protected application lifecycle.",
+                        "cross_abi": None,
                     }],
                 }), encoding="utf-8")
                 return True
