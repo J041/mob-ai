@@ -1,15 +1,16 @@
 # Container tooling
 
-JADX, Ghidra, and ADB are installed in the `reverse-engineering` Docker Compose service, not necessarily on the host.
+Container responsibilities are split to keep the control plane small. ADB and Frida are available in `web` and `worker`; JADX, Apktool, signing tools, the provider CLIs, and the Ghidra MCP bridge are in `worker`; full Ghidra is only in `reverse-engineering`. These tools are not necessarily installed on the host.
 
 When a task requires one of these tools, ensure the service is running and execute the command in it:
 
 ```powershell
 docker compose up -d
-docker compose exec -T reverse-engineering <command> <args...>
+docker compose exec -T worker <command> <args...>
+docker compose exec -T reverse-engineering analyzeHeadless <args...>
 ```
 
-On Windows, `scripts\codex-container.cmd <command> <args...>` is a convenient build/start/exec wrapper that does not depend on PowerShell script execution policy.
+On Windows, `scripts\codex-container.cmd <command> <args...>` is a convenient build/start/exec wrapper that does not depend on PowerShell script execution policy. It routes Ghidra commands to `reverse-engineering` and other toolbox commands to `worker`.
 
 The repository is mounted at `/workspace`, which is also the container working directory. Prefer headless commands (`jadx`, `analyzeHeadless`, and `adb`) so they work through Codex's terminal. Do not run untrusted samples outside the container.
 

@@ -1,6 +1,6 @@
 # Mobile reverse-engineering toolbox
 
-A non-root Docker environment containing:
+A non-root, three-image Docker stack containing:
 
 - JADX 1.5.6 (`jadx` and `jadx-gui`)
 - Ghidra 12.1.4 (`analyzeHeadless` and `ghidraRun`), aligned with Ghidra MCP 7.0.0
@@ -8,7 +8,7 @@ A non-root Docker environment containing:
 - Frida command-line tools, Apktool, and Uber APK Signer
 - Codex CLI 0.162.1, Claude Code 2.1.316, Java 21, Python 3, Node.js 22.23.4 LTS, Git, and common file utilities
 
-The repository is mounted at `/workspace`. Ghidra user state and ADB keys live in named volumes, so rebuilding the image does not discard them.
+The repository is mounted at `/workspace`. `mob-ai-web` contains the Flask control plane, provider CLIs, ADB and Frida; `mob-ai-worker` adds Java, JADX, Apktool, signing and the Ghidra bridge; `mob-ai-ghidra` contains full Ghidra and its MCP server. The web and worker share common provider-runtime layers, while full Ghidra is not copied into either image. Ghidra user state and ADB keys live in named volumes, so rebuilding images does not discard them.
 
 ## One-command web application
 
@@ -30,7 +30,7 @@ The dashboard provides:
 
 - direct APK upload and success-policy selection;
 - emulator, ADB serial, or wireless targets with in-UI pairing;
-- device discovery through the toolbox container;
+- device discovery through the lightweight web container;
 - observation, runtime, Frida Server, and iteration controls;
 - provider, model, and thinking-level selection for connected Codex and Claude accounts;
 - durable queued start, resume, and diagnostic-retry jobs with live output;
@@ -62,7 +62,7 @@ docker compose up -d --build
 .\scripts\codex-container.cmd adb version
 ```
 
-Run `.\scripts\codex-container.cmd` with no arguments for an interactive shell. Codex can use the same script or `docker compose exec -T reverse-engineering ...`; `AGENTS.md` records that instruction for future sessions. A PowerShell-native `codex-container.ps1` is also included, but Windows may require `powershell -ExecutionPolicy Bypass -File .\scripts\codex-container.ps1 ...` depending on local policy.
+Run `.\scripts\codex-container.cmd` with no arguments for an interactive worker shell. The wrapper routes `analyzeHeadless` and `ghidraRun` to the Ghidra image and all other commands to the worker image. Codex can use the same script; `AGENTS.md` records the direct Compose commands for future sessions. A PowerShell-native `codex-container.ps1` is also included, but Windows may require `powershell -ExecutionPolicy Bypass -File .\scripts\codex-container.ps1 ...` depending on local policy.
 
 You can also open the folder as a Dev Container. The included `.devcontainer/devcontainer.json` attaches the editor—and a Codex terminal running there—to the same service.
 

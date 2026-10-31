@@ -6,9 +6,13 @@ docker compose up -d --build
 if errorlevel 1 goto :failed
 
 if "%~1"=="" (
-  docker compose exec reverse-engineering bash
-) else (
+  docker compose exec worker bash
+) else if /I "%~1"=="analyzeHeadless" (
   docker compose exec -T reverse-engineering %*
+) else if /I "%~1"=="ghidraRun" (
+  docker compose exec -T reverse-engineering %*
+) else (
+  docker compose exec -T worker %*
 )
 set "exit_code=%errorlevel%"
 popd

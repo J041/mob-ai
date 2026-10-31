@@ -69,7 +69,7 @@ function Invoke-Pipeline {
         [Parameter(Mandatory = $true)][string[]]$PipelineArguments,
         [Parameter(Mandatory = $true)][string]$LogPath
     )
-    $Output = @(& docker compose exec -T reverse-engineering python3 pipeline/pipeline.py @PipelineArguments 2>&1)
+    $Output = @(& docker compose exec -T worker python3 pipeline/pipeline.py @PipelineArguments 2>&1)
     $ExitCode = $LASTEXITCODE
     $Output | Set-Content -LiteralPath $LogPath -Encoding UTF8
     $Output | ForEach-Object { Write-Host $_ }

@@ -11,11 +11,12 @@ Push-Location $repoRoot
 try {
     docker compose up -d --build
     if (-not $Command -or $Command.Count -eq 0) {
-        docker compose exec reverse-engineering bash
+        docker compose exec worker bash
     }
     else {
         # Pass arguments individually so paths/spaces do not get re-parsed by a shell.
-        docker compose exec -T reverse-engineering @Command
+        $Service = if ($Command[0] -in @('analyzeHeadless', 'ghidraRun')) { 'reverse-engineering' } else { 'worker' }
+        docker compose exec -T $Service @Command
     }
 }
 finally {
