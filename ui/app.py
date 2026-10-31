@@ -1506,6 +1506,15 @@ def parse_resume(body: dict) -> tuple[str, dict]:
         run_dir.relative_to(RUNS_ROOT.resolve())
     except ValueError as error:
         raise ValueError("Resume target must be inside runs/.") from error
+    config = json_file(run_dir / "codex-loop-config.json") or {}
+    recorded_target = str(config.get("target") or "")
+    recorded_transport = str(config.get("transport") or "adb")
+    recorded_frida = str(config.get("start_frida_server") or "")
+    target_value = str(body.get("target") or recorded_target)
+    target = token(target_value, "device target", r"[A-Za-z0-9._:\-\[\]]+") if target_value else ""
+    transport = str(body.get("transport") or recorded_transport)
+    if transport not in {"adb", "wireless"}:
+        raise ValueError("Invalid transport.")
     maximum = int(body.get("max_iterations") or 0)
     if not 1 <= maximum <= 10:
         raise ValueError("Additional iterations must be between 1 and 10.")
@@ -1524,13 +1533,29 @@ def parse_resume(body: dict) -> tuple[str, dict]:
     specialist_count = int(body.get("specialist_count") or 3)
     if not 2 <= specialist_count <= 3:
         raise ValueError("Parallel specialist count must be 2 or 3.")
-    frida_server = str(body.get("frida_server") or "")
+    frida_server = str(body.get("frida_server") or recorded_frida)
     if frida_server:
         token(frida_server, "Frida Server path", r"/[A-Za-z0-9_./-]+")
+    settings_changed = bool(recorded_target and any((
+        target != recorded_target,
+        transport != recorded_transport,
+        frida_server != recorded_frida,
+    )))
+    readiness_token = str(body.get("readiness_token") or "")
+    if settings_changed:
+        with _lock:
+            readiness = _readiness.get(readiness_token)
+        if not readiness or readiness["expires"] < time.monotonic():
+            raise ValueError("Run device readiness after changing the continuation target or Frida path.")
+        if any((
+            readiness["target"] != target,
+            readiness["transport"] != transport,
+            readiness["frida_server"] != frida_server,
+        )):
+            raise ValueError("Continuation device settings changed after readiness passed; run the check again.")
     policy_hash = str(body.get("success_spec_sha256") or "")
     if policy_hash:
         token(policy_hash, "success-policy hash", r"[a-f0-9]{64}")
-        config = json_file(run_dir / "codex-loop-config.json") or {}
         recorded_hash = str(config.get("success_spec_sha256") or "")
         if recorded_hash and policy_hash != recorded_hash:
             raise ValueError("The selected success policy does not match this assessment run.")
@@ -1539,6 +1564,8 @@ def parse_resume(body: dict) -> tuple[str, dict]:
         "reasoning_effort": reasoning_effort, "frida_server": frida_server,
         "reasoning_mode": reasoning_mode, "specialist_count": specialist_count,
         "success_spec_sha256": policy_hash,
+        "target": target, "transport": transport, "readiness_token": readiness_token,
+        "target_settings_changed": settings_changed,
     }
 
 

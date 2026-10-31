@@ -694,9 +694,18 @@ function resetReadiness() {
   $('#readinessResults').innerHTML = '<p>Device settings changed. Run readiness again before starting.</p>';
 }
 
-async function runReadiness() {
-  const form = $('#newForm');
-  const button = $('#runReadiness');
+function resetResumeReadiness() {
+  $('#resumeReadinessToken').value = '';
+  $('#resumeReadinessState').textContent = 'NOT CHECKED';
+  $('#resumeReadinessState').className = 'readiness-state';
+  $('#resumeReadinessResults').innerHTML = '<p>Continuation device settings changed. Run readiness before submitting.</p>';
+}
+
+async function runReadinessFor(form, controls) {
+  const button = $(controls.button);
+  const stateElement = $(controls.state);
+  const resultsElement = $(controls.results);
+  const tokenElement = $(controls.token);
   const target = form.elements.target.value.trim();
   const authorized = form.elements.authorized.checked;
   if (!target) { toast('Enter the exact device target first.', true); return; }
@@ -714,31 +723,45 @@ async function runReadiness() {
   if (binary) body.append('frida_binary', binary, binary.name);
   button.disabled = true;
   button.textContent = 'Checking…';
-  $('#readinessState').textContent = 'RUNNING';
-  $('#readinessState').className = 'readiness-state running';
+  stateElement.textContent = 'RUNNING';
+  stateElement.className = 'readiness-state running';
   try {
     const response = await fetch('/api/devices/readiness', { method: 'POST', body });
     const result = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(result.error || `Readiness failed (${response.status})`);
-    state.readiness = result;
-    $('#readinessToken').value = result.token || '';
-    $('#readinessState').textContent = result.ready ? 'READY' : 'BLOCKED';
-    $('#readinessState').className = `readiness-state ${result.ready ? 'ready' : 'blocked'}`;
-    $('#readinessResults').innerHTML = result.checks.map(check => `
+    tokenElement.value = result.token || '';
+    stateElement.textContent = result.ready ? 'READY' : 'BLOCKED';
+    stateElement.className = `readiness-state ${result.ready ? 'ready' : 'blocked'}`;
+    resultsElement.innerHTML = result.checks.map(check => `
       <div class="readiness-check ${check.passed ? 'passed' : check.required ? 'failed' : 'info'}">
         <span>${check.passed ? '✓' : check.required ? '×' : 'i'}</span>
         <div><strong>${escapeText(check.name)}</strong><small>${escapeText(check.detail || 'No detail')}</small></div>
       </div>`).join('');
     toast(result.ready ? `Device ready · ${result.abi} · SDK ${result.sdk}` : 'Device readiness is blocked. Review the failed checks.', !result.ready);
   } catch (error) {
-    $('#readinessState').textContent = 'ERROR';
-    $('#readinessState').className = 'readiness-state blocked';
-    $('#readinessResults').innerHTML = `<p>${escapeText(error.message)}</p>`;
+    stateElement.textContent = 'ERROR';
+    stateElement.className = 'readiness-state blocked';
+    resultsElement.innerHTML = `<p>${escapeText(error.message)}</p>`;
     toast(error.message, true);
   } finally {
     button.disabled = false;
     button.textContent = 'Run readiness';
   }
+}
+
+function runReadiness() {
+  state.readiness = null;
+  return runReadinessFor($('#newForm'), {
+    button: '#runReadiness', state: '#readinessState',
+    results: '#readinessResults', token: '#readinessToken',
+  });
+}
+
+function runResumeReadiness() {
+  return runReadinessFor($('#resumeForm'), {
+    button: '#runResumeReadiness', state: '#resumeReadinessState',
+    results: '#resumeReadinessResults', token: '#resumeReadinessToken',
+  });
 }
 
 function updateTransport() {
@@ -918,19 +941,15 @@ async function signOutAuth() {
 function updateResumeSummary() {
   const run = state.overview?.runs.find(item => item.path === $('#resumeRun').value);
   const summary = $('#resumeSummary');
-  const fridaField = $('#resumeFridaField');
-  const fridaInput = $('#resumeFridaServer');
   const policyPanel = $('#resumePolicy');
   const policyName = $('#resumePolicyName');
   const policyChecks = $('#resumePolicyChecks');
   const policyHash = $('#resumePolicyHash');
   const reassessButton = $('#reassessSelected');
   const fridaRecovery = Boolean(run?.frida_recoverable || (run?.checkpoint_recoverable && run?.recovery_stage === 'observation' && run?.frida_server));
-  fridaField.hidden = !fridaRecovery;
-  fridaInput.disabled = !fridaRecovery;
-  fridaInput.required = fridaRecovery;
   if (!run) {
-    fridaInput.value = '';
+    $('#resumeTarget').value = '';
+    $('#resumeFridaServer').value = '';
     policyHash.value = '';
     policyName.textContent = 'Select a run to inspect its recorded policy.';
     policyChecks.replaceChildren();
@@ -950,7 +969,6 @@ function updateResumeSummary() {
     ...(policy.baseline_required ? ['<span class="policy-meta">baseline differential</span>'] : []),
   ].join('');
   if (state.continuationMode === 'resume' && !run.continuable) state.continuationMode = 'retry';
-  if (fridaRecovery) fridaInput.value = run.frida_server || '/data/local/tmp/frida-server';
   const continuationAction = run.frida_recoverable
     ? 'The failed observation will be archived, Frida will restart from this path, and observation will rerun before the reasoning provider continues.'
     : run.checkpoint_recoverable
@@ -969,6 +987,13 @@ function updateResumeSummary() {
 function populateContinuationValues(run) {
   if (!run) return;
   const form = $('#resumeForm');
+  form.elements.transport.value = run.transport === 'wireless' ? 'wireless' : 'adb';
+  form.elements.target.value = run.target || '';
+  form.elements.frida_server.value = run.frida_server || '/data/local/tmp/frida-server';
+  form.elements.readiness_token.value = '';
+  $('#resumeReadinessState').textContent = 'RECORDED';
+  $('#resumeReadinessState').className = 'readiness-state';
+  $('#resumeReadinessResults').innerHTML = '<p>The recorded target may be reused. Run readiness after selecting a different device.</p>';
   form.elements.provider.value = run.provider || 'codex';
   renderModelOptions();
   const model = form.elements.model;
@@ -1059,10 +1084,14 @@ $('#resumeRun').addEventListener('change', () => {
 });
 $('#discoverDevices').addEventListener('click', () => discoverDevices(true));
 $('#runReadiness').addEventListener('click', runReadiness);
+$('#runResumeReadiness').addEventListener('click', runResumeReadiness);
 $$('#newForm [name="transport"]').forEach(input => input.addEventListener('change', updateTransport));
 ['target', 'frida_server'].forEach(name => $('#newForm').elements[name].addEventListener('input', resetReadiness));
 $('#newForm [name="frida_binary"]').addEventListener('change', resetReadiness);
 $('#newForm [name="start_frida"]').addEventListener('change', resetReadiness);
+['target', 'frida_server', 'transport'].forEach(name => $('#resumeForm').elements[name].addEventListener('input', resetResumeReadiness));
+$('#resumeForm [name="frida_binary"]').addEventListener('change', resetResumeReadiness);
+$('#resumeForm [name="start_frida"]').addEventListener('change', resetResumeReadiness);
 $$('.model-select').forEach(select => select.addEventListener('change', () => {
   const reasoning = select.form.querySelector('.reasoning-select');
   if (reasoning) reasoning.value = '';

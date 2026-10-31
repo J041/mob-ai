@@ -537,6 +537,43 @@ class WebAppTests(unittest.TestCase):
         })
         self.assertEqual(request["frida_server"], "/data/local/tmp/frida-server-17.5.1")
 
+    @patch("ui.app.json_file")
+    @patch("ui.app.resolve_workspace_item")
+    def test_resume_changed_target_requires_bound_readiness(self, resolve, read_json) -> None:
+        resolve.return_value = WORKSPACE / "runs" / "example"
+        read_json.return_value = {
+            "target": "old-device", "transport": "adb",
+            "start_frida_server": "/data/local/tmp/frida-server",
+        }
+        with self.assertRaisesRegex(ValueError, "Run device readiness"):
+            parse_resume({
+                "authorized": True, "run": "runs/example", "max_iterations": 2,
+                "target": "new-device", "transport": "adb",
+                "frida_server": "/data/local/tmp/frida-server",
+            })
+
+    @patch("ui.app.json_file")
+    @patch("ui.app.resolve_workspace_item")
+    def test_resume_accepts_ready_alternate_target(self, resolve, read_json) -> None:
+        resolve.return_value = WORKSPACE / "runs" / "example"
+        read_json.return_value = {
+            "target": "old-device", "transport": "adb",
+            "start_frida_server": "/data/local/tmp/frida-server",
+        }
+        readiness_token = "a" * 32
+        with patch.dict(_readiness, {readiness_token: {
+            "target": "192.168.1.20:38888", "transport": "wireless",
+            "frida_server": "/data/local/tmp/frida-server", "expires": float("inf"),
+        }}, clear=True):
+            _, request = parse_resume({
+                "authorized": True, "run": "runs/example", "max_iterations": 2,
+                "target": "192.168.1.20:38888", "transport": "wireless",
+                "frida_server": "/data/local/tmp/frida-server", "readiness_token": readiness_token,
+            })
+        self.assertEqual(request["target"], "192.168.1.20:38888")
+        self.assertEqual(request["transport"], "wireless")
+        self.assertTrue(request["target_settings_changed"])
+
     @patch("ui.app.resolve_workspace_item")
     def test_resume_rejects_unsafe_frida_server_path(self, resolve) -> None:
         resolve.return_value = WORKSPACE / "runs" / "example"

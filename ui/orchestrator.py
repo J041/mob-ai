@@ -377,11 +377,43 @@ class LoopRunner:
         spec = (WORKSPACE / config["success_spec"]).resolve()
         if not spec.is_file() or sha256(spec) != config["success_spec_sha256"]:
             raise LoopError("The recorded success policy is missing or has changed.")
+        requested_target = str(request.get("target") or config.get("target") or "")
+        requested_transport = str(request.get("transport") or config.get("transport") or "adb")
+        requested_frida = str(request.get("frida_server") or config.get("start_frida_server") or "")
+        settings_changed = any((
+            requested_target != str(config.get("target") or ""),
+            requested_transport != str(config.get("transport") or "adb"),
+            requested_frida != str(config.get("start_frida_server") or ""),
+        ))
+        if settings_changed:
+            history = list(config.get("target_history") or [])
+            history.append({
+                "target": config.get("target") or "", "transport": config.get("transport") or "adb",
+                "frida_server": config.get("start_frida_server") or "",
+                "replaced_utc": datetime.now(timezone.utc).isoformat(),
+            })
+            config.update({
+                "target": requested_target, "transport": requested_transport,
+                "start_frida_server": requested_frida, "target_history": history,
+                "_target_settings_changed": True,
+            })
         records = list(summary.get("iterations") or [])
         return run_dir, config, summary, records
 
     def resume(self, request: dict[str, Any]) -> tuple[str, Path]:
         run_dir, config, summary, records = self._load_existing_run(request)
+        target_settings_changed = bool(config.pop("_target_settings_changed", False))
+        if target_settings_changed:
+            write_json(run_dir / "codex-loop-config.json", config)
+            return self._recover_observation(
+                run_dir, config, records, str(config.get("start_frida_server") or ""),
+                additional=int(request["max_iterations"]),
+                provider=str(request.get("provider") or ""),
+                model=str(request.get("model") or ""),
+                reasoning_effort=str(request.get("reasoning_effort") or ""),
+                reasoning_mode=str(request.get("reasoning_mode") or ""),
+                specialist_count=int(request.get("specialist_count") or 3),
+            )
         if checkpoint_recovery_available(summary):
             resumed_frida = str(request.get("frida_server") or config.get("start_frida_server") or "")
             checkpoint = summary.get("checkpoint") or {}
@@ -451,6 +483,8 @@ class LoopRunner:
     def retry_with_diagnostics(self, request: dict[str, Any]) -> tuple[str, Path]:
         """Rerun observation for any completed run while preserving its evidence."""
         run_dir, config, _summary, records = self._load_existing_run(request)
+        config.pop("_target_settings_changed", None)
+        write_json(run_dir / "codex-loop-config.json", config)
         retry_number = 1
         while (run_dir / "agent" / f"diagnostic-retry-{retry_number}").exists():
             retry_number += 1

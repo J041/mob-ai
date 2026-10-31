@@ -125,13 +125,28 @@
               <div class="resume-policy-checks" id="resumePolicyChecks"></div>
               <button class="button policy-reassess" id="reassessSelected" type="button" disabled>Reassess with a different policy <span>&rarr;</span></button>
             </section>
+            <label class="field"><span>Target transport</span><select name="transport" id="resumeTransport"><option value="adb">ADB serial</option><option value="wireless">Wireless</option></select></label>
+            <label class="field"><span>Device target</span><input name="target" id="resumeTarget" list="deviceOptions" placeholder="emulator-5554 or IP:PORT" required><small>Select a discovered device or enter its exact ADB serial.</small></label>
+            <section class="readiness span-2" id="resumeReadinessPanel">
+              <div class="readiness-heading">
+                <div><strong>Device readiness</strong><small>A changed target, transport, or Frida path must pass readiness before continuing.</small></div>
+                <span class="readiness-state" id="resumeReadinessState">RECORDED</span>
+              </div>
+              <div class="readiness-controls">
+                <label class="field"><span>Frida Server path <em>device path</em></span><input name="frida_server" id="resumeFridaServer" placeholder="/data/local/tmp/frida-server"></label>
+                <label class="field upload-field"><span>Frida Server binary <em>optional deploy</em></span><input name="frida_binary" type="file"><small>Choose a trusted binary matching the selected device ABI.</small></label>
+                <label class="switch-field readiness-start"><input name="start_frida" type="checkbox" checked><span class="switch"></span><span>Start and verify Frida</span></label>
+                <button class="button" id="runResumeReadiness" type="button">Run readiness</button>
+              </div>
+              <input name="readiness_token" id="resumeReadinessToken" type="hidden">
+              <div class="readiness-results" id="resumeReadinessResults"><p>The recorded target may be reused. Run readiness after selecting a different device.</p></div>
+            </section>
             <label class="field"><span>Iterations for this attempt</span><input name="max_iterations" type="number" value="3" min="1" max="10" required></label>
             <label class="field"><span>Reasoning provider</span><select name="provider" class="provider-select"><option value="codex">Codex</option><option value="claude">Claude</option></select></label>
             <label class="field"><span>Reasoning model</span><select name="model" class="model-select"><option value="">Account default</option></select></label>
             <label class="field"><span>Thinking level</span><select name="reasoning_effort" class="reasoning-select"><option value="">Model default</option></select></label>
             <label class="field"><span>Reasoning mode</span><select name="reasoning_mode" class="reasoning-mode"><option value="single">Single agent</option><option value="parallel">Parallel specialists</option></select></label>
             <label class="field specialist-count" hidden><span>Maximum specialists</span><select name="specialist_count"><option value="2">2 specialists</option><option value="3" selected>3 specialists</option></select></label>
-            <label class="field span-2" id="resumeFridaField" hidden><span>Updated Frida Server path</span><input name="frida_server" id="resumeFridaServer" placeholder="/data/local/tmp/frida-server"></label>
             <div class="resume-summary span-2" id="resumeSummary"><span>↳</span><p>Select a run to see its last known state.</p></div>
             <label class="authorization span-2"><input name="authorized" type="checkbox" required><span>I confirm authorization remains valid for this device and APK.</span></label>
             <div class="form-footer span-2"><p id="continuationHint">The previous candidate, validation delta, target, and policy hashes will be verified before continuation.</p><button class="button primary" id="continuationSubmit" type="submit">Continue loop <span>→</span></button></div>
