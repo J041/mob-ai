@@ -1,6 +1,6 @@
 'use strict';
 
-const state = { overview: null, devices: [], selectedJob: null, poll: null, authPoll: null, authProvider: 'codex', readiness: null, continuationMode: 'resume', expandedRuns: new Set(), knownAttemptRuns: new Set(), jobStripScroll: 0, artifactRun: null, artifactManifest: null, artifactCategory: null, artifactPath: null, artifactPreviewCache: new Map(), assistantRun: null, assistantTurns: [] };
+const state = { overview: null, devices: [], selectedJob: null, poll: null, authPoll: null, authProvider: 'codex', readiness: null, continuationMode: 'resume', expandedRuns: new Set(), knownAttemptRuns: new Set(), jobStripScroll: 0, artifactRun: null, artifactManifest: null, artifactCategory: null, artifactPath: null, artifactPreviewCache: new Map(), assistantRun: null, assistantTurns: [], assistantFailures: [] };
 const $ = selector => document.querySelector(selector);
 const $$ = selector => [...document.querySelectorAll(selector)];
 
@@ -268,11 +268,11 @@ function beginReassessment(runId) {
 
 function renderAssistantTurns() {
   const container = $('#assistantMessages');
-  if (!state.assistantTurns.length) {
+  if (!state.assistantTurns.length && !state.assistantFailures.length) {
     container.innerHTML = '<p class="assistant-empty">Ask a question about this run\'s findings, logs, hooks, decisions, or success checks.</p>';
     return;
   }
-  container.innerHTML = state.assistantTurns.map(turn => {
+  const turns = state.assistantTurns.map(turn => {
     const citations = (turn.citations || []).map(citation => `
       <button class="assistant-citation" type="button" data-chat-citation="${escapeText(citation.path)}" title="${escapeText(citation.note || '')}">${escapeText(citation.path)}</button>`).join('');
     const action = turn.suggested_action || {};
@@ -300,6 +300,14 @@ function renderAssistantTurns() {
         ${actionCard}
       </article>`;
   }).join('');
+  const failures = state.assistantFailures.map(failure => `
+    <article class="assistant-message user"><p>${escapeText(failure.question || 'Assistant request')}</p></article>
+    <article class="assistant-message assistant failed">
+      <span class="assistant-progress-stage">FAILED</span>
+      <p>${escapeText(failure.error || 'The run assistant failed.')}</p>
+      <small>${escapeText(formatDate(failure.completed_utc || failure.created_utc))}</small>
+    </article>`).join('');
+  container.innerHTML = turns + failures;
   $$('[data-chat-citation]').forEach(button => button.addEventListener('click', () => {
     const runId = state.assistantRun;
     $('#assistantDialog').close();
@@ -314,6 +322,7 @@ async function openRunAssistant(runId) {
   if (!run) return;
   state.assistantRun = runId;
   state.assistantTurns = [];
+  state.assistantFailures = [];
   $('#assistantTitle').textContent = run.package || run.id;
   $('#assistantSubtitle').textContent = `${run.id} · ${String(run.status || 'analysis').replaceAll('_', ' ')}`;
   $('#assistantMessages').innerHTML = '<p class="assistant-empty">Loading conversation…</p>';
@@ -328,6 +337,7 @@ async function openRunAssistant(runId) {
     const payload = await api(`/api/runs/${encodeURIComponent(runId)}/assistant`);
     if (state.assistantRun !== runId) return;
     state.assistantTurns = payload.turns || [];
+    state.assistantFailures = payload.failures || [];
     renderAssistantTurns();
   } catch (error) {
     $('#assistantMessages').innerHTML = `<p class="assistant-empty">${escapeText(error.message)}</p>`;
@@ -987,10 +997,15 @@ async function askRunAssistant(event) {
   const button = $('#sendAssistant');
   button.disabled = true;
   button.innerHTML = 'Reviewing evidence…';
+  const userMessage = document.createElement('article');
+  userMessage.className = 'assistant-message user';
+  userMessage.innerHTML = `<p>${escapeText(question)}</p>`;
   const pending = document.createElement('article');
   pending.className = 'assistant-message assistant pending';
   pending.innerHTML = '<span class="assistant-progress-stage">QUEUED</span><p>Preparing the evidence request…</p><small></small>';
-  $('#assistantMessages').append(pending);
+  $('#assistantMessages .assistant-empty')?.remove();
+  $('#assistantMessages').append(userMessage, pending);
+  form.elements.question.value = '';
   $('#assistantMessages').scrollTop = $('#assistantMessages').scrollHeight;
   try {
     const runId = state.assistantRun;
@@ -1020,10 +1035,12 @@ async function askRunAssistant(event) {
     const turn = progress.turn;
     if (!turn) throw new Error('The run assistant completed without returning an answer.');
     state.assistantTurns.push(turn);
-    form.elements.question.value = '';
     renderAssistantTurns();
   } catch (error) {
-    pending.remove();
+    pending.classList.remove('pending');
+    pending.classList.add('failed');
+    pending.innerHTML = `<span class="assistant-progress-stage">FAILED</span><p>${escapeText(error.message)}</p><small>The request did not produce an answer. Try again with a faster model.</small>`;
+    $('#assistantMessages').scrollTop = $('#assistantMessages').scrollHeight;
     toast(error.message, true);
   } finally {
     button.disabled = false;

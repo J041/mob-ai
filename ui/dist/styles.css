@@ -321,6 +321,9 @@ input::placeholder { color: #465358; }
 .assistant-message.pending { position: relative; overflow: hidden; }
 .assistant-message.pending::after { content: ""; position: absolute; left: 0; bottom: 0; width: 38%; height: 2px; background: var(--green); animation: assistant-progress 1.35s ease-in-out infinite alternate; }
 .assistant-message.pending small { color: #607075; font: 8px/1.4 var(--mono); }
+.assistant-message.failed { color: #ffd4d4; border-color: #704146; background: rgba(255,124,124,.06); }
+.assistant-message.failed .assistant-progress-stage { color: var(--red); }
+.assistant-message.failed small { color: #a77d81; font: 8px/1.4 var(--mono); }
 .assistant-progress-stage { color: var(--green); font: 8px var(--mono); letter-spacing: .1em; }
 @keyframes assistant-progress { from { transform: translateX(-35%); } to { transform: translateX(205%); } }
 .assistant-message > p { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 10px; line-height: 1.65; }

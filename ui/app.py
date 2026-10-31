@@ -87,6 +87,14 @@ def strip_terminal_controls(value: str) -> str:
     return re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", "", value)
 
 
+def subprocess_capture_text(*values) -> str:
+    """Normalize process output, which TimeoutExpired may expose as bytes despite text=True."""
+    return strip_terminal_controls("".join(
+        value.decode("utf-8", errors="replace") if isinstance(value, bytes) else str(value or "")
+        for value in values
+    ))
+
+
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -594,7 +602,7 @@ Return the required JSON object. Cite only exact paths from Available evidence p
                 capture_output=True, timeout=300,
             )
         except subprocess.TimeoutExpired as error:
-            log_path.write_text(strip_terminal_controls((error.stdout or "") + (error.stderr or "")), encoding="utf-8")
+            log_path.write_text(subprocess_capture_text(error.stdout, error.stderr), encoding="utf-8")
             raise ValueError("The run assistant timed out after five minutes.") from error
         log_path.write_text(strip_terminal_controls((result.stdout or "") + (result.stderr or "")), encoding="utf-8")
         if not adapter.finalize(provider_request, result.returncode, result.stdout or "") or not validate_provider_output(response_path, ASSISTANT_SCHEMA):
@@ -699,6 +707,7 @@ def start_assistant_request(run_id: str, body: dict) -> dict:
         "status": "queued",
         "stage": "queued",
         "detail": "Question queued for evidence selection.",
+        "question": question,
         "created_utc": utc_now(),
         "updated_utc": utc_now(),
     }
@@ -727,6 +736,31 @@ def start_assistant_request(run_id: str, body: dict) -> dict:
 
     threading.Thread(target=work, name=f"assistant-{request_id[:8]}", daemon=True).start()
     return state
+
+
+def failed_assistant_requests(run_id: str) -> list[dict]:
+    requests_dir = resolve_run_directory(run_id) / "assistant" / "requests"
+    if not requests_dir.is_dir():
+        return []
+    failures = []
+    for path in sorted(requests_dir.glob("*.json"), key=lambda item: item.stat().st_mtime):
+        value = json_file(path)
+        if isinstance(value, dict) and value.get("status") == "failed":
+            error_text = str(value.get("error") or value.get("detail") or "The request failed.")
+            try:
+                elapsed = datetime.fromisoformat(str(value.get("completed_utc"))) - datetime.fromisoformat(str(value.get("created_utc")))
+                if error_text == "The run assistant failed unexpectedly." and elapsed.total_seconds() >= 295:
+                    error_text = "The run assistant timed out after five minutes."
+            except (TypeError, ValueError):
+                pass
+            failures.append({
+                "id": str(value.get("id") or path.stem),
+                "question": str(value.get("question") or "Assistant request"),
+                "error": error_text,
+                "created_utc": str(value.get("created_utc") or ""),
+                "completed_utc": str(value.get("completed_utc") or ""),
+            })
+    return failures[-20:]
 
 
 def success_policy(body: dict) -> Path:
@@ -1943,9 +1977,10 @@ def download_run_artifact(run_id: str):
 def get_run_assistant(run_id: str):
     try:
         history = assistant_history(run_id)
+        failures = failed_assistant_requests(run_id)
     except FileNotFoundError as error:
         return jsonify(error=str(error)), 404
-    return jsonify(run_id=run_id, turns=history)
+    return jsonify(run_id=run_id, turns=history, failures=failures)
 
 
 @app.post("/api/runs/<run_id>/assistant")

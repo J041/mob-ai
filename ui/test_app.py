@@ -15,6 +15,7 @@ from ui.app import (
     infer_attempt_kind, infer_job_run_id, resolve_workspace_item, sign_out_codex,
     assistant_evidence_snapshot, assistant_history, recorded_success_policy, run_assistant_turn,
     start_job, strip_terminal_controls, success_policy,
+    subprocess_capture_text,
 )
 from ui.orchestrator import (
     WORKSPACE, LoopRunner, attempt_fingerprint, codex_config_overrides,
@@ -702,6 +703,9 @@ class WebAppTests(unittest.TestCase):
             strip_terminal_controls(value),
             "https://auth.openai.com/codex/device\nABCD-EFGHIJ",
         )
+
+    def test_timeout_output_accepts_bytes_for_visible_failure(self) -> None:
+        self.assertEqual(subprocess_capture_text(b"partial\r\n", b"error\n"), "partial\nerror\n")
 
     @patch("ui.app.subprocess.run")
     def test_sign_out_uses_codex_logout_and_clears_catalog(self, run) -> None:
