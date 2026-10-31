@@ -225,6 +225,20 @@ variants remain part of the same logical selection slot. The validated result is
 specialist. If Ghidra has no open instance, the iteration prompt requires the specialist to
 import or open a selected binary rather than treating an empty instance list as analysis.
 
+For larger APKs, native triage maintains a persisted queue of at most fifteen logical libraries
+in batches of five. Only the active batch is extracted and authorized for an iteration. When its
+validation remains unsuccessful, the batch is recorded as inconclusive and the next batch is
+activated. Successful validation resolves the queue; retries and max-iteration resumes preserve
+the active batch and append-only batch history rather than restarting native triage. Assessment
+rows show the current batch and processed/total library counts.
+
+When fewer than five targets remain queued and the fifteen-library lifetime budget still has
+room, the provider performs a read-only replenishment decision after an inconclusive batch. It
+may append previously unseen logical libraries using the completed iteration and Ghidra evidence;
+duplicates, already processed targets, unavailable names, and additions beyond the remaining
+budget are rejected deterministically. Replenishment prompts, decisions, errors, and additions
+are retained below `agent/native-selection/replenishment-N/` and in `native-selection.json`.
+
 Prerequisites are Docker Desktop, a connected ChatGPT or Claude account, an
 authorized test device, and a compatible running or startable Frida Server. The UI
 builds an auditable policy from **Basic launch**, **Detection warning removed**,

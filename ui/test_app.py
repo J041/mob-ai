@@ -587,6 +587,16 @@ class WebAppTests(unittest.TestCase):
 
             @staticmethod
             def finalize(request, _exit_code, _output):
+                if request.schema_path.name == "native-replenishment.schema.json":
+                    request.output_path.write_text(json.dumps({
+                        "rationale": "The first batch implicated a later JNI stage.",
+                        "evidence_used": ["agent/iteration-1/record.json"],
+                        "added": [{
+                            "library": "liblater.so", "priority": "medium",
+                            "reason": "JNI evidence links it to the unresolved startup stage.",
+                        }],
+                    }), encoding="utf-8")
+                    return True
                 request.output_path.write_text(json.dumps({
                     "rationale": "Application startup explicitly loads the protection library.",
                     "evidence_used": ["ProtectedApplication.java System.loadLibrary call"],
@@ -599,6 +609,11 @@ class WebAppTests(unittest.TestCase):
                             "reason": "Compare exported detector behavior across architectures.",
                         },
                     }],
+                    "queued": [{
+                        "library": "libnext.so",
+                        "priority": "medium",
+                        "reason": "Loaded later in the protected application lifecycle.",
+                    }],
                 }), encoding="utf-8")
                 return True
 
@@ -607,9 +622,13 @@ class WebAppTests(unittest.TestCase):
             run = Path(temp)
             payload = b"native-protection-library"
             x86_payload = b"native-protection-library-x86"
+            next_payload = b"next-native-library"
+            later_payload = b"later-native-library"
             with zipfile.ZipFile(run / "original.apk", "w") as archive:
                 archive.writestr("lib/arm64-v8a/libdexprotector.so", payload)
                 archive.writestr("lib/x86_64/libdexprotector.so", x86_payload)
+                archive.writestr("lib/arm64-v8a/libnext.so", next_payload)
+                archive.writestr("lib/arm64-v8a/liblater.so", later_payload)
             (run / "report.json").write_text(json.dumps({
                 "native_libraries": [{
                     "archive_path": "lib/arm64-v8a/libdexprotector.so",
@@ -621,6 +640,16 @@ class WebAppTests(unittest.TestCase):
                     "abi": "x86_64", "name": "libdexprotector.so",
                     "size": len(x86_payload), "sha256": hashlib.sha256(x86_payload).hexdigest(),
                     "load_references": ["sources/ProtectedApplication.java"],
+                }, {
+                    "archive_path": "lib/arm64-v8a/libnext.so",
+                    "abi": "arm64-v8a", "name": "libnext.so",
+                    "size": len(next_payload), "sha256": hashlib.sha256(next_payload).hexdigest(),
+                    "load_references": ["sources/ProtectedApplication.java"],
+                }, {
+                    "archive_path": "lib/arm64-v8a/liblater.so",
+                    "abi": "arm64-v8a", "name": "liblater.so",
+                    "size": len(later_payload), "sha256": hashlib.sha256(later_payload).hexdigest(),
+                    "load_references": ["sources/LaterStage.java"],
                 }],
             }), encoding="utf-8")
             (run / "result.json").write_text(json.dumps({"device_abi": "arm64-v8a"}), encoding="utf-8")
@@ -633,6 +662,22 @@ class WebAppTests(unittest.TestCase):
             comparison = WORKSPACE / selection["selected"][0]["cross_abi"]["variants"][0]["extracted"]
             self.assertEqual(comparison.read_bytes(), x86_payload)
             self.assertEqual(len(selection["selected"]), 1)
+            self.assertEqual(len(selection["queue"]), 1)
+            self.assertTrue(LoopRunner(StringIO())._replenish_native_queue(run, {
+                "provider": "codex", "model": "test-model", "reasoning_effort": "high",
+            }, 1))
+            self.assertTrue(LoopRunner(StringIO())._advance_native_queue(run, 1, "policy_failed"))
+            advanced = json.loads((run / "native-selection.json").read_text(encoding="utf-8"))
+            self.assertEqual(advanced["selected"][0]["library"], "libnext.so")
+            self.assertEqual(advanced["selected"][1]["library"], "liblater.so")
+            self.assertEqual(advanced["batches"][0]["status"], "inconclusive")
+            self.assertEqual(advanced["batches"][1]["status"], "active")
+            self.assertEqual((WORKSPACE / advanced["selected"][0]["primary"]["extracted"]).read_bytes(), next_payload)
+            self.assertEqual(advanced["replenishments"][0]["libraries"], ["liblater.so"])
+            self.assertFalse(LoopRunner(StringIO())._advance_native_queue(run, 2, "policy_failed"))
+            exhausted = json.loads((run / "native-selection.json").read_text(encoding="utf-8"))
+            self.assertEqual(exhausted["selected"], [])
+            self.assertEqual(exhausted["queue_status"], "exhausted")
             self.assertTrue((run / "native-selection.json").is_file())
 
     def test_auth_output_strips_terminal_controls(self) -> None:

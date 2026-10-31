@@ -20,10 +20,13 @@ RUNS_ROOT = WORKSPACE / "runs"
 PIPELINE = WORKSPACE / "pipeline" / "pipeline.py"
 DECISION_SCHEMA = WORKSPACE / "pipeline" / "codex-decision.schema.json"
 NATIVE_SELECTION_SCHEMA = WORKSPACE / "pipeline" / "native-selection.schema.json"
+NATIVE_REPLENISHMENT_SCHEMA = WORKSPACE / "pipeline" / "native-replenishment.schema.json"
 CODEX = shutil.which("codex") or "codex"
 GHIDRA_BRIDGE = "/opt/ghidra-mcp/venv/bin/bridge-mcp-ghidra"
 GHIDRA_URL = os.environ.get("GHIDRA_MCP_URL", "http://reverse-engineering:8089")
 GHIDRA_TOKEN = os.environ.get("GHIDRA_MCP_AUTH_TOKEN", "")
+NATIVE_BATCH_SIZE = 5
+NATIVE_TOTAL_LIMIT = 15
 
 
 class LoopError(RuntimeError):
@@ -664,9 +667,12 @@ class LoopRunner:
         records.append(record)
         write_json(iteration_dir / "record.json", record)
         if validation.get("success"):
+            self._resolve_native_queue(run_dir, iteration)
             write_summary(run_dir, "success", records, f"Success policy passed after recovering validation in iteration {iteration}.")
             return "success", run_dir
-        if decision.get("decision") == "no_change":
+        self._replenish_native_queue(run_dir, config, iteration)
+        advanced_native = self._advance_native_queue(run_dir, iteration, "recovered_validation_failed")
+        if decision.get("decision") == "no_change" and not advanced_native:
             write_summary(
                 run_dir, "assessment_failed", records,
                 "Validation completed, but the policy remained unsatisfied and Codex proposed no justified change.",
@@ -686,7 +692,8 @@ class LoopRunner:
         status = self._iterations(
             run_dir, resumed_config, records, start_iteration=iteration + 1,
             additional=additional, previous_candidate=candidate,
-            previous_fingerprint=attempt_fingerprint(candidate_hash, validation), restart_frida=False,
+            previous_fingerprint=(None if advanced_native else attempt_fingerprint(candidate_hash, validation)),
+            restart_frida=False,
         )
         return status, run_dir
 
@@ -810,113 +817,42 @@ class LoopRunner:
             records.append(record)
             write_json(iteration_dir / "record.json", record)
             if validation.get("success"):
+                self._resolve_native_queue(run_dir, iteration)
                 write_summary(run_dir, "success", records, f"Success policy passed in iteration {iteration}.")
                 return "success"
-            if previous_fingerprint and fingerprint == previous_fingerprint:
+            self._replenish_native_queue(run_dir, config, iteration)
+            advanced_native = self._advance_native_queue(run_dir, iteration, "success_policy_failed")
+            if previous_fingerprint and fingerprint == previous_fingerprint and not advanced_native:
                 write_summary(
                     run_dir, "assessment_failed", records,
                     "Two consecutive attempts produced the same candidate and validation result.",
                     reason="no_progress",
                 )
                 return "assessment_failed"
-            if decision.get("decision") == "no_change":
+            if decision.get("decision") == "no_change" and not advanced_native:
                 write_summary(
                     run_dir, "assessment_failed", records,
                     "Codex found no justified change and validation still failed.",
                     reason="no_justified_change",
                 )
                 return "assessment_failed"
-            previous_fingerprint = fingerprint
+            previous_fingerprint = None if advanced_native else fingerprint
             previous_candidate = candidate
         write_summary(run_dir, "max_iterations", records, f"The policy did not pass within this invocation's {additional} attempts.")
         return "max_iterations"
 
-    def _ensure_native_selection(self, run_dir: Path, config: dict[str, Any]) -> dict[str, Any]:
-        """Ask the selected reasoning provider to choose bounded native-analysis targets."""
-        selection_path = run_dir / "native-selection.json"
-        if selection_path.is_file():
-            value = read_json(selection_path)
-            if not isinstance(value, dict) or not isinstance(value.get("selected"), list):
-                raise LoopError("The recorded native selection is invalid.")
-            return value
-
+    @staticmethod
+    def _materialize_native_targets(
+        run_dir: Path, raw_selected: list[Any], runtime_abi: str,
+    ) -> list[dict[str, Any]]:
         report = read_json(run_dir / "report.json")
-        if "native_libraries" not in report:
-            report["findings"] = [
-                item for item in report.get("findings", [])
-                if not isinstance(item, dict) or item.get("kind") != "native_indicator"
-            ]
-            report["native_libraries"] = scan_native(run_dir / "original.apk", run_dir / "jadx")
-        report["native_library_groups"] = group_native_libraries(report.get("native_libraries") or [])
-        write_json(run_dir / "report.json", report)
-        inventory = report.get("native_libraries") or []
-        if not isinstance(inventory, list):
-            raise LoopError("The native library inventory is invalid.")
         groups = report.get("native_library_groups") or []
-        if not isinstance(groups, list):
-            raise LoopError("The grouped native library inventory is invalid.")
         available_groups = {
             str(item.get("library")): item
-            for item in groups
-            if isinstance(item, dict) and item.get("library")
+            for item in groups if isinstance(item, dict) and item.get("library")
         }
-        if not available_groups:
-            value = {
-                "provider": str(config.get("provider") or "codex"),
-                "model": str(config.get("model") or ""),
-                "rationale": "The APK contains no bounded native libraries to analyze.",
-                "evidence_used": ["report.json native_libraries inventory"],
-                "selected": [],
-                "created_utc": datetime.now(timezone.utc).isoformat(),
-            }
-            write_json(selection_path, value)
-            return value
-
-        selection_root = run_dir / "agent" / "native-selection"
-        selection_root.mkdir(parents=True, exist_ok=True)
-        attempt = 1
-        while (selection_root / f"attempt-{attempt}").exists():
-            attempt += 1
-        selection_dir = selection_root / f"attempt-{attempt}"
-        selection_dir.mkdir()
-        prompt_path = selection_dir / "prompt.txt"
-        response_path = selection_dir / "decision.json"
-        provider = str(config.get("provider") or "codex")
-        adapter = provider_adapter(provider)
-        runtime_abi = recorded_device_abi(run_dir)
-        prompt = f"""You are the native-target triage step in an explicitly authorized Android assessment.
-
-Read-only assessment evidence: {run_dir}
-Logical native inventory: {run_dir / 'report.json'} under the native_library_groups field
-Recorded device ABI: {runtime_abi or 'unknown'}
-Runtime evidence: observations.json, result.json, logs/, and any diagnostic crash records
-Static evidence: JADX sources and AndroidManifest.xml below {run_dir / 'jadx'}
-
-Select at most five logical library names that genuinely warrant Ghidra analysis. All ABI variants of one library are one selection slot. Base the selection on causal evidence such as application-owned names, System.loadLibrary call sites, native/JNI declarations, protected application startup, crash context, or relationships to observed checks. Raw string matches may be supporting context but must never be the sole reason for selection. The orchestrator automatically selects the variant matching the recorded device ABI. Request other available ABIs only through cross_abi with a specific comparison reason; those variants do not consume extra library slots. Select only exact library values present in native_library_groups. An empty selection is valid when native analysis is not justified.
-
-Do not edit any file, invoke a device, or claim assessment success. Return only the required structured selection.
-"""
-        prompt_path.write_text(prompt, encoding="utf-8")
-        request = ProviderRequest(
-            provider=provider, prompt=prompt, cwd=selection_dir,
-            schema_path=NATIVE_SELECTION_SCHEMA, output_path=response_path,
-            model=str(config.get("model") or ""),
-            reasoning_effort=str(config.get("reasoning_effort") or ""),
-            reasoning_mode="single", writable=False,
-            extra_args=("--config", "mcp_servers.ghidra.enabled=false") if provider == "codex" else (),
-        )
-        command, provider_prompt = adapter.prepare(request)
-        exit_code, output = run_logged(
-            command, self.log, cwd=selection_dir, input_text=provider_prompt,
-            artifact=selection_dir / f"{provider}.log",
-        )
-        if not adapter.finalize(request, exit_code, output) or not validate_provider_output(response_path, NATIVE_SELECTION_SCHEMA):
-            raise LoopError(f"{adapter.label} did not return a valid native target selection.")
-        decision = read_json(response_path)
-        raw_selected = decision.get("selected") or []
-        if not isinstance(raw_selected, list) or len(raw_selected) > 5:
-            raise LoopError("Native selection exceeded the five-library limit.")
-
+        if len(raw_selected) > NATIVE_BATCH_SIZE:
+            raise LoopError(f"Native selection exceeded the {NATIVE_BATCH_SIZE}-library batch limit.")
         selected: list[dict[str, Any]] = []
         seen: set[str] = set()
         with zipfile.ZipFile(run_dir / "original.apk") as archive:
@@ -980,13 +916,266 @@ Do not edit any file, invoke a device, or claim assessment success. Return only 
                         "variants": [extract_variant(by_abi[abi], library) for abi in normalized],
                     }
                 selected.append({
-                    "library": library,
-                    "priority": priority,
-                    "reason": reason,
-                    "load_references": group.get("load_references") or [],
-                    "primary": primary,
+                    "library": library, "priority": priority, "reason": reason,
+                    "load_references": group.get("load_references") or [], "primary": primary,
                     **({"cross_abi": cross_result} if cross_result else {}),
                 })
+        return selected
+
+    def _replenish_native_queue(self, run_dir: Path, config: dict[str, Any], iteration: int) -> bool:
+        selection_path = run_dir / "native-selection.json"
+        if not selection_path.is_file():
+            return False
+        selection = read_json(selection_path)
+        queue = selection.get("queue") or []
+        if not selection.get("adaptive_queue") or len(queue) >= NATIVE_BATCH_SIZE:
+            return False
+        batches = selection.get("batches") or []
+        seen = {
+            str(name) for batch in batches if isinstance(batch, dict)
+            for name in (batch.get("libraries") or []) if name
+        }
+        seen.update(
+            str(item.get("library")) for item in queue
+            if isinstance(item, dict) and item.get("library")
+        )
+        report = read_json(run_dir / "report.json")
+        available = {
+            str(item.get("library")) for item in (report.get("native_library_groups") or [])
+            if isinstance(item, dict) and item.get("library")
+        }
+        remaining = sorted(available - seen)
+        slots = min(NATIVE_BATCH_SIZE - len(queue), NATIVE_TOTAL_LIMIT - len(seen), len(remaining))
+        if slots <= 0:
+            return False
+
+        replenishment_root = run_dir / "agent" / "native-selection"
+        replenishment_root.mkdir(parents=True, exist_ok=True)
+        number = 1
+        while (replenishment_root / f"replenishment-{number}").exists():
+            number += 1
+        attempt_dir = replenishment_root / f"replenishment-{number}"
+        attempt_dir.mkdir()
+        prompt_path = attempt_dir / "prompt.txt"
+        response_path = attempt_dir / "decision.json"
+        provider = str(config.get("provider") or selection.get("provider") or "codex")
+        adapter = provider_adapter(provider)
+        prompt = f"""You are replenishing the bounded native-analysis queue in an explicitly authorized Android assessment.
+
+Run evidence: {run_dir}
+Completed iteration: {iteration}
+Completed iteration record: {run_dir / 'agent' / f'iteration-{iteration}' / 'record.json'}
+Native inventory and logical groups: {run_dir / 'report.json'}
+Native queue and completed batch history: {selection_path}
+Already selected or queued libraries (never select these again): {json.dumps(sorted(seen))}
+Eligible remaining exact library names: {json.dumps(remaining)}
+
+The active batch was inconclusive. Add at most {slots} previously unqueued logical libraries only when the completed Ghidra/runtime evidence provides a concrete reason to inspect them. Return an empty added array when no remaining library is justified. Raw strings alone are insufficient. Preserve device-ABI selection; request another ABI only through cross_abi with an explicit comparison reason.
+
+Do not edit files, invoke devices, rerun tools, or claim success. Return only the required structured replenishment decision.
+"""
+        prompt_path.write_text(prompt, encoding="utf-8")
+        request = ProviderRequest(
+            provider=provider, prompt=prompt, cwd=attempt_dir,
+            schema_path=NATIVE_REPLENISHMENT_SCHEMA, output_path=response_path,
+            model=str(config.get("model") or selection.get("model") or ""),
+            reasoning_effort=str(config.get("reasoning_effort") or ""),
+            reasoning_mode="single", writable=False,
+            extra_args=("--config", "mcp_servers.ghidra.enabled=false") if provider == "codex" else (),
+        )
+        try:
+            command, provider_prompt = adapter.prepare(request)
+            exit_code, output = run_logged(
+                command, self.log, cwd=attempt_dir, input_text=provider_prompt,
+                artifact=attempt_dir / f"{provider}.log",
+            )
+            valid = adapter.finalize(request, exit_code, output) and validate_provider_output(
+                response_path, NATIVE_REPLENISHMENT_SCHEMA,
+            )
+            if not valid:
+                raise LoopError(f"{adapter.label} did not return a valid native queue replenishment.")
+            decision = read_json(response_path)
+            additions = decision.get("added") or []
+            names = [str(item.get("library") or "") for item in additions if isinstance(item, dict)]
+            if (
+                not isinstance(additions, list) or len(additions) > slots or len(names) != len(additions)
+                or len(set(names)) != len(names) or any(name not in remaining for name in names)
+            ):
+                raise LoopError("Native queue replenishment contained duplicate, ineligible, or excessive targets.")
+        except (LoopError, OSError, ValueError, json.JSONDecodeError) as error:
+            selection.setdefault("replenishments", []).append({
+                "number": number, "iteration": iteration, "status": "error", "detail": str(error),
+                "created_utc": datetime.now(timezone.utc).isoformat(),
+            })
+            write_json(selection_path, selection)
+            return False
+
+        selection["queue"] = queue + additions
+        selection.setdefault("replenishments", []).append({
+            "number": number, "iteration": iteration, "status": "added" if additions else "no_additions",
+            "libraries": names, "rationale": str(decision.get("rationale") or ""),
+            "evidence_used": decision.get("evidence_used") or [],
+            "created_utc": datetime.now(timezone.utc).isoformat(),
+        })
+        write_json(selection_path, selection)
+        return bool(additions)
+
+    def _advance_native_queue(self, run_dir: Path, iteration: int, reason: str) -> bool:
+        selection_path = run_dir / "native-selection.json"
+        if not selection_path.is_file():
+            return False
+        selection = read_json(selection_path)
+        batches = selection.setdefault("batches", [])
+        if batches and batches[-1].get("status") == "active":
+            batches[-1].update({
+                "status": "inconclusive", "completed_after_iteration": iteration,
+                "outcome": reason,
+            })
+        queue = selection.get("queue") or []
+        if not queue:
+            selection["selected"] = []
+            selection["queue_status"] = "exhausted"
+            write_json(selection_path, selection)
+            return False
+        raw_batch = queue[:NATIVE_BATCH_SIZE]
+        selection["queue"] = queue[NATIVE_BATCH_SIZE:]
+        selection["selected"] = self._materialize_native_targets(
+            run_dir, raw_batch, str(selection.get("device_abi") or ""),
+        )
+        batches.append({
+            "number": len(batches) + 1, "status": "active",
+            "libraries": [item["library"] for item in selection["selected"]],
+            "activated_after_iteration": iteration,
+        })
+        selection["queue_status"] = "active"
+        write_json(selection_path, selection)
+        return True
+
+    @staticmethod
+    def _resolve_native_queue(run_dir: Path, iteration: int) -> None:
+        selection_path = run_dir / "native-selection.json"
+        if not selection_path.is_file():
+            return
+        selection = read_json(selection_path)
+        batches = selection.get("batches") or []
+        if batches and batches[-1].get("status") == "active":
+            batches[-1].update({"status": "resolved", "completed_after_iteration": iteration})
+        selection["queue_status"] = "resolved"
+        write_json(selection_path, selection)
+
+    def _ensure_native_selection(self, run_dir: Path, config: dict[str, Any]) -> dict[str, Any]:
+        """Ask the selected reasoning provider to choose bounded native-analysis targets."""
+        selection_path = run_dir / "native-selection.json"
+        if selection_path.is_file():
+            value = read_json(selection_path)
+            if not isinstance(value, dict) or not isinstance(value.get("selected"), list):
+                raise LoopError("The recorded native selection is invalid.")
+            if "queue" not in value:
+                libraries = [
+                    str(item.get("library") or item.get("name") or "")
+                    for item in value["selected"] if isinstance(item, dict)
+                ]
+                value.update({
+                    "queue": [], "queue_status": "active" if libraries else "exhausted",
+                    "adaptive_queue": False, "replenishments": [],
+                    "limits": {"batch_size": NATIVE_BATCH_SIZE, "total_libraries": NATIVE_TOTAL_LIMIT},
+                    "batches": ([{"number": 1, "status": "active", "libraries": libraries}] if libraries else []),
+                })
+                write_json(selection_path, value)
+            elif "adaptive_queue" not in value:
+                value.update({"adaptive_queue": True, "replenishments": []})
+                write_json(selection_path, value)
+            return value
+
+        report = read_json(run_dir / "report.json")
+        if "native_libraries" not in report:
+            report["findings"] = [
+                item for item in report.get("findings", [])
+                if not isinstance(item, dict) or item.get("kind") != "native_indicator"
+            ]
+            report["native_libraries"] = scan_native(run_dir / "original.apk", run_dir / "jadx")
+        report["native_library_groups"] = group_native_libraries(report.get("native_libraries") or [])
+        write_json(run_dir / "report.json", report)
+        inventory = report.get("native_libraries") or []
+        if not isinstance(inventory, list):
+            raise LoopError("The native library inventory is invalid.")
+        groups = report.get("native_library_groups") or []
+        if not isinstance(groups, list):
+            raise LoopError("The grouped native library inventory is invalid.")
+        available_groups = {
+            str(item.get("library")): item
+            for item in groups
+            if isinstance(item, dict) and item.get("library")
+        }
+        if not available_groups:
+            value = {
+                "provider": str(config.get("provider") or "codex"),
+                "model": str(config.get("model") or ""),
+                "rationale": "The APK contains no bounded native libraries to analyze.",
+                "evidence_used": ["report.json native_libraries inventory"],
+                "selected": [],
+                "queue": [], "queue_status": "exhausted", "batches": [],
+                "adaptive_queue": True, "replenishments": [],
+                "limits": {"batch_size": NATIVE_BATCH_SIZE, "total_libraries": NATIVE_TOTAL_LIMIT},
+                "created_utc": datetime.now(timezone.utc).isoformat(),
+            }
+            write_json(selection_path, value)
+            return value
+
+        selection_root = run_dir / "agent" / "native-selection"
+        selection_root.mkdir(parents=True, exist_ok=True)
+        attempt = 1
+        while (selection_root / f"attempt-{attempt}").exists():
+            attempt += 1
+        selection_dir = selection_root / f"attempt-{attempt}"
+        selection_dir.mkdir()
+        prompt_path = selection_dir / "prompt.txt"
+        response_path = selection_dir / "decision.json"
+        provider = str(config.get("provider") or "codex")
+        adapter = provider_adapter(provider)
+        runtime_abi = recorded_device_abi(run_dir)
+        prompt = f"""You are the native-target triage step in an explicitly authorized Android assessment.
+
+Read-only assessment evidence: {run_dir}
+Logical native inventory: {run_dir / 'report.json'} under the native_library_groups field
+Recorded device ABI: {runtime_abi or 'unknown'}
+Runtime evidence: observations.json, result.json, logs/, and any diagnostic crash records
+Static evidence: JADX sources and AndroidManifest.xml below {run_dir / 'jadx'}
+
+Rank no more than {NATIVE_TOTAL_LIMIT} logical library names that genuinely warrant Ghidra analysis. Put the highest-priority {NATIVE_BATCH_SIZE} or fewer in selected and the remaining ranked targets in queued. All ABI variants of one library are one selection slot. Base the ranking on causal evidence such as application-owned names, System.loadLibrary call sites, native/JNI declarations, protected application startup, crash context, or relationships to observed checks. Raw string matches may be supporting context but must never be the sole reason for selection. The orchestrator automatically selects the variant matching the recorded device ABI. Request other available ABIs only through cross_abi with a specific comparison reason; those variants do not consume extra library slots. Do not duplicate a library between selected and queued. Select only exact library values present in native_library_groups. Empty selected and queued arrays are valid when native analysis is not justified.
+
+Do not edit any file, invoke a device, or claim assessment success. Return only the required structured selection.
+"""
+        prompt_path.write_text(prompt, encoding="utf-8")
+        request = ProviderRequest(
+            provider=provider, prompt=prompt, cwd=selection_dir,
+            schema_path=NATIVE_SELECTION_SCHEMA, output_path=response_path,
+            model=str(config.get("model") or ""),
+            reasoning_effort=str(config.get("reasoning_effort") or ""),
+            reasoning_mode="single", writable=False,
+            extra_args=("--config", "mcp_servers.ghidra.enabled=false") if provider == "codex" else (),
+        )
+        command, provider_prompt = adapter.prepare(request)
+        exit_code, output = run_logged(
+            command, self.log, cwd=selection_dir, input_text=provider_prompt,
+            artifact=selection_dir / f"{provider}.log",
+        )
+        if not adapter.finalize(request, exit_code, output) or not validate_provider_output(response_path, NATIVE_SELECTION_SCHEMA):
+            raise LoopError(f"{adapter.label} did not return a valid native target selection.")
+        decision = read_json(response_path)
+        raw_selected = decision.get("selected") or []
+        raw_queue = decision.get("queued") or []
+        if not isinstance(raw_selected, list) or not isinstance(raw_queue, list):
+            raise LoopError("Native selection and queue must be arrays.")
+        if len(raw_selected) > NATIVE_BATCH_SIZE or len(raw_selected) + len(raw_queue) > NATIVE_TOTAL_LIMIT:
+            raise LoopError("Native selection exceeded the bounded batch or total queue limit.")
+        if not raw_selected and raw_queue:
+            raw_selected, raw_queue = raw_queue[:NATIVE_BATCH_SIZE], raw_queue[NATIVE_BATCH_SIZE:]
+        ranked = raw_selected + raw_queue
+        names = [str(item.get("library") or "") for item in ranked if isinstance(item, dict)]
+        if len(names) != len(ranked) or len(set(names)) != len(names) or any(name not in available_groups for name in names):
+            raise LoopError("Native queue contains duplicate, malformed, or unavailable logical libraries.")
+        selected = self._materialize_native_targets(run_dir, raw_selected, runtime_abi)
 
         value = {
             "provider": provider,
@@ -994,6 +1183,16 @@ Do not edit any file, invoke a device, or claim assessment success. Return only 
             "rationale": str(decision.get("rationale") or ""),
             "evidence_used": decision.get("evidence_used") or [],
             "selected": selected,
+            "queue": raw_queue,
+            "queue_status": "active" if selected else "exhausted",
+            "adaptive_queue": True,
+            "replenishments": [],
+            "limits": {"batch_size": NATIVE_BATCH_SIZE, "total_libraries": NATIVE_TOTAL_LIMIT},
+            "batches": ([{
+                "number": 1, "status": "active",
+                "libraries": [item["library"] for item in selected],
+                "activated_before_iteration": 1,
+            }] if selected else []),
             "device_abi": runtime_abi,
             "created_utc": datetime.now(timezone.utc).isoformat(),
         }
@@ -1011,6 +1210,13 @@ Do not edit any file, invoke a device, or claim assessment success. Return only 
         selection_path = run_dir / "native-selection.json"
         selection = read_json(selection_path) if selection_path.is_file() else {"selected": []}
         selected_targets = selection.get("selected") or []
+        batches = selection.get("batches") or []
+        current_batch = int((batches[-1].get("number") if batches else 0) or 0)
+        queued_count = len(selection.get("queue") or [])
+        queue_context = (
+            f"Native analysis queue batch {current_batch}; {queued_count} logical libraries remain queued. "
+            "Only the active batch below is authorized for this iteration."
+        )
         if selected_targets:
             rendered: list[str] = []
             for item in selected_targets:
@@ -1024,11 +1230,12 @@ Do not edit any file, invoke a device, or claim assessment success. Return only 
                         if isinstance(variant, dict):
                             rendered.append(f"  comparison: {variant.get('extracted')} ({cross.get('reason')})")
             rendered_targets = "\n".join(rendered)
-            native_guidance = f"""Codex/provider native triage selected these exact targets:
+            native_guidance = f"""{queue_context}
+Codex/provider native triage selected these exact targets:
 {rendered_targets}
-Use Ghidra MCP for these targets when native evidence affects the decision. If list_instances is empty, import or open the selected binary through the MCP tools and wait for analysis instead of treating an empty instance list as completed native review. Import is authorized only for these isolated run artifacts; do not patch a binary."""
+Inspect every active target with read-only Ghidra MCP before concluding this iteration, and cite the inspected paths in evidence_used. If list_instances is empty, import or open the selected binary through the MCP tools and wait for analysis instead of treating an empty instance list as completed native review. Import is authorized only for these isolated run artifacts; do not patch a binary."""
         else:
-            native_guidance = "Native triage selected no Ghidra targets. Do not infer a native detector from raw string matches alone."
+            native_guidance = f"{queue_context} Native triage selected no Ghidra targets. Do not infer a native detector from raw string matches alone."
         if reasoning_mode == "parallel":
             delegation = f"""Parallel specialist mode is enabled. Spawn no more than {specialist_count} read-only subagents for independent evidence review, then wait for them and synthesize their findings before deciding:
 - static specialist: JADX Java/Kotlin detector evidence;

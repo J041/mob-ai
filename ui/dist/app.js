@@ -172,9 +172,12 @@ function renderRuns(runs) {
     list.innerHTML = '<div class="empty">No assessment runs found.</div>';
     return;
   }
-  list.innerHTML = runs.map(run => `
+  list.innerHTML = runs.map(run => {
+    const native = run.native_queue || {};
+    const nativeProgress = native.total ? ` · native batch ${native.batch}/${native.batches} · ${native.processed}/${native.total} processed` : '';
+    return `
     <article class="run-row">
-      <div class="run-main"><strong>${escapeText(run.package || run.id)}</strong><small>${escapeText(run.id)} · ${run.static_findings} static findings</small></div>
+      <div class="run-main"><strong>${escapeText(run.package || run.id)}</strong><small>${escapeText(run.id)} · ${run.static_findings} static findings${escapeText(nativeProgress)}</small></div>
       <div class="run-cell"><span>${escapeText(run.target || 'no target')}</span><small>${run.derived_from_run ? `derived from ${escapeText(run.derived_from_run)} - ` : ''}${escapeText(run.transport || 'analysis only')}</small></div>
       <div class="run-cell"><span>${run.iterations} iterations</span><small>${run.reasoning_mode === 'parallel' ? `${run.specialist_count} specialists` : 'single agent'} · ${run.observation_events} observations</small></div>
       <span class="badge ${escapeText(run.status)}">${escapeText(run.status.replaceAll('_', ' '))}</span>
@@ -184,7 +187,8 @@ function renderRuns(runs) {
         ${run.continuable ? `<button class="resume-button" data-resume="${escapeText(run.path)}">${run.frida_recoverable ? 'Fix Frida' : run.checkpoint_recoverable ? 'Recover' : 'Resume'}</button>` : ''}
         <button class="resume-button diagnostic" data-retry="${escapeText(run.path)}" ${run.retryable ? '' : 'disabled'}>Rerun / retry</button>
       </div>
-    </article>`).join('');
+    </article>`;
+  }).join('');
   $$('[data-resume]').forEach(button => button.addEventListener('click', () => {
     state.continuationMode = 'resume';
     setTab('resume');

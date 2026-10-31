@@ -34,8 +34,36 @@
         "required": ["library", "priority", "reason"],
         "additionalProperties": false
       }
+    },
+    "queued": {
+      "type": "array",
+      "maxItems": 10,
+      "items": {
+        "type": "object",
+        "properties": {
+          "library": { "type": "string" },
+          "priority": { "type": "string", "enum": ["high", "medium", "low"] },
+          "reason": { "type": "string" },
+          "cross_abi": {
+            "type": "object",
+            "properties": {
+              "abis": {
+                "type": "array",
+                "minItems": 1,
+                "uniqueItems": true,
+                "items": { "type": "string" }
+              },
+              "reason": { "type": "string" }
+            },
+            "required": ["abis", "reason"],
+            "additionalProperties": false
+          }
+        },
+        "required": ["library", "priority", "reason"],
+        "additionalProperties": false
+      }
     }
   },
-  "required": ["rationale", "evidence_used", "selected"],
+  "required": ["rationale", "evidence_used", "selected", "queued"],
   "additionalProperties": false
 }
