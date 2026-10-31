@@ -225,6 +225,13 @@ variants remain part of the same logical selection slot. The validated result is
 specialist. If Ghidra has no open instance, the iteration prompt requires the specialist to
 import or open a selected binary rather than treating an empty instance list as analysis.
 
+Before each reasoning iteration, the deterministic orchestrator copies every active primary and
+approved cross-ABI binary to a hash-qualified run input, imports it through the private Ghidra
+backend into an isolated run/batch/hash project folder, starts auto-analysis, and polls until the
+bounded analysis completes. Results, program names, hashes, function counts, partial failures, and
+timeouts are checkpointed at `ghidra/preparation/batch-N.json`. Completed manifests are reused on
+retry so the provider receives already-analyzed programs and does not duplicate imports.
+
 For larger APKs, native triage maintains a persisted queue of at most fifteen logical libraries
 in batches of five. Only the active batch is extracted and authorized for an iteration. When its
 validation remains unsuccessful, the batch is recorded as inconclusive and the next batch is

@@ -663,6 +663,22 @@ class WebAppTests(unittest.TestCase):
             self.assertEqual(comparison.read_bytes(), x86_payload)
             self.assertEqual(len(selection["selected"]), 1)
             self.assertEqual(len(selection["queue"]), 1)
+
+            def fake_ghidra(method, _path, body=None):
+                if method == "POST":
+                    return {"success": True, "data": {
+                        "name": Path(body["file_path"]).name, "analyzing": True,
+                    }}
+                return {"success": True, "data": {"analyzing": False, "function_count": 42}}
+
+            with patch("ui.orchestrator.ghidra_request", side_effect=fake_ghidra) as ghidra:
+                preparation = LoopRunner._prepare_ghidra_batch(run)
+                cached = LoopRunner._prepare_ghidra_batch(run)
+            self.assertEqual(preparation["status"], "complete")
+            self.assertEqual(len(preparation["programs"]), 2)
+            self.assertTrue(all(item["function_count"] == 42 for item in preparation["programs"]))
+            self.assertEqual(cached, preparation)
+            self.assertEqual(ghidra.call_count, 4)
             self.assertTrue(LoopRunner(StringIO())._replenish_native_queue(run, {
                 "provider": "codex", "model": "test-model", "reasoning_effort": "high",
             }, 1))

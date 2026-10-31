@@ -8,7 +8,11 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import time
 from typing import Any, TextIO
+import urllib.error
+import urllib.parse
+import urllib.request
 import zipfile
 
 from pipeline.pipeline import group_native_libraries, scan_native
@@ -27,6 +31,7 @@ GHIDRA_URL = os.environ.get("GHIDRA_MCP_URL", "http://reverse-engineering:8089")
 GHIDRA_TOKEN = os.environ.get("GHIDRA_MCP_AUTH_TOKEN", "")
 NATIVE_BATCH_SIZE = 5
 NATIVE_TOTAL_LIMIT = 15
+GHIDRA_PREP_TIMEOUT_SECONDS = int(os.environ.get("MOB_AI_GHIDRA_PREP_TIMEOUT", "600"))
 
 
 class LoopError(RuntimeError):
@@ -90,6 +95,33 @@ def read_json(path: Path) -> Any:
 
 def write_json(path: Path, value: Any) -> None:
     path.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
+
+
+def ghidra_request(method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Call the private Ghidra backend without exposing its bearer token in process arguments."""
+    body = json.dumps(payload).encode() if payload is not None else None
+    headers = {"Accept": "application/json"}
+    if body is not None:
+        headers["Content-Type"] = "application/json"
+    if GHIDRA_TOKEN:
+        headers["Authorization"] = f"Bearer {GHIDRA_TOKEN}"
+    request = urllib.request.Request(
+        f"{GHIDRA_URL.rstrip('/')}{path}", data=body, headers=headers, method=method,
+    )
+    try:
+        timeout = 300 if method == "POST" and path == "/import_file" else 30
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            value = json.loads(response.read().decode("utf-8", errors="replace"))
+    except urllib.error.HTTPError as error:
+        detail = error.read(2000).decode("utf-8", errors="replace")
+        raise LoopError(f"Ghidra backend returned HTTP {error.code}: {detail}") from error
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as error:
+        raise LoopError(f"Ghidra backend request failed: {error}") from error
+    if not isinstance(value, dict):
+        raise LoopError("Ghidra backend returned a non-object response.")
+    if value.get("success") is False or value.get("error"):
+        raise LoopError(f"Ghidra backend rejected the request: {value.get('error') or value}")
+    return value
 
 
 def attempt_fingerprint(candidate_hash: str, validation: Any) -> str:
@@ -733,6 +765,23 @@ class LoopRunner:
             else:
                 shutil.copy2(run_dir / "frida" / "bypass-level-1.js", candidate)
             prior_dir = agent_dir / f"iteration-{iteration - 1}" if iteration > 1 else None
+            self.log.write(f"Preparing Ghidra native batch before iteration {iteration}...\n")
+            self.log.flush()
+            try:
+                ghidra_preparation = self._prepare_ghidra_batch(run_dir)
+            except (LoopError, OSError, json.JSONDecodeError) as error:
+                write_summary(
+                    run_dir, "environment_error", records,
+                    f"Deterministic Ghidra preparation failed before iteration {iteration}: {error}",
+                    checkpoint={"stage": "ghidra_preparation", "iteration": iteration},
+                    reason="ghidra_preparation_failure",
+                )
+                return "environment_error"
+            self.log.write(
+                f"Ghidra batch {ghidra_preparation.get('batch', 0)} preparation: "
+                f"{ghidra_preparation.get('status', 'unknown')}\n"
+            )
+            self.log.flush()
             prompt = self._prompt(
                 run_dir, candidate, prior_dir, iteration, start_iteration, end_iteration,
                 reasoning_mode=str(config.get("reasoning_mode") or "single"),
@@ -921,6 +970,119 @@ class LoopRunner:
                     **({"cross_abi": cross_result} if cross_result else {}),
                 })
         return selected
+
+    @staticmethod
+    def _prepare_ghidra_batch(run_dir: Path) -> dict[str, Any]:
+        """Import and fully auto-analyze the active native batch before provider reasoning."""
+        selection_path = run_dir / "native-selection.json"
+        selection = read_json(selection_path) if selection_path.is_file() else {}
+        selected = [item for item in (selection.get("selected") or []) if isinstance(item, dict)]
+        batches = selection.get("batches") or []
+        batch_number = int((batches[-1].get("number") if batches else 0) or 0)
+        preparation_dir = run_dir / "ghidra" / "preparation"
+        preparation_dir.mkdir(parents=True, exist_ok=True)
+        manifest_path = preparation_dir / f"batch-{batch_number}.json"
+        variants: list[dict[str, Any]] = []
+        for item in selected:
+            primary = item.get("primary")
+            if isinstance(primary, dict):
+                variants.append(primary)
+            cross = item.get("cross_abi")
+            if isinstance(cross, dict):
+                variants.extend(value for value in (cross.get("variants") or []) if isinstance(value, dict))
+        expected = sorted(str(item.get("sha256") or "") for item in variants)
+        existing = read_json(manifest_path) if manifest_path.is_file() else {}
+        if existing.get("status") == "complete" and existing.get("expected_sha256") == expected:
+            return existing
+        if not variants:
+            value = {
+                "batch": batch_number, "status": "not_required", "expected_sha256": [],
+                "programs": [], "updated_utc": datetime.now(timezone.utc).isoformat(),
+            }
+            write_json(manifest_path, value)
+            return value
+
+        inputs_dir = run_dir / "ghidra" / "inputs"
+        inputs_dir.mkdir(parents=True, exist_ok=True)
+        prior_programs = {
+            str(item.get("key")): item for item in (existing.get("programs") or [])
+            if isinstance(item, dict) and item.get("key") and item.get("status") != "import_error"
+        }
+        programs: list[dict[str, Any]] = []
+        value: dict[str, Any] = {
+            "batch": batch_number, "status": "preparing", "expected_sha256": expected,
+            "programs": programs, "updated_utc": datetime.now(timezone.utc).isoformat(),
+        }
+        for variant in variants:
+            digest = str(variant.get("sha256") or "")
+            abi = str(variant.get("abi") or "unknown")
+            name = str(variant.get("name") or Path(str(variant.get("extracted") or "native.so")).name)
+            key = f"{digest[:12]}-{abi}-{name}"
+            if key in prior_programs:
+                programs.append(prior_programs[key])
+                continue
+            source = (WORKSPACE / str(variant.get("extracted") or "")).resolve()
+            try:
+                source.relative_to(run_dir.resolve())
+            except ValueError as error:
+                raise LoopError(f"Selected Ghidra input escaped its run: {source}") from error
+            if not source.is_file() or sha256(source) != digest:
+                raise LoopError(f"Selected Ghidra input failed hash verification: {source}")
+            safe_name = re.sub(r"[^A-Za-z0-9_.-]+", "_", key)
+            isolated_input = inputs_dir / safe_name
+            if not isolated_input.is_file() or sha256(isolated_input) != digest:
+                shutil.copy2(source, isolated_input)
+            entry: dict[str, Any] = {
+                "key": key, "library": name, "abi": abi, "sha256": digest,
+                "input": workspace_relative(isolated_input),
+                "project_folder": f"/mob-ai/{run_dir.name}/batch-{batch_number}/{digest[:12]}-{abi}",
+                "status": "importing",
+            }
+            programs.append(entry)
+            value["updated_utc"] = datetime.now(timezone.utc).isoformat()
+            write_json(manifest_path, value)
+            try:
+                imported = ghidra_request("POST", "/import_file", {
+                    "file_path": f"/workspace/{entry['input']}",
+                    "project_folder": entry["project_folder"], "auto_analyze": True,
+                })
+                data = imported.get("data") if isinstance(imported.get("data"), dict) else imported
+                entry["program"] = str(data.get("name") or isolated_input.name)
+                entry["status"] = "analyzing" if data.get("analyzing", False) else "complete"
+                if entry["status"] == "complete":
+                    entry["function_count"] = data.get("function_count")
+            except LoopError as error:
+                entry.update({"status": "import_error", "error": str(error)})
+            write_json(manifest_path, value)
+
+        deadline = time.monotonic() + GHIDRA_PREP_TIMEOUT_SECONDS
+        pending = [item for item in programs if item.get("status") in {"importing", "analyzing", "timeout"}]
+        while pending and time.monotonic() < deadline:
+            for entry in list(pending):
+                try:
+                    query = urllib.parse.urlencode({"program": entry["program"]})
+                    response = ghidra_request("GET", f"/analysis_status?{query}")
+                    data = response.get("data") if isinstance(response.get("data"), dict) else response
+                    if not data.get("analyzing", True):
+                        entry.update({
+                            "status": "complete", "function_count": data.get("function_count"),
+                            "analysis_status": data,
+                        })
+                        pending.remove(entry)
+                except LoopError as error:
+                    entry["last_poll_error"] = str(error)
+            value["updated_utc"] = datetime.now(timezone.utc).isoformat()
+            write_json(manifest_path, value)
+            if pending:
+                time.sleep(2)
+        for entry in pending:
+            entry.update({"status": "timeout", "error": "Ghidra auto-analysis did not finish before the bounded timeout."})
+        value.update({
+            "status": "complete" if programs and all(item.get("status") == "complete" for item in programs) else "partial",
+            "programs": programs, "updated_utc": datetime.now(timezone.utc).isoformat(),
+        })
+        write_json(manifest_path, value)
+        return value
 
     def _replenish_native_queue(self, run_dir: Path, config: dict[str, Any], iteration: int) -> bool:
         selection_path = run_dir / "native-selection.json"
@@ -1213,6 +1375,12 @@ Do not edit any file, invoke a device, or claim assessment success. Return only 
         batches = selection.get("batches") or []
         current_batch = int((batches[-1].get("number") if batches else 0) or 0)
         queued_count = len(selection.get("queue") or [])
+        preparation_path = run_dir / "ghidra" / "preparation" / f"batch-{current_batch}.json"
+        preparation = read_json(preparation_path) if preparation_path.is_file() else {}
+        prepared_programs = [
+            f"{item.get('program')} ({item.get('status')}, {item.get('function_count', '?')} functions)"
+            for item in (preparation.get("programs") or []) if isinstance(item, dict)
+        ]
         queue_context = (
             f"Native analysis queue batch {current_batch}; {queued_count} logical libraries remain queued. "
             "Only the active batch below is authorized for this iteration."
@@ -1233,7 +1401,9 @@ Do not edit any file, invoke a device, or claim assessment success. Return only 
             native_guidance = f"""{queue_context}
 Codex/provider native triage selected these exact targets:
 {rendered_targets}
-Inspect every active target with read-only Ghidra MCP before concluding this iteration, and cite the inspected paths in evidence_used. If list_instances is empty, import or open the selected binary through the MCP tools and wait for analysis instead of treating an empty instance list as completed native review. Import is authorized only for these isolated run artifacts; do not patch a binary."""
+The deterministic orchestrator prepared them before this reasoning step. Preparation manifest: {preparation_path}
+Preparation status: {preparation.get('status', 'missing')}; Ghidra programs: {json.dumps(prepared_programs)}
+Inspect every complete active program with read-only Ghidra MCP before concluding this iteration, and cite the preparation manifest and inspected paths in evidence_used. Open the named prepared programs rather than importing duplicates. If a target is recorded as partial or failed, report that limitation and use MCP import only as a bounded fallback for that exact target. Do not patch a binary."""
         else:
             native_guidance = f"{queue_context} Native triage selected no Ghidra targets. Do not infer a native detector from raw string matches alone."
         if reasoning_mode == "parallel":
