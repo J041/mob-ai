@@ -639,14 +639,16 @@ function renderWirelessDevices(devices) {
   }
   container.innerHTML = devices.map(device => {
     const endpoint = device.endpoint || '';
-    const timestamp = device.last_connected_utc || device.paired_utc;
-    const detail = endpoint || device.host || device.pairing_endpoint || 'Connection address not discovered';
+    const pairedIsLatest = Boolean(device.paired_utc && (!device.last_connected_utc || new Date(device.paired_utc) > new Date(device.last_connected_utc)));
+    const timestamp = pairedIsLatest ? device.paired_utc : (device.last_connected_utc || device.paired_utc);
+    const timestampLabel = pairedIsLatest ? 'Paired' : device.last_connected_utc ? 'Last connected' : 'Last known';
+    const detail = endpoint || (device.pairing_endpoint ? `${device.pairing_endpoint} · pairing address` : device.host) || 'Connection address not discovered';
     const action = endpoint
       ? `<button class="text-button wireless-action" type="button" data-wireless-endpoint="${escapeText(endpoint)}" data-wireless-connected="${device.status === 'connected'}">${device.status === 'connected' ? 'Use device' : 'Connect'}</button>`
       : '<small class="wireless-address-needed">Enter its connection address below</small>';
     return `<article class="wireless-device ${escapeText(device.status)}">
       <span class="wireless-dot" aria-hidden="true"></span>
-      <div><strong>${escapeText(detail)}</strong><small>${escapeText(timestamp ? `Last known ${formatDate(timestamp)}` : device.details || 'Visible on the local network')}</small></div>
+      <div><strong>${escapeText(detail)}</strong><small>${escapeText(timestamp ? `${timestampLabel} ${formatDate(timestamp)}` : device.details || 'Visible on the local network')}</small></div>
       <b>${escapeText(wirelessStatusLabel(device.status))}</b>${action}
     </article>`;
   }).join('');

@@ -138,6 +138,10 @@ def record_wireless_device(*, pairing_endpoint: str = "", connection_endpoint: s
             item = {"id": uuid.uuid4().hex, "host": host}
             devices.append(item)
         if pairing_endpoint:
+            previous_pairing = str(item.get("pairing_endpoint") or "")
+            if previous_pairing != pairing_endpoint:
+                item.pop("connection_endpoint", None)
+                item.pop("last_connected_utc", None)
             item["pairing_endpoint"] = pairing_endpoint
             item["paired_utc"] = now
         if connection_endpoint:
@@ -1741,6 +1745,10 @@ def wireless_device_view(found: list[dict], mdns: list[dict]) -> list[dict]:
     represented: set[str] = set()
     for record in records:
         endpoint = str(record.get("connection_endpoint") or "")
+        paired_utc = str(record.get("paired_utc") or "")
+        last_connected_utc = str(record.get("last_connected_utc") or "")
+        if paired_utc and paired_utc > last_connected_utc:
+            endpoint = ""
         host = str(record.get("host") or endpoint_host(endpoint or str(record.get("pairing_endpoint") or "")))
         discovered = next((item for item in connect_services if endpoint_host(item["endpoint"]) == host), None)
         target = endpoint or str((discovered or {}).get("endpoint") or "")
@@ -1754,8 +1762,9 @@ def wireless_device_view(found: list[dict], mdns: list[dict]) -> list[dict]:
             "pairing_endpoint": str(record.get("pairing_endpoint") or ""),
             "status": status, "adb_state": adb_state, "paired": True,
             "discovered": bool(discovered), "connectable": bool(target and status != "connected"),
-            "paired_utc": str(record.get("paired_utc") or ""),
-            "last_connected_utc": str(record.get("last_connected_utc") or ""),
+            "paired_utc": paired_utc,
+            "last_connected_utc": last_connected_utc,
+            "connection_required": not bool(target),
             "details": str((live or {}).get("details") or ""),
         })
     for live in found:

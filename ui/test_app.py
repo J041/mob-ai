@@ -15,8 +15,9 @@ from ui.app import (
     _readiness, app, artifact_manifest, codex_model_catalog, parse_resume, parse_retry, parse_start,
     infer_attempt_kind, infer_job_run_id, resolve_workspace_item, sign_out_codex,
     assistant_evidence_snapshot, assistant_history, recorded_success_policy, run_assistant_turn,
-    start_job, strip_terminal_controls, success_policy,
+    record_wireless_device, start_job, strip_terminal_controls, success_policy,
     subprocess_capture_text,
+    wireless_device_view,
 )
 from ui.orchestrator import (
     WORKSPACE, LoopRunner, attempt_fingerprint, codex_config_overrides,
@@ -351,6 +352,39 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(run.call_args_list[0].kwargs["input"], "123456\n")
         self.assertNotIn("123456", stored)
         self.assertIn("192.168.1.20:37001", stored)
+
+    def test_new_pairing_invalidates_stale_connection_for_same_host(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            registry = Path(temp) / "wireless-devices.json"
+            registry.write_text(json.dumps({"devices": [{
+                "id": "known-phone", "host": "192.168.1.20",
+                "pairing_endpoint": "192.168.1.20:37001",
+                "paired_utc": "2026-10-30T00:00:00+00:00",
+                "connection_endpoint": "192.168.1.20:41993",
+                "last_connected_utc": "2026-10-30T01:00:00+00:00",
+            }]}), encoding="utf-8")
+            with patch("ui.app.WIRELESS_DEVICES_PATH", registry):
+                record_wireless_device(pairing_endpoint="192.168.1.20:39725")
+                stored = json.loads(registry.read_text(encoding="utf-8"))["devices"][0]
+        self.assertEqual(stored["pairing_endpoint"], "192.168.1.20:39725")
+        self.assertNotIn("connection_endpoint", stored)
+        self.assertNotIn("last_connected_utc", stored)
+
+    def test_newer_pairing_hides_legacy_connection_until_rediscovered(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            registry = Path(temp) / "wireless-devices.json"
+            registry.write_text(json.dumps({"devices": [{
+                "id": "known-phone", "host": "192.168.1.20",
+                "pairing_endpoint": "192.168.1.20:39725",
+                "paired_utc": "2026-11-01T01:06:05+00:00",
+                "connection_endpoint": "192.168.1.20:38501",
+                "last_connected_utc": "2026-10-31T15:43:39+00:00",
+            }]}), encoding="utf-8")
+            with patch("ui.app.WIRELESS_DEVICES_PATH", registry):
+                device = wireless_device_view([], [])[0]
+        self.assertEqual(device["endpoint"], "")
+        self.assertTrue(device["connection_required"])
+        self.assertEqual(device["pairing_endpoint"], "192.168.1.20:39725")
 
     @patch("ui.app.subprocess.run")
     def test_device_discovery_distinguishes_previously_paired_and_discovered(self, run) -> None:
