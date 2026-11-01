@@ -301,6 +301,15 @@ last validated candidate, prior records remain append-only, and numbering contin
 The recorded device, package, success specification, run window, and Frida Server
 path are reused. A different Codex model may be selected for the additional attempts.
 
+Provider allowance exhaustion is recorded separately as `usage_limited`, not as a
+generic provider failure. Mob-AI preserves the provider log and a trusted snapshot of
+the candidate from before the interrupted reasoning turn. **Resume after reset**
+restarts that same incomplete iteration without repeating observation, static analysis,
+or Ghidra preparation. New and continuation forms can opt into automatic resume, but
+the worker schedules it only when the provider returned an explicit reset timestamp;
+an unknown reset time always requires manual continuation. A later manual attempt
+supersedes any older automatic checkpoint so it cannot launch a duplicate job.
+
 The **Continue / retry** panel displays the success policy bound to the selected
 assessment, including its checks, repeat threshold, and baseline requirement. The
 policy is hash-verified and cannot be changed during continuation; start a new

@@ -16,7 +16,7 @@ import urllib.request
 import zipfile
 
 from pipeline.pipeline import group_native_libraries, scan_native
-from ui.providers import ProviderRequest, provider_adapter, validate_provider_output
+from ui.providers import ProviderRequest, detect_usage_limit, provider_adapter, validate_provider_output
 
 
 WORKSPACE = Path(os.environ.get("MOB_AI_WORKSPACE", "/workspace")).resolve()
@@ -44,6 +44,15 @@ class LoopError(RuntimeError):
 
 class EnvironmentFailure(LoopError):
     """An operational dependency failed before an assessment conclusion was possible."""
+
+
+class ProviderUsageLimit(LoopError):
+    """The selected account exhausted an included provider allowance."""
+
+    def __init__(self, provider: str, usage: dict[str, str]):
+        super().__init__(usage.get("detail") or f"{provider} usage allowance exhausted.")
+        self.provider = provider
+        self.usage = usage
 
 
 def sha256(path: Path) -> str:
@@ -176,13 +185,15 @@ def target_args(config: dict[str, Any]) -> list[str]:
 def write_summary(
     run_dir: Path, status: str, records: list[Any], detail: str, *,
     checkpoint: dict[str, Any] | None = None, reason: str = "",
+    usage: dict[str, Any] | None = None,
 ) -> None:
     payload = {
         "status": status,
         "detail": detail,
         "reason": reason,
-        "recoverable": status == "environment_error" and bool(checkpoint),
+        "recoverable": status in {"environment_error", "usage_limited"} and bool(checkpoint),
         "checkpoint": checkpoint,
+        "usage": usage,
         "run_directory": workspace_relative(run_dir),
         "completed_utc": datetime.now(timezone.utc).isoformat(),
         "iterations": records,
@@ -211,6 +222,15 @@ def checkpoint_recovery_available(summary: dict[str, Any]) -> bool:
         summary.get("status") == "environment_error"
         and summary.get("recoverable")
         and checkpoint.get("stage") in {"observation", "validation"}
+    )
+
+
+def usage_limit_recovery_available(summary: dict[str, Any]) -> bool:
+    checkpoint = summary.get("checkpoint") or {}
+    return bool(
+        summary.get("status") == "usage_limited"
+        and summary.get("recoverable")
+        and checkpoint.get("stage") in {"native_selection", "provider", "native_replenishment"}
     )
 
 
@@ -313,6 +333,7 @@ class LoopRunner:
             "reasoning_effort": request.get("reasoning_effort") or "",
             "reasoning_mode": request.get("reasoning_mode") or "single",
             "specialist_count": int(request.get("specialist_count") or 3),
+            "auto_resume_usage_limit": bool(request.get("auto_resume_usage_limit")),
             "derived_from_run": str(request.get("derived_from_run") or ""),
             "derived_from_policy_sha256": str(request.get("derived_from_policy_sha256") or ""),
         }
@@ -421,6 +442,9 @@ class LoopRunner:
 
     def resume(self, request: dict[str, Any]) -> tuple[str, Path]:
         run_dir, config, summary, records = self._load_existing_run(request)
+        config["auto_resume_usage_limit"] = bool(
+            request.get("auto_resume_usage_limit", config.get("auto_resume_usage_limit", False))
+        )
         target_settings_changed = bool(config.pop("_target_settings_changed", False))
         if target_settings_changed:
             write_json(run_dir / "codex-loop-config.json", config)
@@ -455,6 +479,8 @@ class LoopRunner:
                 reasoning_mode=str(request.get("reasoning_mode") or ""),
                 specialist_count=int(request.get("specialist_count") or 3),
             )
+        if usage_limit_recovery_available(summary):
+            return self._recover_usage_limit(run_dir, config, summary, records, request)
         if summary.get("status") == "human_review" and frida_recovery_available(summary):
             frida_server = str(request.get("frida_server") or "")
             if not frida_server:
@@ -496,6 +522,73 @@ class LoopRunner:
             run_dir, resumed_config, records, start_iteration=start,
             additional=int(request["max_iterations"]), previous_candidate=previous_candidate,
             previous_fingerprint=prior_fingerprint, restart_frida=bool(config.get("start_frida_server")),
+        )
+        return status, run_dir
+
+    def _recover_usage_limit(
+        self, run_dir: Path, config: dict[str, Any], summary: dict[str, Any],
+        records: list[Any], request: dict[str, Any],
+    ) -> tuple[str, Path]:
+        """Restart the interrupted provider stage from its trusted pre-provider state."""
+        checkpoint = summary.get("checkpoint") or {}
+        stage = str(checkpoint.get("stage") or "")
+        iteration = int(checkpoint.get("iteration") or (max(
+            (int(item.get("iteration") or 0) for item in records if isinstance(item, dict)), default=0,
+        ) + 1))
+        previous_candidate: Path | None = None
+        if stage == "provider":
+            failed_dir = run_dir / "agent" / f"iteration-{iteration}"
+            snapshot_name = Path(str(checkpoint.get("candidate_snapshot") or "candidate.before-provider.js")).name
+            snapshot = failed_dir / snapshot_name
+            expected_hash = str(checkpoint.get("candidate_snapshot_sha256") or "")
+            if not failed_dir.is_dir() or not snapshot.is_file() or (expected_hash and sha256(snapshot) != expected_hash):
+                raise LoopError("The usage-limit checkpoint is missing its trusted candidate snapshot.")
+            recovery_number = 1
+            while (run_dir / "agent" / f"usage-limit-recovery-{recovery_number}").exists():
+                recovery_number += 1
+            recovery_dir = run_dir / "agent" / f"usage-limit-recovery-{recovery_number}"
+            shutil.move(str(failed_dir), str(recovery_dir))
+            previous_candidate = recovery_dir / snapshot_name
+            write_json(recovery_dir / "recovery.json", {
+                "stage": stage,
+                "iteration": iteration,
+                "previous_usage": summary.get("usage") or {},
+                "resumed_utc": datetime.now(timezone.utc).isoformat(),
+            })
+        elif stage == "native_replenishment":
+            try:
+                self._replenish_native_queue(run_dir, config, iteration)
+            except ProviderUsageLimit as error:
+                usage = dict(error.usage)
+                usage.update({
+                    "provider": error.provider,
+                    "auto_resume": bool(config.get("auto_resume_usage_limit")),
+                })
+                write_summary(
+                    run_dir, "usage_limited", records,
+                    usage.get("detail") or f"{error.provider} usage allowance remains exhausted.",
+                    checkpoint={"stage": stage, "iteration": iteration},
+                    reason="provider_usage_limit", usage=usage,
+                )
+                return "usage_limited", run_dir
+            self._advance_native_queue(run_dir, iteration, "replenishment_recovered")
+            last = max(records, key=lambda item: int(item["iteration"])) if records else None
+            if last:
+                previous_candidate = (WORKSPACE / str(last["candidate"])).resolve()
+            iteration += 1
+        elif stage != "native_selection":
+            raise LoopError(f"Unsupported usage-limit checkpoint stage: {stage!r}.")
+
+        for field in ("provider", "model", "reasoning_effort", "reasoning_mode"):
+            if request.get(field):
+                config[field] = request[field]
+        if request.get("reasoning_mode"):
+            config["specialist_count"] = int(request.get("specialist_count") or 3)
+        write_json(run_dir / "codex-loop-config.json", config)
+        status = self._iterations(
+            run_dir, config, records, start_iteration=iteration,
+            additional=int(request["max_iterations"]), previous_candidate=previous_candidate,
+            previous_fingerprint=None, restart_frida=False,
         )
         return status, run_dir
 
@@ -755,7 +848,21 @@ class LoopRunner:
             self._resolve_native_queue(run_dir, iteration)
             write_summary(run_dir, "success", records, f"Success policy passed after recovering validation in iteration {iteration}.")
             return "success", run_dir
-        self._replenish_native_queue(run_dir, config, iteration)
+        try:
+            self._replenish_native_queue(run_dir, config, iteration)
+        except ProviderUsageLimit as error:
+            usage = dict(error.usage)
+            usage.update({
+                "provider": error.provider,
+                "auto_resume": bool(config.get("auto_resume_usage_limit")),
+            })
+            write_summary(
+                run_dir, "usage_limited", records,
+                usage.get("detail") or f"{error.provider} usage allowance exhausted during native queue replenishment.",
+                checkpoint={"stage": "native_replenishment", "iteration": iteration},
+                reason="provider_usage_limit", usage=usage,
+            )
+            return "usage_limited", run_dir
         advanced_native = self._advance_native_queue(run_dir, iteration, "recovered_validation_failed")
         if decision.get("decision") == "no_change" and not advanced_native:
             write_summary(
@@ -790,6 +897,19 @@ class LoopRunner:
         agent_dir = run_dir / "agent"
         try:
             self._ensure_native_selection(run_dir, config)
+        except ProviderUsageLimit as error:
+            usage = dict(error.usage)
+            usage.update({
+                "provider": error.provider,
+                "auto_resume": bool(config.get("auto_resume_usage_limit")),
+            })
+            write_summary(
+                run_dir, "usage_limited", records,
+                usage.get("detail") or f"{error.provider} usage allowance exhausted during native selection.",
+                checkpoint={"stage": "native_selection", "iteration": start_iteration},
+                reason="provider_usage_limit", usage=usage,
+            )
+            return "usage_limited"
         except (LoopError, OSError, zipfile.BadZipFile, json.JSONDecodeError) as error:
             write_summary(
                 run_dir, "provider_error", records,
@@ -844,7 +964,12 @@ class LoopRunner:
             decision_path = iteration_dir / "decision.json"
             provider_log = iteration_dir / f"{provider}.log"
             prompt_path.write_text(prompt, encoding="utf-8")
-            protected = {prompt_path: sha256(prompt_path), config_path: sha256(config_path)}
+            candidate_snapshot = iteration_dir / "candidate.before-provider.js"
+            shutil.copy2(candidate, candidate_snapshot)
+            protected = {
+                prompt_path: sha256(prompt_path), config_path: sha256(config_path),
+                candidate_snapshot: sha256(candidate_snapshot),
+            }
             if mcp_path.is_file():
                 protected[mcp_path] = sha256(mcp_path)
             provider_request = ProviderRequest(
@@ -862,9 +987,30 @@ class LoopRunner:
             )
             completed = adapter.finalize(provider_request, exit_code, output)
             if not completed or not validate_provider_output(decision_path, DECISION_SCHEMA):
+                limit = detect_usage_limit(output)
+                if limit:
+                    usage = dict(limit)
+                    usage.update({
+                        "provider": provider,
+                        "auto_resume": bool(config.get("auto_resume_usage_limit")),
+                    })
+                    write_summary(
+                        run_dir, "usage_limited", records,
+                        usage.get("detail") or f"{adapter.label} usage allowance exhausted in iteration {iteration}.",
+                        checkpoint={
+                            "stage": "provider", "iteration": iteration,
+                            "candidate_snapshot": workspace_relative(candidate_snapshot),
+                            "candidate_snapshot_sha256": sha256(candidate_snapshot),
+                        },
+                        reason="provider_usage_limit", usage=usage,
+                    )
+                    return "usage_limited"
                 write_summary(run_dir, "provider_error", records, f"{adapter.label} failed in iteration {iteration}.")
                 return "provider_error"
-            allowed = {candidate.resolve(), prompt_path.resolve(), decision_path.resolve(), provider_log.resolve(), config_path.resolve()}
+            allowed = {
+                candidate.resolve(), candidate_snapshot.resolve(), prompt_path.resolve(),
+                decision_path.resolve(), provider_log.resolve(), config_path.resolve(),
+            }
             if mcp_path.is_file():
                 allowed.add(mcp_path.resolve())
             unexpected = [path for path in iteration_dir.rglob("*") if path.is_file() and path.resolve() not in allowed]
@@ -922,7 +1068,21 @@ class LoopRunner:
                 self._resolve_native_queue(run_dir, iteration)
                 write_summary(run_dir, "success", records, f"Success policy passed in iteration {iteration}.")
                 return "success"
-            self._replenish_native_queue(run_dir, config, iteration)
+            try:
+                self._replenish_native_queue(run_dir, config, iteration)
+            except ProviderUsageLimit as error:
+                usage = dict(error.usage)
+                usage.update({
+                    "provider": error.provider,
+                    "auto_resume": bool(config.get("auto_resume_usage_limit")),
+                })
+                write_summary(
+                    run_dir, "usage_limited", records,
+                    usage.get("detail") or f"{error.provider} usage allowance exhausted during native queue replenishment.",
+                    checkpoint={"stage": "native_replenishment", "iteration": iteration},
+                    reason="provider_usage_limit", usage=usage,
+                )
+                return "usage_limited"
             advanced_native = self._advance_native_queue(run_dir, iteration, "success_policy_failed")
             if previous_fingerprint and fingerprint == previous_fingerprint and not advanced_native:
                 write_summary(
@@ -1248,6 +1408,9 @@ Do not edit files, invoke devices, rerun tools, or claim success. Return only th
                 command, self.log, cwd=attempt_dir, input_text=provider_prompt,
                 artifact=attempt_dir / f"{provider}.log",
             )
+            limit = detect_usage_limit(output)
+            if limit:
+                raise ProviderUsageLimit(provider, limit)
             valid = adapter.finalize(request, exit_code, output) and validate_provider_output(
                 response_path, NATIVE_REPLENISHMENT_SCHEMA,
             )
@@ -1261,6 +1424,8 @@ Do not edit files, invoke devices, rerun tools, or claim success. Return only th
                 or len(set(names)) != len(names) or any(name not in remaining for name in names)
             ):
                 raise LoopError("Native queue replenishment contained duplicate, ineligible, or excessive targets.")
+        except ProviderUsageLimit:
+            raise
         except (LoopError, OSError, ValueError, json.JSONDecodeError) as error:
             selection.setdefault("replenishments", []).append({
                 "number": number, "iteration": iteration, "status": "error", "detail": str(error),
@@ -1419,6 +1584,9 @@ Do not edit any file, invoke a device, or claim assessment success. Return only 
             command, self.log, cwd=selection_dir, input_text=provider_prompt,
             artifact=selection_dir / f"{provider}.log",
         )
+        limit = detect_usage_limit(output)
+        if limit:
+            raise ProviderUsageLimit(provider, limit)
         if not adapter.finalize(request, exit_code, output) or not validate_provider_output(response_path, NATIVE_SELECTION_SCHEMA):
             raise LoopError(f"{adapter.label} did not return a valid native target selection.")
         decision = read_json(response_path)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from io import BytesIO, StringIO
 import hashlib
 import json
@@ -20,9 +21,9 @@ from ui.app import (
 from ui.orchestrator import (
     WORKSPACE, LoopRunner, attempt_fingerprint, codex_config_overrides,
     codex_multi_agent_args, codex_reasoning_args, checkpoint_recovery_available,
-    frida_recovery_available,
+    frida_recovery_available, usage_limit_recovery_available,
 )
-from ui.providers import ProviderRequest, provider_adapter, validate_provider_output
+from ui.providers import ProviderRequest, detect_usage_limit, provider_adapter, validate_provider_output
 
 
 class WebAppTests(unittest.TestCase):
@@ -34,6 +35,55 @@ class WebAppTests(unittest.TestCase):
         response = self.client.get("/api/health")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()["status"], "ok")
+
+    def test_usage_limit_detection_preserves_reported_reset(self) -> None:
+        usage = detect_usage_limit(
+            'ERROR {"code":"subscription_sharing_usage_limit_exceeded"} resets at 2026-11-01T05:30:00Z',
+            now=datetime(2026, 11, 1, tzinfo=timezone.utc),
+        )
+        self.assertIsNotNone(usage)
+        self.assertEqual(usage["code"], "subscription_sharing_usage_limit_exceeded")
+        self.assertEqual(usage["reset_utc"], "2026-11-01T05:30:00+00:00")
+        self.assertIsNone(detect_usage_limit("429 rate_limit_exceeded; retry after 2 seconds"))
+
+    def test_usage_limit_checkpoint_is_resumable(self) -> None:
+        self.assertTrue(usage_limit_recovery_available({
+            "status": "usage_limited", "recoverable": True,
+            "checkpoint": {"stage": "provider", "iteration": 2},
+        }))
+        self.assertFalse(usage_limit_recovery_available({
+            "status": "provider_error", "recoverable": False,
+            "checkpoint": {"stage": "provider", "iteration": 2},
+        }))
+
+    def test_usage_limit_recovery_restarts_interrupted_iteration_from_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory(dir=WORKSPACE) as temp:
+            run = Path(temp)
+            failed = run / "agent" / "iteration-2"
+            failed.mkdir(parents=True)
+            snapshot = failed / "candidate.before-provider.js"
+            snapshot.write_text("trusted candidate\n", encoding="utf-8")
+            config = {"provider": "codex", "auto_resume_usage_limit": True}
+            summary = {
+                "usage": {"code": "usage_limit_exceeded"},
+                "checkpoint": {
+                    "stage": "provider", "iteration": 2,
+                    "candidate_snapshot": str(snapshot),
+                    "candidate_snapshot_sha256": hashlib.sha256(snapshot.read_bytes()).hexdigest(),
+                },
+            }
+            request = {"max_iterations": 3, "provider": "codex"}
+            runner = LoopRunner(StringIO())
+            with patch.object(runner, "_iterations", return_value="max_iterations") as iterations:
+                status, returned = runner._recover_usage_limit(run, config, summary, [], request)
+            self.assertEqual(status, "max_iterations")
+            self.assertEqual(returned, run)
+            self.assertFalse(failed.exists())
+            recovered = next((run / "agent").glob("usage-limit-recovery-*"))
+            self.assertEqual((recovered / snapshot.name).read_text(encoding="utf-8"), "trusted candidate\n")
+            self.assertEqual(iterations.call_args.kwargs["start_iteration"], 2)
+            self.assertEqual(iterations.call_args.kwargs["additional"], 3)
+            self.assertEqual(iterations.call_args.kwargs["previous_candidate"], recovered / snapshot.name)
 
     @patch("ui.app.jobs", return_value=[])
     @patch("ui.app.codex_authenticated", return_value=True)

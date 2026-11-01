@@ -7,7 +7,10 @@ import threading
 import traceback
 import uuid
 
-from ui.job_queue import atomic_write_json, claim_next_job, recover_abandoned_jobs, touch_heartbeat, utc_now
+from ui.job_queue import (
+    atomic_write_json, claim_next_job, enqueue_due_usage_limit_jobs,
+    read_json, recover_abandoned_jobs, touch_heartbeat, utc_now,
+)
 from ui.ghidra_proxy import GhidraLoopbackProxy
 from ui.orchestrator import EnvironmentFailure, LoopError, LoopRunner
 
@@ -20,6 +23,7 @@ def execute(directory, state: dict, request: dict) -> None:
     kind = str(state.get("kind") or request.get("kind") or "")
     exit_code = 1
     status = "error"
+    run_dir = None
     with (directory / "output.log").open("a", encoding="utf-8", buffering=1) as log:
         log.write(f"\nDurable worker claimed job {state['id']} at {state['started_utc']}.\n")
         try:
@@ -58,6 +62,15 @@ def execute(directory, state: dict, request: dict) -> None:
             status = "worker_error"
             exit_code = 2
         finally:
+            if status == "usage_limited" and run_dir is not None:
+                summary = read_json(run_dir / "codex-loop-result.json")
+                usage = summary.get("usage") or {}
+                state.update({
+                    "detail": str(summary.get("detail") or "Provider usage allowance exhausted."),
+                    "auto_resume": bool(usage.get("auto_resume")),
+                    "resume_after_utc": str(usage.get("reset_utc") or ""),
+                    "usage_code": str(usage.get("code") or "usage_limit_exceeded"),
+                })
             state.update({
                 "running": False,
                 "exit_code": exit_code,
@@ -89,6 +102,7 @@ def main() -> int:
     heartbeat_thread.start()
     try:
         while not stopping.is_set():
+            enqueue_due_usage_limit_jobs()
             claimed = claim_next_job(worker_id)
             if claimed:
                 execute(*claimed)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import http.server
+from datetime import datetime, timedelta, timezone
 import tempfile
 from pathlib import Path
 import threading
@@ -13,6 +14,31 @@ from ui.ghidra_proxy import GhidraLoopbackProxy
 
 
 class DurableWorkerTests(unittest.TestCase):
+    def test_due_usage_limit_job_is_requeued_once(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            directory = root / ("d" * 32)
+            directory.mkdir()
+            job_queue.atomic_write_json(directory / "job.json", {
+                "id": "d" * 32, "kind": "start", "status": "usage_limited", "running": False,
+                "run_id": "run-123", "attempt_number": 2, "auto_resume": True,
+                "resume_after_utc": (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat(),
+            })
+            job_queue.atomic_write_json(directory / "request.json", {
+                "kind": "start", "payload": {"max_iterations": 3, "provider": "codex"},
+            })
+            with mock.patch.object(job_queue, "STATE_ROOT", root):
+                created = job_queue.enqueue_due_usage_limit_jobs()
+                duplicate = job_queue.enqueue_due_usage_limit_jobs()
+            self.assertEqual(len(created), 1)
+            self.assertEqual(duplicate, [])
+            queued = job_queue.read_json(root / created[0] / "job.json")
+            request = job_queue.read_json(root / created[0] / "request.json")
+            self.assertEqual(queued["status"], "queued")
+            self.assertEqual(queued["attempt_kind"], "usage_limit_resume")
+            self.assertTrue(request["payload"]["auto_resume_usage_limit"])
+            self.assertEqual(Path(request["payload"]["run"]).name, "run-123")
+
     def test_ghidra_proxy_is_loopback_only_and_preserves_http(self) -> None:
         class Handler(http.server.BaseHTTPRequestHandler):
             def do_GET(self) -> None:

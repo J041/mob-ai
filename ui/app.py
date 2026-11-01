@@ -23,7 +23,7 @@ from werkzeug.utils import secure_filename
 from ui.orchestrator import (
     LoopError, RUNS_ROOT, WORKSPACE,
     checkpoint_recovery_available, frida_recovery_available, read_json,
-    sha256, workspace_relative, write_json,
+    sha256, usage_limit_recovery_available, workspace_relative, write_json,
 )
 from ui.job_queue import HEARTBEAT_PATH, STATE_ROOT, atomic_write_json
 from ui.providers import PROVIDER_IDS, ProviderRequest, provider_adapter, validate_provider_output
@@ -1248,6 +1248,8 @@ def runs() -> list[dict]:
         policy = recorded_success_policy(config)
         frida_recoverable = bool(loop and config and frida_recovery_available(loop))
         checkpoint_recoverable = bool(loop and config and checkpoint_recovery_available(loop))
+        usage_recoverable = bool(loop and config and usage_limit_recovery_available(loop))
+        usage = (loop.get("usage") or {}) if loop else {}
         resumable = bool(loop and loop.get("status") == "max_iterations" and config)
         retryable = bool(loop and config and (directory / "original.apk").is_file())
         actual_model = str(config.get("model") or "") if config else ""
@@ -1274,10 +1276,13 @@ def runs() -> list[dict]:
             "resumable": resumable,
             "frida_recoverable": frida_recoverable,
             "checkpoint_recoverable": checkpoint_recoverable,
-            "continuable": bool(resumable or frida_recoverable or checkpoint_recoverable),
+            "usage_recoverable": usage_recoverable,
+            "continuable": bool(resumable or frida_recoverable or checkpoint_recoverable or usage_recoverable),
             "retryable": retryable,
             "recovery_stage": str(((loop.get("checkpoint") or {}).get("stage") if loop else "") or ""),
             "reason": str((loop.get("reason") if loop else "") or ""),
+            "usage_reset_utc": str(usage.get("reset_utc") or ""),
+            "usage_auto_resume": bool(usage.get("auto_resume")),
             "frida_server": str(config.get("start_frida_server") if config else ""),
             "reasoning_mode": str((config.get("reasoning_mode") if config else "single") or "single"),
             "provider": str((config.get("provider") if config else "codex") or "codex"),
@@ -1384,6 +1389,8 @@ def jobs() -> list[dict]:
 
 def resume_attempt_kind(run_dir: Path) -> str:
     summary = json_file(run_dir / "codex-loop-result.json") or {}
+    if usage_limit_recovery_available(summary):
+        return "usage_limit_resume"
     if frida_recovery_available(summary):
         return "frida_recovery"
     if checkpoint_recovery_available(summary):
@@ -1493,6 +1500,7 @@ def parse_start(body: dict) -> tuple[str, dict]:
         "install": bool(body.get("install")), "frida_server": frida_server, "package": package,
         "provider": provider, "model": model, "reasoning_effort": reasoning_effort, "readiness_token": readiness_token,
         "reasoning_mode": reasoning_mode, "specialist_count": specialist_count,
+        "auto_resume_usage_limit": bool(body.get("auto_resume_usage_limit")),
         "derived_from_run": derived_from_run,
         "derived_from_policy_sha256": derived_from_policy_sha256,
     }
@@ -1563,6 +1571,7 @@ def parse_resume(body: dict) -> tuple[str, dict]:
         "run": str(run_dir), "max_iterations": maximum, "provider": provider, "model": model,
         "reasoning_effort": reasoning_effort, "frida_server": frida_server,
         "reasoning_mode": reasoning_mode, "specialist_count": specialist_count,
+        "auto_resume_usage_limit": bool(body.get("auto_resume_usage_limit")),
         "success_spec_sha256": policy_hash,
         "target": target, "transport": transport, "readiness_token": readiness_token,
         "target_settings_changed": settings_changed,

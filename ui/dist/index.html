@@ -112,6 +112,7 @@
             <label class="field specialist-count" hidden><span>Maximum specialists</span><select name="specialist_count"><option value="2">2 specialists</option><option value="3" selected>3 specialists</option></select><small>Read-only static, runtime and native evidence reviewers.</small></label>
             <label class="field"><span>Package override <em>optional</em></span><input name="package" placeholder="auto-detect"></label>
             <label class="switch-field"><input name="install" type="checkbox" checked><span class="switch"></span><span>Install APK</span></label>
+            <label class="switch-field span-2"><input name="auto_resume_usage_limit" type="checkbox"><span class="switch"></span><span>Automatically resume if the provider reports an exact usage-reset time</span></label>
             <label class="authorization span-2"><input name="authorized" type="checkbox" required><span>I confirm ownership or explicit authorization to test this APK and selected device.</span></label>
             <div class="form-footer span-2"><p>Observation runs first. The selected provider edits isolated candidate hooks; validation remains deterministic.</p><button class="button primary" type="submit">Start assessment <span>→</span></button></div>
           </form>
@@ -147,6 +148,7 @@
             <label class="field"><span>Thinking level</span><select name="reasoning_effort" class="reasoning-select"><option value="">Model default</option></select></label>
             <label class="field"><span>Reasoning mode</span><select name="reasoning_mode" class="reasoning-mode"><option value="single">Single agent</option><option value="parallel">Parallel specialists</option></select></label>
             <label class="field specialist-count" hidden><span>Maximum specialists</span><select name="specialist_count"><option value="2">2 specialists</option><option value="3" selected>3 specialists</option></select></label>
+            <label class="switch-field span-2"><input name="auto_resume_usage_limit" type="checkbox"><span class="switch"></span><span>Automatically resume if the provider reports an exact usage-reset time</span></label>
             <div class="resume-summary span-2" id="resumeSummary"><span>↳</span><p>Select a run to see its last known state.</p></div>
             <label class="authorization span-2"><input name="authorized" type="checkbox" required><span>I confirm authorization remains valid for this device and APK.</span></label>
             <div class="form-footer span-2"><p id="continuationHint">The previous candidate, validation delta, target, and policy hashes will be verified before continuation.</p><button class="button primary" id="continuationSubmit" type="submit">Continue loop <span>→</span></button></div>

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 import json
 from pathlib import Path
 import re
@@ -9,6 +10,58 @@ from typing import Any
 
 
 PROVIDER_IDS = {"codex", "claude"}
+
+
+def detect_usage_limit(output: str, *, now: datetime | None = None) -> dict[str, str] | None:
+    """Recognize plan-usage exhaustion without conflating transient request throttling."""
+    text = output or ""
+    lowered = text.lower()
+    markers = (
+        "subscription_sharing_usage_limit_exceeded",
+        "usage_limit_exceeded",
+        "usage limit exceeded",
+        "you've hit your usage limit",
+        "you have hit your usage limit",
+        "five-hour usage limit",
+        "5-hour usage limit",
+        "weekly usage limit",
+    )
+    marker = next((value for value in markers if value in lowered), "")
+    if not marker:
+        return None
+
+    current = now or datetime.now(timezone.utc)
+    reset_utc = ""
+    iso_matches = re.findall(
+        r"20\d{2}-\d{2}-\d{2}[T ][0-2]\d:[0-5]\d(?::[0-5]\d(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})",
+        text,
+    )
+    for value in reversed(iso_matches):
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            reset_utc = parsed.astimezone(timezone.utc).isoformat()
+            break
+        except ValueError:
+            pass
+    if not reset_utc:
+        duration = re.search(
+            r"(?:try again|resets?|retry)\s+(?:after|in)\s+"
+            r"(?:(\d+)\s*(?:hours?|hrs?|h))?\s*"
+            r"(?:(\d+)\s*(?:minutes?|mins?|m))?\s*"
+            r"(?:(\d+)\s*(?:seconds?|secs?|s))?",
+            lowered,
+        )
+        if duration and any(duration.groups()):
+            hours, minutes, seconds = (int(value or 0) for value in duration.groups())
+            reset_utc = (current + timedelta(hours=hours, minutes=minutes, seconds=seconds)).isoformat()
+
+    lines = [strip for line in text.splitlines() if (strip := line.strip())]
+    detail = next((line for line in reversed(lines) if marker in line.lower()), "Usage allowance exhausted.")
+    return {
+        "code": "subscription_sharing_usage_limit_exceeded" if "subscription_sharing" in lowered else "usage_limit_exceeded",
+        "detail": detail[:1000],
+        "reset_utc": reset_utc,
+    }
 
 
 @dataclass(frozen=True)

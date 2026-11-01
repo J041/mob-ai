@@ -59,6 +59,69 @@ def recover_abandoned_jobs() -> None:
             claim.unlink(missing_ok=True)
 
 
+def enqueue_due_usage_limit_jobs() -> list[str]:
+    """Durably resume opted-in quota checkpoints only after an explicit reset timestamp."""
+    now = datetime.now(timezone.utc)
+    directories = [path for path in STATE_ROOT.iterdir() if path.is_dir()]
+    states = [(path, read_json(path / "job.json")) for path in directories]
+    if any(state.get("running") or state.get("status") == "queued" for _, state in states):
+        return []
+    created: list[str] = []
+    for directory, state in sorted(states, key=lambda item: item[0].stat().st_mtime):
+        if (
+            state.get("status") != "usage_limited"
+            or not state.get("auto_resume")
+            or state.get("auto_resume_job_id")
+        ):
+            continue
+        reset_value = str(state.get("resume_after_utc") or "")
+        try:
+            reset_at = datetime.fromisoformat(reset_value.replace("Z", "+00:00")).astimezone(timezone.utc)
+        except ValueError:
+            continue
+        if reset_at > now:
+            continue
+        request = read_json(directory / "request.json")
+        payload = dict(request.get("payload") or {})
+        run_id = str(state.get("run_id") or "")
+        if not run_id:
+            continue
+        newer = [
+            other for other_directory, other in states
+            if other_directory != directory and other.get("run_id") == run_id
+            and int(other.get("attempt_number") or 0) > int(state.get("attempt_number") or 0)
+        ]
+        if newer:
+            state["auto_resume_superseded_by"] = str(max(
+                newer, key=lambda item: int(item.get("attempt_number") or 0),
+            ).get("id") or "")
+            atomic_write_json(directory / "job.json", state)
+            continue
+        payload["run"] = str(WORKSPACE / "runs" / run_id)
+        payload["auto_resume_usage_limit"] = True
+        job_id = uuid.uuid4().hex
+        queued_utc = utc_now()
+        target = STATE_ROOT / job_id
+        target.mkdir(parents=True)
+        next_state = {
+            "id": job_id, "kind": "resume", "label": run_id, "queued_utc": queued_utc,
+            "started_utc": "", "running": False, "exit_code": None, "status": "queued",
+            "run_id": run_id, "attempt_number": max(
+                (int(other.get("attempt_number") or 0) for _, other in states if other.get("run_id") == run_id),
+                default=0,
+            ) + 1,
+            "attempt_kind": "usage_limit_resume", "parent_job_id": str(state.get("id") or ""),
+            "auto_resumed": True,
+        }
+        atomic_write_json(target / "request.json", {"kind": "resume", "label": run_id, "payload": payload})
+        atomic_write_json(target / "job.json", next_state)
+        state.update({"auto_resume_job_id": job_id, "auto_resume_queued_utc": queued_utc})
+        atomic_write_json(directory / "job.json", state)
+        created.append(job_id)
+        break
+    return created
+
+
 def claim_next_job(worker_id: str) -> tuple[Path, dict[str, Any], dict[str, Any]] | None:
     directories = sorted(
         (path for path in STATE_ROOT.iterdir() if path.is_dir()),

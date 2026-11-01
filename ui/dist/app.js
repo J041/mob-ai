@@ -156,7 +156,7 @@ function renderOverview(data) {
   data.runs.forEach(run => option(
     resumeSelect,
     run.path,
-    `${run.package || run.id} · ${run.iterations} iterations${run.continuable ? (run.frida_recoverable ? ' · fix Frida' : run.checkpoint_recoverable ? ` · recover ${run.recovery_stage}` : ' · resumable') : ' · rerun available'}`,
+    `${run.package || run.id} · ${run.iterations} iterations${run.continuable ? (run.usage_recoverable ? ' · usage checkpoint' : run.frida_recoverable ? ' · fix Frida' : run.checkpoint_recoverable ? ` · recover ${run.recovery_stage}` : ' · resumable') : ' · rerun available'}`,
   ));
   if ([...resumeSelect.options].some(item => item.value === previous)) resumeSelect.value = previous;
 
@@ -184,7 +184,7 @@ function renderRuns(runs) {
       <div class="run-actions">
         <button class="resume-button assistant" data-assistant="${escapeText(run.id)}">Ask assistant</button>
         <button class="resume-button artifacts" data-artifacts="${escapeText(run.id)}">Artifacts</button>
-        ${run.continuable ? `<button class="resume-button" data-resume="${escapeText(run.path)}">${run.frida_recoverable ? 'Fix Frida' : run.checkpoint_recoverable ? 'Recover' : 'Resume'}</button>` : ''}
+        ${run.continuable ? `<button class="resume-button" data-resume="${escapeText(run.path)}">${run.usage_recoverable ? 'Resume after reset' : run.frida_recoverable ? 'Fix Frida' : run.checkpoint_recoverable ? 'Recover' : 'Resume'}</button>` : ''}
         <button class="resume-button diagnostic" data-retry="${escapeText(run.path)}" ${run.retryable ? '' : 'disabled'}>Rerun / retry</button>
       </div>
     </article>`;
@@ -501,6 +501,7 @@ function renderJobs(jobs) {
     initial: 'Initial assessment', resume: 'Resume iterations',
     frida_recovery: 'Fix Frida', observation_recovery: 'Recover observation',
     validation_recovery: 'Recover validation', checkpoint_recovery: 'Recover checkpoint',
+    usage_limit_resume: 'Resume after usage reset',
     diagnostic_retry: 'Rerun / retry',
   })[kind] || String(kind || 'Assessment').replaceAll('_', ' ');
   const statusClass = value => `status-${String(value || 'unknown').toLowerCase().replaceAll('_', '-').replaceAll(' ', '-')}`;
@@ -563,16 +564,22 @@ async function refreshSelectedJob() {
     $('#jobLabel').textContent = `${attempt} · ${job.run_id || job.label} · attempt ${job.attempt_number || 1}`;
     $('#livePill').textContent = job.running ? 'RUNNING' : String(job.status || `exit ${job.exit_code ?? '?'}`).replaceAll('_', ' ').toUpperCase();
     $('#livePill').classList.toggle('running', job.running);
+    if (job.auto_resume_job_id) {
+      state.selectedJob = job.auto_resume_job_id;
+      schedulePoll(500);
+      return;
+    }
     if (job.running || job.status === 'queued') schedulePoll();
+    else if (job.status === 'usage_limited' && job.auto_resume && job.resume_after_utc) schedulePoll(15000);
   } catch (error) { toast(error.message, true); }
 }
 
-function schedulePoll() {
+function schedulePoll(delay = 2200) {
   clearTimeout(state.poll);
   state.poll = setTimeout(async () => {
     await refreshSelectedJob();
     try { renderOverview(await api('/api/overview')); } catch (_) {}
-  }, 2200);
+  }, delay);
 }
 
 async function refreshOverview(showToast = false) {
@@ -973,6 +980,10 @@ function updateResumeSummary() {
     ? 'The failed observation will be archived, Frida will restart from this path, and observation will rerun before the reasoning provider continues.'
     : run.checkpoint_recoverable
     ? `The failed ${run.recovery_stage} checkpoint will retry without repeating completed analysis.`
+    : run.usage_recoverable
+    ? (run.usage_reset_utc
+      ? `Provider usage was exhausted. Resume after ${new Date(run.usage_reset_utc).toLocaleString()}${run.usage_auto_resume ? '; automatic resume is enabled.' : '.'}`
+      : 'Provider usage was exhausted without a reported reset time. Resume manually after checking account Usage settings.')
     : 'Ready for additional iterations.';
   const diagnosticAction = 'Existing evidence will be archived. Observation will rerun with Android crash-buffer, process-exit and available tombstone diagnostics before the reasoning provider continues.';
   const action = state.continuationMode === 'retry' ? diagnosticAction : continuationAction;
@@ -1010,6 +1021,7 @@ function populateContinuationValues(run) {
   const mode = form.elements.reasoning_mode;
   mode.value = run.reasoning_mode || 'single';
   form.elements.specialist_count.value = String(run.specialist_count || 3);
+  form.elements.auto_resume_usage_limit.checked = Boolean(run.usage_auto_resume);
   updateReasoningMode(mode);
 }
 

@@ -205,6 +205,7 @@ input::placeholder { color: #465358; }
 .job-summary-meta { justify-items: end; }
 .job-summary-meta > b { color: var(--green); font: 9px var(--mono); }
 .job-status.status-human-review { color: var(--red); }
+.job-status.status-usage-limited { color: var(--amber); }
 .history-cta { display: flex; align-items: center; gap: 6px; border: 1px solid #405632; border-radius: 999px; padding: 4px 7px; color: var(--green); background: rgba(185,247,99,.055); font: normal 8px var(--mono); text-transform: uppercase; letter-spacing: .04em; }
 .history-cta i { display: inline-block; font: normal 14px/8px sans-serif; transition: transform .15s ease; }
 .history-hide { display: none; }
@@ -225,6 +226,7 @@ input::placeholder { color: #465358; }
 .attempt-chip.active { border-color: #405632; }
 .attempt-chip b { flex: 0 0 auto; color: var(--green); font: 8px var(--mono); white-space: nowrap; }
 .attempt-chip b.status-human-review { color: var(--red); }
+.attempt-chip b.status-usage-limited { color: var(--amber); }
 .console { flex: 1 1 auto; width: 100%; min-width: 0; min-height: 0; max-height: none; overflow: auto; margin: 0; padding: 16px; background: #080c0e; color: #b9c6c5; font: 10.5px/1.62 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }
 .console-muted { color: #465358; }
 .console-footer { min-height: 40px; padding: 0 14px; display: flex; justify-content: space-between; align-items: center; color: var(--muted); font-size: 9px; border-top: 1px solid var(--line-soft); }
@@ -246,6 +248,7 @@ input::placeholder { color: #465358; }
 .badge { justify-self: start; padding: 5px 7px; border-radius: 999px; background: #1b272a; color: #a5b4b5; font: 8px var(--mono); text-transform: uppercase; letter-spacing: .06em; }
 .badge.success, .badge.success_without_bypass { color: var(--green); background: rgba(185,247,99,.08); }
 .badge.max_iterations { color: var(--amber); background: rgba(246,196,91,.08); }
+.badge.usage_limited { color: var(--amber); background: rgba(246,196,91,.08); }
 .badge.human_review, .badge.pipeline_error, .badge.codex_error, .badge.environment_error, .badge.needs_input { color: var(--red); background: rgba(255,124,124,.08); }
 .badge.assessment_failed { color: var(--amber); background: rgba(246,196,91,.08); }
 .resume-button { border: 1px solid var(--line); background: transparent; color: var(--green); border-radius: 7px; padding: 7px 9px; font-size: 9px; cursor: pointer; }
