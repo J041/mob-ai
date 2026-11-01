@@ -24,7 +24,6 @@
     "diagnostic_actions": {
       "type": "array",
       "maxItems": 3,
-      "uniqueItems": true,
       "items": {
         "type": "string",
         "enum": [
@@ -42,21 +41,8 @@
     "rationale",
     "changes_made",
     "evidence_used",
-    "remaining_risks"
-  ],
-  "allOf": [
-    {
-      "if": {
-        "properties": { "decision": { "const": "diagnostics" } },
-        "required": ["decision"]
-      },
-      "then": {
-        "required": ["diagnostic_actions"],
-        "properties": {
-          "diagnostic_actions": { "minItems": 1 }
-        }
-      }
-    }
+    "remaining_risks",
+    "diagnostic_actions"
   ],
   "additionalProperties": false
 }

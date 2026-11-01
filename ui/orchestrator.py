@@ -605,6 +605,10 @@ class LoopRunner:
         run_dir, config, _summary, records = self._load_existing_run(request)
         config.pop("_target_settings_changed", None)
         write_json(run_dir / "codex-loop-config.json", config)
+        last_completed_iteration = max((int(item["iteration"]) for item in records), default=0)
+        archived_incomplete = self._archive_incomplete_iteration(
+            run_dir, last_completed_iteration + 1, str(_summary.get("status") or "failed"),
+        )
         retry_number = 1
         while (run_dir / "agent" / f"diagnostic-retry-{retry_number}").exists():
             retry_number += 1
@@ -628,6 +632,7 @@ class LoopRunner:
             "retry": retry_number,
             "mode": "diagnostics",
             "previous_status": _summary.get("status") or "unknown",
+            "archived_incomplete_iteration": archived_incomplete,
             "started_utc": datetime.now(timezone.utc).isoformat(),
         })
         result_path = run_dir / "result.json"
@@ -700,6 +705,23 @@ class LoopRunner:
             additional=int(request["max_iterations"]), previous_candidate=previous_candidate,
             previous_fingerprint=None, restart_frida=False,
         ), run_dir
+
+    @staticmethod
+    def _archive_incomplete_iteration(run_dir: Path, iteration: int, reason: str) -> str:
+        source = run_dir / "agent" / f"iteration-{iteration}"
+        if not source.is_dir() or (source / "record.json").is_file():
+            return ""
+        archive_root = run_dir / "agent" / "incomplete-iterations"
+        archive_root.mkdir(exist_ok=True)
+        safe_reason = re.sub(r"[^a-z0-9_-]+", "-", reason.lower()).strip("-") or "failed"
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        destination = archive_root / f"iteration-{iteration}-{safe_reason}-{stamp}"
+        counter = 2
+        while destination.exists():
+            destination = archive_root / f"iteration-{iteration}-{safe_reason}-{stamp}-{counter}"
+            counter += 1
+        shutil.move(str(source), destination)
+        return workspace_relative(destination)
 
     def _recover_observation(
         self, run_dir: Path, config: dict[str, Any], records: list[Any], frida_server: str, *,
@@ -1026,6 +1048,12 @@ class LoopRunner:
                 write_summary(run_dir, "codex_boundary_error", records, f"Codex wrote outside candidate.js in iteration {iteration}.")
                 return "codex_boundary_error"
             decision = read_json(decision_path)
+            if decision.get("decision") != "diagnostics" and decision.get("diagnostic_actions"):
+                write_summary(
+                    run_dir, "provider_error", records,
+                    f"{adapter.label} returned diagnostic actions with decision {decision.get('decision')!r} in iteration {iteration}.",
+                )
+                return "provider_error"
             if decision.get("decision") == "diagnostics":
                 if sha256(candidate) != sha256(candidate_snapshot):
                     write_summary(
@@ -1800,6 +1828,7 @@ Goal: make the smallest evidence-based change to the candidate Frida hook that c
 Adaptive evidence escalation:
 - When existing evidence is insufficient for a narrow candidate but a bounded runtime diagnostic could resolve the uncertainty, return decision `diagnostics` instead of `human_review`.
 - Include one to three unique `diagnostic_actions` selected only from: trace_jni_registration, capture_native_exceptions, trace_termination_calls, inventory_executable_mappings, dump_runtime_payloads.
+- `diagnostic_actions` is required in every structured response. Return an empty array for updated, no_change, and human_review decisions.
 - Prefer tracing and inventory before requesting runtime payload dumps. Request dump_runtime_payloads only when evidence indicates dynamically unpacked executable code; the worker enforces five 1 MiB artifacts and a 5 MiB total limit.
 - The deterministic orchestrator executes diagnostics on the exact recorded device and makes the manifest available under diagnostics/pass-*/manifest.json for the next iteration. Do not edit candidate.js when requesting diagnostics.
 - At most {MAX_DIAGNOSTIC_ROUNDS} diagnostic rounds are available, and completed actions cannot be requested again.

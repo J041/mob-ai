@@ -159,6 +159,9 @@ class WebAppTests(unittest.TestCase):
 
     def test_diagnostic_decision_requires_allowlisted_actions(self) -> None:
         schema = WORKSPACE / "pipeline" / "codex-decision.schema.json"
+        schema_value = json.loads(schema.read_text(encoding="utf-8"))
+        self.assertNotIn("allOf", schema_value)
+        self.assertEqual(set(schema_value["properties"]), set(schema_value["required"]))
         base = {
             "decision": "diagnostics", "rationale": "Need the unpacked JNI target.",
             "changes_made": [], "evidence_used": ["observations.json"],
@@ -176,6 +179,22 @@ class WebAppTests(unittest.TestCase):
                 **base, "diagnostic_actions": ["arbitrary_shell"],
             }), encoding="utf-8")
             self.assertFalse(validate_provider_output(output, schema))
+            output.write_text(json.dumps({
+                **base, "decision": "human_review", "diagnostic_actions": [],
+            }), encoding="utf-8")
+            self.assertTrue(validate_provider_output(output, schema))
+
+    def test_retry_archives_provider_iteration_without_record(self) -> None:
+        with tempfile.TemporaryDirectory(dir=WORKSPACE) as temp:
+            run = Path(temp)
+            incomplete = run / "agent" / "iteration-7"
+            incomplete.mkdir(parents=True)
+            (incomplete / "codex.log").write_text("invalid schema", encoding="utf-8")
+            archived = LoopRunner._archive_incomplete_iteration(run, 7, "provider_error")
+            destination = WORKSPACE / archived
+            self.assertFalse(incomplete.exists())
+            self.assertTrue((destination / "codex.log").is_file())
+            self.assertIn("incomplete-iterations", archived)
 
     @patch("ui.app.codex_model_catalog", return_value={"models": [{
         "id": "test-model", "reasoning_levels": [{"effort": "high"}],
