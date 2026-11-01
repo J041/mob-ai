@@ -465,10 +465,12 @@ def run_adaptive_diagnostics(
                 pass
 
     logcat = adb(args, "logcat", "-d", "-t", "1000", check=False)
-    (pass_dir / "logcat.log").write_text(logcat.stdout + logcat.stderr, encoding="utf-8", errors="replace")
+    (pass_dir / "logcat.log").write_text(
+        (logcat.stdout or "") + (logcat.stderr or ""), encoding="utf-8", errors="replace",
+    )
     exit_info = adb(args, "shell", "dumpsys", "activity", "exit-info", package, check=False)
     (pass_dir / "exit-info.log").write_text(
-        exit_info.stdout + exit_info.stderr, encoding="utf-8", errors="replace",
+        (exit_info.stdout or "") + (exit_info.stderr or ""), encoding="utf-8", errors="replace",
     )
     manifest = {
         "version": 1, "pass": number, "package": package, "device": args.device,

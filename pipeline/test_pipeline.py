@@ -70,7 +70,7 @@ class PipelineTests(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as temp:
             run_dir = Path(temp)
-            response = subprocess.CompletedProcess([], 0, "", "")
+            response = subprocess.CompletedProcess([], 0, "diagnostic output", None)
             with mock.patch.dict(sys.modules, {"frida": fake_frida}), \
                     mock.patch.object(pipeline, "adb", return_value=response):
                 manifest_path = pipeline.run_adaptive_diagnostics(
@@ -80,6 +80,8 @@ class PipelineTests(unittest.TestCase):
             artifact = manifest["artifacts"][0]
             self.assertEqual(artifact["size"], len(b"ELF payload"))
             self.assertEqual((run_dir / artifact["path"]).read_bytes(), b"ELF payload")
+            self.assertEqual((manifest_path.parent / "logcat.log").read_text(encoding="utf-8"), "diagnostic output")
+            self.assertEqual((manifest_path.parent / "exit-info.log").read_text(encoding="utf-8"), "diagnostic output")
 
     def test_prepare_reuses_static_artifacts_for_identical_apk(self):
         with tempfile.TemporaryDirectory() as temp:
