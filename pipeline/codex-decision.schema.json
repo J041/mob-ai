@@ -31,7 +31,15 @@
           "capture_native_exceptions",
           "trace_termination_calls",
           "inventory_executable_mappings",
-          "dump_runtime_payloads"
+          "dump_runtime_payloads",
+          "compare_launch_modes",
+          "late_attach_observer",
+          "snapshot_process_mappings",
+          "dump_new_executable_regions",
+          "trace_dynamic_loading",
+          "trace_signal_handlers",
+          "capture_runtime_dex",
+          "extract_embedded_payload"
         ]
       }
     }

@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import time
@@ -41,6 +42,14 @@ DIAGNOSTIC_ACTIONS = {
     "trace_termination_calls",
     "inventory_executable_mappings",
     "dump_runtime_payloads",
+    "compare_launch_modes",
+    "late_attach_observer",
+    "snapshot_process_mappings",
+    "dump_new_executable_regions",
+    "trace_dynamic_loading",
+    "trace_signal_handlers",
+    "capture_runtime_dex",
+    "extract_embedded_payload",
 }
 DIAGNOSTIC_MAX_DUMPS = 5
 DIAGNOSTIC_MAX_DUMP_BYTES = 1024 * 1024
@@ -388,6 +397,63 @@ def parse_diagnostic_actions(value: str) -> list[str]:
     return actions
 
 
+def parse_process_mappings(value: str) -> list[dict[str, object]]:
+    mappings: list[dict[str, object]] = []
+    pattern = re.compile(
+        r"^(?P<start>[0-9a-f]+)-(?P<end>[0-9a-f]+)\s+(?P<perms>[-rwxps]{4})\s+"
+        r"(?P<offset>[0-9a-f]+)\s+\S+\s+\d+\s*(?P<path>.*)$", re.I,
+    )
+    for line in value.splitlines():
+        match = pattern.match(line.strip())
+        if not match:
+            continue
+        start, end = int(match["start"], 16), int(match["end"], 16)
+        mappings.append({
+            "start": start, "end": end, "size": end - start,
+            "permissions": match["perms"], "offset": int(match["offset"], 16),
+            "path": match["path"].strip(),
+        })
+    return mappings
+
+
+def embedded_payload_candidates(path: Path) -> list[tuple[int, bytes, str]]:
+    """Carve bounded embedded ELF/DEX images with explicit file-size headers."""
+    data = path.read_bytes()
+    candidates: list[tuple[int, bytes, str]] = []
+    for magic, kind in ((b"\x7fELF", "elf"), (b"dex\n", "dex"), (b"cdex", "cdex")):
+        offset = data.find(magic, 1)
+        while offset >= 0 and len(candidates) < DIAGNOSTIC_MAX_DUMPS:
+            length = 0
+            try:
+                if kind == "dex":
+                    length = struct.unpack_from("<I", data, offset + 32)[0]
+                elif kind == "elf":
+                    elf_class, encoding = data[offset + 4], data[offset + 5]
+                    endian = "<" if encoding == 1 else ">"
+                    if elf_class == 2:
+                        phoff = struct.unpack_from(endian + "Q", data, offset + 32)[0]
+                        phentsize, phnum = struct.unpack_from(endian + "HH", data, offset + 54)
+                        for index in range(min(phnum, 256)):
+                            row = offset + phoff + index * phentsize
+                            file_offset = struct.unpack_from(endian + "Q", data, row + 8)[0]
+                            file_size = struct.unpack_from(endian + "Q", data, row + 32)[0]
+                            length = max(length, file_offset + file_size)
+                    elif elf_class == 1:
+                        phoff = struct.unpack_from(endian + "I", data, offset + 28)[0]
+                        phentsize, phnum = struct.unpack_from(endian + "HH", data, offset + 42)
+                        for index in range(min(phnum, 256)):
+                            row = offset + phoff + index * phentsize
+                            file_offset = struct.unpack_from(endian + "I", data, row + 4)[0]
+                            file_size = struct.unpack_from(endian + "I", data, row + 16)[0]
+                            length = max(length, file_offset + file_size)
+            except (IndexError, struct.error):
+                length = 0
+            if 40 <= length <= DIAGNOSTIC_MAX_DUMP_BYTES and offset + length <= len(data):
+                candidates.append((offset, data[offset:offset + length], kind))
+            offset = data.find(magic, offset + 1)
+    return candidates
+
+
 def run_adaptive_diagnostics(
     args: argparse.Namespace, run_dir: Path, package: str, actions: list[str],
 ) -> Path:
@@ -415,54 +481,223 @@ def run_adaptive_diagnostics(
     errors: list[str] = []
     total_bytes = 0
 
+    def save_artifact(data: bytes, prefix: str, suffix: str, metadata: object) -> dict[str, object] | None:
+        nonlocal total_bytes
+        remaining = DIAGNOSTIC_MAX_TOTAL_BYTES - total_bytes
+        bounded = bytes(data[:min(DIAGNOSTIC_MAX_DUMP_BYTES, remaining)])
+        if not bounded or len(artifacts) >= DIAGNOSTIC_MAX_DUMPS:
+            return None
+        digest = hashlib.sha256(bounded).hexdigest()
+        for existing in artifacts:
+            if existing.get("sha256") == digest:
+                return existing
+        dumps_dir.mkdir(exist_ok=True)
+        destination = dumps_dir / f"{prefix}-{len(artifacts) + 1}-{digest[:12]}.{suffix}"
+        destination.write_bytes(bounded)
+        total_bytes += len(bounded)
+        artifact = {
+            "path": str(destination.relative_to(run_dir)), "sha256": digest,
+            "size": len(bounded), "metadata": metadata or {},
+        }
+        artifacts.append(artifact)
+        return artifact
+
     def on_message(message: dict[str, object], data: bytes | None) -> None:
         nonlocal total_bytes
         if message.get("type") == "error":
             errors.append(str(message.get("stack") or message.get("description") or message)[:4000])
             return
         payload = message.get("payload")
+        if message.get("type") == "log" and isinstance(payload, str) and payload.startswith("MOB_AI_EVENT "):
+            try:
+                observed = json.loads(payload.removeprefix("MOB_AI_EVENT "))
+            except json.JSONDecodeError:
+                return
+            if isinstance(observed, dict):
+                observed["captured_utc"] = dt.datetime.now(dt.timezone.utc).isoformat()
+                if len(events) < 1000:
+                    events.append(observed)
+            return
         if not isinstance(payload, dict) or payload.get("source") != "mob-ai-diagnostics":
             return
         event = dict(payload)
         event["captured_utc"] = dt.datetime.now(dt.timezone.utc).isoformat()
-        if payload.get("kind") == "runtime-payload" and data:
-            remaining = DIAGNOSTIC_MAX_TOTAL_BYTES - total_bytes
-            bounded = bytes(data[:min(DIAGNOSTIC_MAX_DUMP_BYTES, remaining)])
-            if bounded and len(artifacts) < DIAGNOSTIC_MAX_DUMPS:
-                dumps_dir.mkdir(exist_ok=True)
-                digest = hashlib.sha256(bounded).hexdigest()
-                destination = dumps_dir / f"payload-{len(artifacts) + 1}-{digest[:12]}.bin"
-                destination.write_bytes(bounded)
-                total_bytes += len(bounded)
-                artifact = {
-                    "path": str(destination.relative_to(run_dir)), "sha256": digest,
-                    "size": len(bounded), "metadata": payload.get("detail") or {},
-                }
-                artifacts.append(artifact)
+        if payload.get("kind") in {"runtime-payload", "runtime-dex"} and data:
+            kind = str(payload.get("kind"))
+            artifact = save_artifact(
+                bytes(data), "dex" if kind == "runtime-dex" else "payload",
+                "dex" if kind == "runtime-dex" else "bin", payload.get("detail") or {},
+            )
+            if artifact:
                 event["artifact"] = artifact
         if len(events) < 1000:
             events.append(event)
 
-    adb(args, "logcat", "-c", check=False)
     device = frida.get_device_manager().add_remote_device(args.frida_endpoint)
-    pid: int | None = None
-    session = None
-    try:
-        pid = int(device.spawn([package]))
-        session = device.attach(pid)
-        script = session.create_script(rendered)
-        script.on("message", on_message)
-        script.load()
-        device.resume(pid)
-        time.sleep(args.observation_seconds)
-    except Exception as error:
-        errors.append(f"{type(error).__name__}: {error}")
-    finally:
-        if session is not None:
+    adb(args, "logcat", "-c", check=False)
+
+    def live_pid() -> int | None:
+        for _ in range(20):
+            probe = adb(args, "shell", "pidof", package, check=False)
+            value = (probe.stdout or "").strip().split()
+            if value and value[0].isdigit():
+                return int(value[0])
+            time.sleep(0.1)
+        return None
+
+    def clean_launch() -> int | None:
+        adb(args, "shell", "am", "force-stop", package, check=False)
+        adb(
+            args, "shell", "monkey", "-p", package,
+            "-c", "android.intent.category.LAUNCHER", "1", check=False,
+        )
+        return live_pid()
+
+    if "extract_embedded_payload" in actions:
+        targets = sorted((run_dir / "native" / "selected").rglob("*.so")) if (run_dir / "native" / "selected").is_dir() else []
+        for target in targets:
+            for offset, content, kind in embedded_payload_candidates(target):
+                artifact = save_artifact(
+                    content, f"embedded-{kind}", "dex" if kind in {"dex", "cdex"} else "so",
+                    {"source": str(target.relative_to(run_dir)), "offset": offset, "kind": kind},
+                )
+                events.append({
+                    "source": "mob-ai-diagnostics", "kind": "embedded-payload",
+                    "detail": {"source": str(target.relative_to(run_dir)), "offset": offset, "format": kind},
+                    "artifact": artifact, "captured_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
+                })
+
+    if "compare_launch_modes" in actions:
+        comparison: list[dict[str, object]] = []
+        window = min(5, args.observation_seconds)
+        for mode in ("clean", "empty_spawn", "late_attach"):
+            adb(args, "shell", "am", "force-stop", package, check=False)
+            session = None
+            pid: int | None = None
             try:
-                session.detach()
-            except Exception:
-                pass
+                if mode == "empty_spawn":
+                    pid = int(device.spawn([package]))
+                    session = device.attach(pid)
+                    script = session.create_script("send({source:'mob-ai-diagnostics',kind:'empty-agent-ready',detail:{}});")
+                    script.on("message", on_message)
+                    script.load()
+                    device.resume(pid)
+                else:
+                    pid = clean_launch()
+                    if mode == "late_attach" and pid:
+                        session = device.attach(pid)
+                        script = session.create_script("send({source:'mob-ai-diagnostics',kind:'late-agent-ready',detail:{}});")
+                        script.on("message", on_message)
+                        script.load()
+                time.sleep(window)
+                alive = live_pid()
+                comparison.append({"mode": mode, "started_pid": pid, "alive_pid": alive, "survived": bool(alive)})
+            except Exception as error:
+                comparison.append({"mode": mode, "started_pid": pid, "survived": False, "error": str(error)})
+            finally:
+                if session is not None:
+                    try:
+                        session.detach()
+                    except Exception:
+                        pass
+        (pass_dir / "launch-comparison.json").write_text(json.dumps(comparison, indent=2) + "\n", encoding="utf-8")
+        events.append({
+            "source": "mob-ai-diagnostics", "kind": "launch-comparison", "detail": comparison,
+            "captured_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
+        })
+
+    if {"snapshot_process_mappings", "dump_new_executable_regions"}.intersection(actions):
+        pid = clean_launch()
+        if not pid:
+            errors.append("External mapping snapshot could not find a live target process.")
+        else:
+            seen_mappings: set[tuple[int, int, str, str]] = set()
+            deadline = time.monotonic() + args.observation_seconds
+            while time.monotonic() < deadline:
+                result = adb(args, "shell", "su", "-c", f"cat /proc/{pid}/maps", check=False)
+                current = parse_process_mappings(result.stdout or "")
+                if not current:
+                    if not live_pid():
+                        break
+                    time.sleep(0.1)
+                    continue
+                for mapping in current:
+                    key = (
+                        int(mapping["start"]), int(mapping["end"]),
+                        str(mapping["permissions"]), str(mapping["path"]),
+                    )
+                    if key in seen_mappings:
+                        continue
+                    seen_mappings.add(key)
+                    if "x" not in str(mapping["permissions"]):
+                        continue
+                    suspicious = not mapping["path"] or re.search(r"memfd:|deleted|anon_inode", str(mapping["path"]), re.I)
+                    events.append({
+                        "source": "mob-ai-diagnostics", "kind": "external-executable-mapping",
+                        "detail": mapping, "captured_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
+                    })
+                    if "dump_new_executable_regions" not in actions or not suspicious:
+                        continue
+                    size = min(int(mapping["size"]), DIAGNOSTIC_MAX_DUMP_BYTES)
+                    page_size = 4096
+                    command = [
+                        "adb", "-s", args.device, "exec-out", "su", "-c",
+                        f"dd if=/proc/{pid}/mem bs={page_size} skip={int(mapping['start']) // page_size} count={(size + page_size - 1) // page_size} status=none",
+                    ]
+                    try:
+                        dumped = subprocess.run(command, capture_output=True, timeout=10, check=False)
+                        if dumped.returncode == 0 and dumped.stdout:
+                            save_artifact(dumped.stdout[:size], "external-map", "bin", mapping)
+                        else:
+                            errors.append(f"External dump failed for {int(mapping['start']):x}: {(dumped.stderr or b'')[:500]!r}")
+                    except (OSError, subprocess.SubprocessError) as error:
+                        errors.append(f"External dump failed for {int(mapping['start']):x}: {error}")
+                time.sleep(0.1)
+            (pass_dir / "process-mappings.json").write_text(
+                json.dumps([event["detail"] for event in events if event.get("kind") == "external-executable-mapping"], indent=2) + "\n",
+                encoding="utf-8",
+            )
+
+    orchestrated = {
+        "compare_launch_modes", "snapshot_process_mappings",
+        "dump_new_executable_regions", "extract_embedded_payload",
+    }
+    frida_actions = [action for action in actions if action not in orchestrated and action != "late_attach_observer"]
+    if frida_actions or "late_attach_observer" in actions:
+        pid: int | None = None
+        session = None
+        try:
+            if "late_attach_observer" in actions:
+                pid = clean_launch()
+                if not pid:
+                    raise RuntimeError("Late attach could not find a live target process")
+                session = device.attach(pid)
+            else:
+                pid = int(device.spawn([package]))
+                session = device.attach(pid)
+            loaded_scripts = []
+            if "late_attach_observer" in actions:
+                observer_source = (Path(__file__).parent / "frida" / "observe.js").read_text(encoding="utf-8")
+                observer_script = session.create_script(observer_source)
+                observer_script.on("message", on_message)
+                observer_script.load()
+                loaded_scripts.append(observer_script)
+            if frida_actions:
+                script = session.create_script(rendered)
+                script.on("message", on_message)
+                script.load()
+                loaded_scripts.append(script)
+            if "late_attach_observer" not in actions:
+                device.resume(pid)
+            time.sleep(args.observation_seconds)
+        except Exception as error:
+            errors.append(f"{type(error).__name__}: {error}")
+        finally:
+            if session is not None:
+                try:
+                    session.detach()
+                except Exception:
+                    pass
 
     logcat = adb(args, "logcat", "-d", "-t", "1000", check=False)
     (pass_dir / "logcat.log").write_text(

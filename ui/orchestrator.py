@@ -42,6 +42,14 @@ DIAGNOSTIC_ACTIONS = {
     "trace_termination_calls",
     "inventory_executable_mappings",
     "dump_runtime_payloads",
+    "compare_launch_modes",
+    "late_attach_observer",
+    "snapshot_process_mappings",
+    "dump_new_executable_regions",
+    "trace_dynamic_loading",
+    "trace_signal_handlers",
+    "capture_runtime_dex",
+    "extract_embedded_payload",
 }
 MAX_DIAGNOSTIC_ROUNDS = 2
 
@@ -1827,9 +1835,9 @@ Goal: make the smallest evidence-based change to the candidate Frida hook that c
 
 Adaptive evidence escalation:
 - When existing evidence is insufficient for a narrow candidate but a bounded runtime diagnostic could resolve the uncertainty, return decision `diagnostics` instead of `human_review`.
-- Include one to three unique `diagnostic_actions` selected only from: trace_jni_registration, capture_native_exceptions, trace_termination_calls, inventory_executable_mappings, dump_runtime_payloads.
+- Include one to three unique `diagnostic_actions` selected only from: trace_jni_registration, capture_native_exceptions, trace_termination_calls, inventory_executable_mappings, dump_runtime_payloads, compare_launch_modes, late_attach_observer, snapshot_process_mappings, dump_new_executable_regions, trace_dynamic_loading, trace_signal_handlers, capture_runtime_dex, extract_embedded_payload.
 - `diagnostic_actions` is required in every structured response. Return an empty array for updated, no_change, and human_review decisions.
-- Prefer tracing and inventory before requesting runtime payload dumps. Request dump_runtime_payloads only when evidence indicates dynamically unpacked executable code; the worker enforces five 1 MiB artifacts and a 5 MiB total limit.
+- Prefer compare_launch_modes and a single isolated trace before invasive capture. Use late_attach_observer when spawn instrumentation changes loader behavior. Request memory/DEX dumps or extract_embedded_payload only when evidence indicates dynamically loaded code; the worker scopes capture to the selected package and enforces five 1 MiB artifacts and a 5 MiB total limit.
 - The deterministic orchestrator executes diagnostics on the exact recorded device and makes the manifest available under diagnostics/pass-*/manifest.json for the next iteration. Do not edit candidate.js when requesting diagnostics.
 - At most {MAX_DIAGNOSTIC_ROUNDS} diagnostic rounds are available, and completed actions cannot be requested again.
 

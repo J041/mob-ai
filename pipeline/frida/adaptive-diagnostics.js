@@ -25,8 +25,11 @@ function backtrace(context) {
     return Thread.backtrace(context, Backtracer.ACCURATE).slice(0, 16).map(DebugSymbol.fromAddress).map(String);
   } catch (_) { return []; }
 }
-function dumpRange(base, size, reason) {
-  if (!enabled('dump_runtime_payloads') || dumpCount >= MAX_DUMPS) return;
+function dumpRange(base, size, reason, kind) {
+  kind = kind || 'runtime-payload';
+  if (kind === 'runtime-payload' && !enabled('dump_runtime_payloads')) return;
+  if (kind === 'runtime-dex' && !enabled('capture_runtime_dex')) return;
+  if (dumpCount >= MAX_DUMPS) return;
   const length = Math.min(Number(size), MAX_DUMP_BYTES);
   if (!Number.isFinite(length) || length <= 0) return;
   try {
@@ -34,12 +37,53 @@ function dumpRange(base, size, reason) {
     const location = moduleLocation(base);
     dumpCount += 1;
     send({
-      source: 'mob-ai-diagnostics', kind: 'runtime-payload',
+      source: 'mob-ai-diagnostics', kind: kind,
       detail: Object.assign({ address: base.toString(), size: length, reason: reason }, location)
     }, bytes);
   } catch (error) {
     emit('diagnostic-error', { action: 'dump_runtime_payloads', error: safeString(error) });
   }
+}
+
+if (enabled('trace_dynamic_loading')) {
+  ['dlopen', 'android_dlopen_ext'].forEach(function (name) {
+    const target = Module.findGlobalExportByName(name);
+    if (!target) return;
+    Interceptor.attach(target, {
+      onEnter(args) {
+        this.path = args[0].isNull() ? '' : safeString(args[0].readCString());
+        this.caller = moduleLocation(this.returnAddress);
+      },
+      onLeave(retval) {
+        emit('dynamic-load', { name: name, path: this.path, result: retval.toString(), caller: this.caller });
+      }
+    });
+  });
+  const dlsym = Module.findGlobalExportByName('dlsym');
+  if (dlsym) Interceptor.attach(dlsym, {
+    onEnter(args) {
+      this.symbol = args[1].isNull() ? '' : safeString(args[1].readCString());
+      this.caller = moduleLocation(this.returnAddress);
+    },
+    onLeave(retval) {
+      emit('dynamic-symbol', { symbol: this.symbol, result: retval.toString(), caller: this.caller });
+    }
+  });
+}
+
+if (enabled('trace_signal_handlers')) {
+  ['signal', 'sigaction'].forEach(function (name) {
+    const target = Module.findGlobalExportByName(name);
+    if (!target) return;
+    Interceptor.attach(target, {
+      onEnter(args) {
+        emit('signal-handler', {
+          name: name, signal: args[0].toInt32(), handler: safeString(args[1]),
+          caller: moduleLocation(this.returnAddress), backtrace: backtrace(this.context)
+        });
+      }
+    });
+  });
 }
 
 if (enabled('capture_native_exceptions')) {
@@ -120,7 +164,7 @@ if (enabled('inventory_executable_mappings') || enabled('dump_runtime_payloads')
       protection: range ? range.protection : '', file: range && range.file ? range.file.path : ''
     };
     if (enabled('inventory_executable_mappings')) emit('executable-mapping', detail);
-    if (!detail.file) dumpRange(base, size, reason);
+    if (!detail.file || /memfd:|deleted|anon_inode/i.test(detail.file)) dumpRange(base, size, reason);
   }
   Process.enumerateRanges('r-x').forEach(function (range) {
     known.add(range.base.toString() + ':' + String(range.size));
@@ -139,6 +183,39 @@ if (enabled('inventory_executable_mappings') || enabled('dump_runtime_payloads')
     onEnter(args) { this.size = Number(args[1]); this.executable = (args[2].toInt32() & 4) !== 0; },
     onLeave(retval) { if (this.executable && !retval.equals(ptr(-1))) inspectRange(retval, this.size, 'mmap'); }
   });
+  setInterval(function () {
+    try {
+      Process.enumerateRanges('r-x').forEach(function (range) {
+        inspectRange(range.base, range.size, 'periodic-snapshot');
+      });
+    } catch (error) {
+      emit('diagnostic-error', { action: 'inventory_executable_mappings', error: safeString(error) });
+    }
+  }, 100);
+}
+
+if (enabled('capture_runtime_dex')) {
+  const dexSeen = new Set();
+  setInterval(function () {
+    try {
+      const candidates = Process.enumerateRanges('rw-').concat(Process.enumerateRanges('r--')).slice(0, 1024);
+      candidates.forEach(function (range) {
+        const key = range.base.toString() + ':' + String(range.size);
+        if (dexSeen.has(key) || range.size < 40) return;
+        const magic = new Uint8Array(range.base.readByteArray(4));
+        const isDex = magic[0] === 0x64 && magic[1] === 0x65 && magic[2] === 0x78 && magic[3] === 0x0a;
+        const isCdex = magic[0] === 0x63 && magic[1] === 0x64 && magic[2] === 0x65 && magic[3] === 0x78;
+        if (!isDex && !isCdex) return;
+        dexSeen.add(key);
+        let length = range.size;
+        try { if (isDex) length = Math.min(length, range.base.add(32).readU32()); } catch (_) {}
+        emit('runtime-dex-found', { base: range.base.toString(), size: length, compact: isCdex });
+        dumpRange(range.base, length, 'periodic-dex-scan', 'runtime-dex');
+      });
+    } catch (error) {
+      emit('diagnostic-error', { action: 'capture_runtime_dex', error: safeString(error) });
+    }
+  }, 250);
 }
 
 emit('diagnostics-ready', { actions: Array.from(ACTIONS) });

@@ -24,6 +24,34 @@ class PipelineTests(unittest.TestCase):
             pipeline.parse_diagnostic_actions(
                 "trace_jni_registration,capture_native_exceptions,trace_termination_calls,inventory_executable_mappings"
             )
+        self.assertEqual(
+            pipeline.parse_diagnostic_actions(
+                "compare_launch_modes,late_attach_observer,trace_dynamic_loading"
+            ),
+            ["compare_launch_modes", "late_attach_observer", "trace_dynamic_loading"],
+        )
+
+    def test_process_mapping_parser_preserves_executable_memfd(self):
+        mappings = pipeline.parse_process_mappings(
+            "7a1000-7a3000 r-xp 00000000 00:01 42 /memfd:payload (deleted)\n"
+        )
+        self.assertEqual(len(mappings), 1)
+        self.assertEqual(mappings[0]["start"], 0x7A1000)
+        self.assertEqual(mappings[0]["size"], 0x2000)
+        self.assertEqual(mappings[0]["path"], "/memfd:payload (deleted)")
+
+    def test_embedded_dex_payload_is_carved_from_selected_library(self):
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "loader.so"
+            dex = bytearray(112)
+            dex[:8] = b"dex\n035\0"
+            dex[32:36] = (112).to_bytes(4, "little")
+            path.write_bytes(b"loader-prefix" + bytes(dex) + b"trailer")
+            candidates = pipeline.embedded_payload_candidates(path)
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0][0], len(b"loader-prefix"))
+        self.assertEqual(candidates[0][1], bytes(dex))
+        self.assertEqual(candidates[0][2], "dex")
 
     def test_adaptive_diagnostics_store_bounded_runtime_artifact(self):
         class FakeScript:
