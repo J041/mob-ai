@@ -373,6 +373,22 @@ class WebAppTests(unittest.TestCase):
         self.assertNotIn("123456", stored)
         self.assertIn("192.168.1.20:37001", stored)
 
+    @patch("ui.app.subprocess.run")
+    def test_wireless_pairing_removes_contradictory_success_suffix(self, run) -> None:
+        run.return_value = subprocess.CompletedProcess(
+            [], 1, "", "error: protocol fault (couldn't read status message): Success\n",
+        )
+        response = self.client.post(
+            "/api/devices/pair",
+            json={"endpoint": "192.168.1.20:37001", "code": "123456"},
+        )
+        payload = response.get_json()
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(
+            payload["error"],
+            "Wireless pairing failed: error: protocol fault (couldn't read status message)",
+        )
+
     def test_new_pairing_invalidates_stale_connection_for_same_host(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             registry = Path(temp) / "wireless-devices.json"

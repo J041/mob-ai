@@ -1962,6 +1962,9 @@ def pair_wireless_device():
         )
         if result.returncode:
             detail = (result.stderr or result.stdout or "ADB pairing failed.").strip()
+            # Some ADB builds append the OS error-string for errno 0 to a real
+            # protocol failure, producing the contradictory suffix ": Success".
+            detail = re.sub(r"(?i):\s*success\s*$", "", detail).rstrip()
             detail = detail.replace(pairing_code, "******")[-1000:]
             raise ValueError(f"Wireless pairing failed: {detail}")
     except subprocess.TimeoutExpired as error:
