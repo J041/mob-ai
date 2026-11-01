@@ -35,6 +35,17 @@ MODULE_MIN_LEVEL = {
     "native-antidebug": 3, "anti-frida": 3,
 }
 
+DIAGNOSTIC_ACTIONS = {
+    "trace_jni_registration",
+    "capture_native_exceptions",
+    "trace_termination_calls",
+    "inventory_executable_mappings",
+    "dump_runtime_payloads",
+}
+DIAGNOSTIC_MAX_DUMPS = 5
+DIAGNOSTIC_MAX_DUMP_BYTES = 1024 * 1024
+DIAGNOSTIC_MAX_TOTAL_BYTES = 5 * 1024 * 1024
+
 
 def run(
     cmd: list[str], *, log: Path | None = None, check: bool = True,
@@ -365,6 +376,118 @@ def run_observation(args: argparse.Namespace, run_dir: Path, package: str) -> di
     return {**summary, "frida_output": frida_output, "logcat": logcat}
 
 
+def parse_diagnostic_actions(value: str) -> list[str]:
+    actions = list(dict.fromkeys(item.strip() for item in value.split(",") if item.strip()))
+    unknown = sorted(set(actions) - DIAGNOSTIC_ACTIONS)
+    if unknown:
+        raise RuntimeError(f"Unsupported diagnostic actions: {', '.join(unknown)}")
+    if not actions:
+        raise RuntimeError("At least one diagnostic action is required")
+    if len(actions) > 3:
+        raise RuntimeError("A diagnostic pass may request at most three actions")
+    return actions
+
+
+def run_adaptive_diagnostics(
+    args: argparse.Namespace, run_dir: Path, package: str, actions: list[str],
+) -> Path:
+    """Execute an allowlisted, observation-only Frida diagnostic pass."""
+    try:
+        import frida  # type: ignore
+    except ImportError as error:
+        raise RuntimeError("The Frida Python bindings are required for adaptive diagnostics") from error
+
+    diagnostics_root = run_dir / "diagnostics"
+    diagnostics_root.mkdir(parents=True, exist_ok=True)
+    number = 1
+    while (diagnostics_root / f"pass-{number}").exists():
+        number += 1
+    pass_dir = diagnostics_root / f"pass-{number}"
+    dumps_dir = pass_dir / "runtime-dumps"
+    pass_dir.mkdir()
+    template = (Path(__file__).parent / "frida" / "adaptive-diagnostics.js").read_text(encoding="utf-8")
+    rendered = template.replace("{{ACTIONS}}", json.dumps(actions))
+    script_path = pass_dir / "instrumentation.js"
+    script_path.write_text(rendered, encoding="utf-8")
+
+    events: list[dict[str, object]] = []
+    artifacts: list[dict[str, object]] = []
+    errors: list[str] = []
+    total_bytes = 0
+
+    def on_message(message: dict[str, object], data: bytes | None) -> None:
+        nonlocal total_bytes
+        if message.get("type") == "error":
+            errors.append(str(message.get("stack") or message.get("description") or message)[:4000])
+            return
+        payload = message.get("payload")
+        if not isinstance(payload, dict) or payload.get("source") != "mob-ai-diagnostics":
+            return
+        event = dict(payload)
+        event["captured_utc"] = dt.datetime.now(dt.timezone.utc).isoformat()
+        if payload.get("kind") == "runtime-payload" and data:
+            remaining = DIAGNOSTIC_MAX_TOTAL_BYTES - total_bytes
+            bounded = bytes(data[:min(DIAGNOSTIC_MAX_DUMP_BYTES, remaining)])
+            if bounded and len(artifacts) < DIAGNOSTIC_MAX_DUMPS:
+                dumps_dir.mkdir(exist_ok=True)
+                digest = hashlib.sha256(bounded).hexdigest()
+                destination = dumps_dir / f"payload-{len(artifacts) + 1}-{digest[:12]}.bin"
+                destination.write_bytes(bounded)
+                total_bytes += len(bounded)
+                artifact = {
+                    "path": str(destination.relative_to(run_dir)), "sha256": digest,
+                    "size": len(bounded), "metadata": payload.get("detail") or {},
+                }
+                artifacts.append(artifact)
+                event["artifact"] = artifact
+        if len(events) < 1000:
+            events.append(event)
+
+    adb(args, "logcat", "-c", check=False)
+    device = frida.get_device_manager().add_remote_device(args.frida_endpoint)
+    pid: int | None = None
+    session = None
+    try:
+        pid = int(device.spawn([package]))
+        session = device.attach(pid)
+        script = session.create_script(rendered)
+        script.on("message", on_message)
+        script.load()
+        device.resume(pid)
+        time.sleep(args.observation_seconds)
+    except Exception as error:
+        errors.append(f"{type(error).__name__}: {error}")
+    finally:
+        if session is not None:
+            try:
+                session.detach()
+            except Exception:
+                pass
+
+    logcat = adb(args, "logcat", "-d", "-t", "1000", check=False)
+    (pass_dir / "logcat.log").write_text(logcat.stdout + logcat.stderr, encoding="utf-8", errors="replace")
+    exit_info = adb(args, "shell", "dumpsys", "activity", "exit-info", package, check=False)
+    (pass_dir / "exit-info.log").write_text(
+        exit_info.stdout + exit_info.stderr, encoding="utf-8", errors="replace",
+    )
+    manifest = {
+        "version": 1, "pass": number, "package": package, "device": args.device,
+        "actions": actions, "duration_seconds": args.observation_seconds,
+        "created_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
+        "limits": {
+            "max_dumps": DIAGNOSTIC_MAX_DUMPS,
+            "max_dump_bytes": DIAGNOSTIC_MAX_DUMP_BYTES,
+            "max_total_bytes": DIAGNOSTIC_MAX_TOTAL_BYTES,
+        },
+        "events": events, "artifacts": artifacts, "errors": errors,
+    }
+    manifest_path = pass_dir / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    print(f"Adaptive diagnostic manifest: {manifest_path}")
+    print(f"Diagnostic events: {len(events)}; runtime artifacts: {len(artifacts)}; errors: {len(errors)}")
+    return manifest_path
+
+
 def adb(args: argparse.Namespace, *extra: str, check: bool = True) -> subprocess.CompletedProcess[str]:
     return run(["adb", "-s", args.device, *extra], check=check)
 
@@ -529,7 +652,11 @@ def evaluate_success(
             )
             result.update(activity=expected, passed=expected in resumed, evidence=resumed[:500])
         elif kind == "no_crash":
-            crash_pattern = r"FATAL EXCEPTION|AndroidRuntime.*Process:|has died:|Force finishing activity"
+            crash_pattern = (
+                r"FATAL EXCEPTION|AndroidRuntime.*Process:|has died:|Force finishing activity|"
+                r"Fatal signal\s+\d+|signal\s+\d+\s+\(SIG(?:SEGV|BUS|ABRT|ILL|FPE)\)|"
+                r"APP CRASH\((?:NATIVE|EXCEPTION)\)"
+            )
             matched = re.search(crash_pattern, logcat, re.I | re.M) is not None
             result.update(passed=not matched, pattern=crash_pattern)
         else:
@@ -662,6 +789,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--observation-mode", choices=("off", "before", "only"), default="before", help="run non-mutating discovery before adaptive bypasses")
     parser.add_argument("--observation-seconds", type=int, default=15)
     parser.add_argument("--diagnostics", action="store_true", help="capture Android crash-buffer, exit-info, and available tombstone evidence")
+    parser.add_argument(
+        "--diagnostic-actions",
+        help="comma-separated allowlisted adaptive diagnostic recipes; runs one bounded diagnostic pass and exits",
+    )
     parser.add_argument("--candidate-script", type=Path, help="execute one reviewed .js candidate inside the resumed run")
     parser.add_argument("--frida-endpoint", default="127.0.0.1:27042", help="frida-server host:port")
     parser.add_argument("--start-frida-server", help="device path to an already-installed frida-server (requires su)")
@@ -723,6 +854,10 @@ def main() -> int:
         raise RuntimeError("Package name was not detected; pass --package explicitly.")
     prepare_device(args, run_dir / "original.apk")
     runtime_abi = device_abi(args)
+    if args.diagnostic_actions:
+        actions = parse_diagnostic_actions(args.diagnostic_actions)
+        run_adaptive_diagnostics(args, run_dir, str(package), actions)
+        return 0
     observation: dict[str, object] | None = None
     events: list[dict[str, object]] = []
     if args.observation_mode != "off":

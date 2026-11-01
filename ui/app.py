@@ -74,6 +74,7 @@ ARTIFACT_CATEGORIES = (
     ("findings", "Findings", "Static and runtime discovery reports.", ("report.json", "adaptive-plan.json", "observations.json", "native-selection.json")),
     ("hooks", "Generated hooks", "Generated and Codex-refined Frida scripts.", ("frida/*.js", "agent/iteration-*/candidate.js")),
     ("comparisons", "Attempt comparisons", "Before/after evidence from diagnostic retries.", ("agent/diagnostic-retry-*/comparison.json",)),
+    ("runtime-diagnostics", "Runtime diagnostics", "Bounded adaptive traces, executable mappings and runtime payload captures.", ("diagnostics/**/*", "agent/iteration-*/diagnostics.log")),
     ("logs", "Logcat and crash reports", "Runtime, crash-buffer, exit-info and tombstone evidence.", ("logs/*.log", "agent/**/logs/*.log", "agent/**/pipeline.log")),
     ("decisions", "Agent decisions", "Structured native triage, iteration records and provider execution logs.", ("codex-loop-result.json", "agent/native-selection/**/*", "agent/iteration-*/decision.json", "agent/iteration-*/record.json", "agent/iteration-*/codex.log", "agent/iteration-*/claude.log")),
     ("ghidra", "Ghidra results", "Selected native inputs and saved analysis results produced through Ghidra.", ("native/selected/**/*", "ghidra/**/*", "ghidra-results/**/*", "agent/**/ghidra-*")),
@@ -277,7 +278,7 @@ def resolve_run_artifact(run_id: str, relative: str) -> Path:
     allowed = any((
         normalized in {"report.json", "adaptive-plan.json", "observations.json", "native-selection.json", "codex-loop-result.json", "result.json", "codex-loop-config.json"},
         len(parts) == 2 and parts[0] == "frida" and normalized.endswith(".js"),
-        len(parts) == 3 and parts[0] == "agent" and parts[1].startswith("iteration-") and parts[2] in {"candidate.js", "decision.json", "record.json", "codex.log", "claude.log", "result.json", "provider-mcp.json"},
+        len(parts) == 3 and parts[0] == "agent" and parts[1].startswith("iteration-") and parts[2] in {"candidate.js", "decision.json", "record.json", "codex.log", "claude.log", "diagnostics.log", "result.json", "provider-mcp.json"},
         len(parts) == 3 and parts[0] == "agent" and parts[1].startswith("diagnostic-retry-") and parts[2] in {"comparison.json", "pipeline.log", "result.json"},
         bool(parts) and parts[0] == "logs" and normalized.endswith(".log"),
         len(parts) >= 3 and parts[0] == "agent" and "logs" in parts[2:] and normalized.endswith(".log"),
@@ -286,6 +287,7 @@ def resolve_run_artifact(run_id: str, relative: str) -> Path:
         bool(parts) and parts[0] in {"ghidra", "ghidra-results"},
         len(parts) >= 4 and parts[0:2] == ("native", "selected"),
         len(parts) >= 3 and parts[0] == "agent" and parts[-1].startswith("ghidra-"),
+        len(parts) >= 3 and parts[0] == "diagnostics" and parts[1].startswith("pass-") and normalized.endswith((".json", ".js", ".log", ".bin")),
         len(parts) >= 2 and parts[0] == "assistant" and normalized.endswith((".json", ".jsonl", ".txt", ".log")),
     ))
     if not allowed or ".." in parts:

@@ -157,6 +157,26 @@ class WebAppTests(unittest.TestCase):
         self.assertTrue(completed)
         self.assertTrue(valid)
 
+    def test_diagnostic_decision_requires_allowlisted_actions(self) -> None:
+        schema = WORKSPACE / "pipeline" / "codex-decision.schema.json"
+        base = {
+            "decision": "diagnostics", "rationale": "Need the unpacked JNI target.",
+            "changes_made": [], "evidence_used": ["observations.json"],
+            "remaining_risks": ["Runtime code is not yet attributed."],
+        }
+        with tempfile.TemporaryDirectory() as temp:
+            output = Path(temp) / "decision.json"
+            output.write_text(json.dumps(base), encoding="utf-8")
+            self.assertFalse(validate_provider_output(output, schema))
+            output.write_text(json.dumps({
+                **base, "diagnostic_actions": ["trace_jni_registration"],
+            }), encoding="utf-8")
+            self.assertTrue(validate_provider_output(output, schema))
+            output.write_text(json.dumps({
+                **base, "diagnostic_actions": ["arbitrary_shell"],
+            }), encoding="utf-8")
+            self.assertFalse(validate_provider_output(output, schema))
+
     @patch("ui.app.codex_model_catalog", return_value={"models": [{
         "id": "test-model", "reasoning_levels": [{"effort": "high"}],
     }], "source": "test"})
@@ -696,6 +716,39 @@ class WebAppTests(unittest.TestCase):
         self.assertIn("no more than 3 read-only subagents", prompt)
         self.assertIn("root agent is the only writer", prompt)
         self.assertIn("native specialist", prompt)
+        self.assertIn("decision `diagnostics`", prompt)
+        self.assertIn("dump_runtime_payloads", prompt)
+        self.assertIn("At most 2 diagnostic rounds", prompt)
+
+    @patch("ui.orchestrator.run_logged")
+    def test_adaptive_diagnostic_worker_uses_allowlisted_pipeline_action(self, run_logged) -> None:
+        with tempfile.TemporaryDirectory(dir=WORKSPACE) as temp:
+            run = Path(temp)
+            iteration = run / "agent" / "iteration-2"
+            iteration.mkdir(parents=True)
+
+            def execute(command, _log, **_kwargs):
+                manifest = run / "diagnostics" / "pass-1" / "manifest.json"
+                manifest.parent.mkdir(parents=True)
+                manifest.write_text(json.dumps({
+                    "events": [{"kind": "jni-registration"}],
+                    "artifacts": [], "errors": [],
+                }), encoding="utf-8")
+                self.assertIn("--diagnostic-actions", command)
+                self.assertIn("trace_jni_registration", command)
+                return 0, ""
+
+            run_logged.side_effect = execute
+            result = LoopRunner(StringIO())._run_adaptive_diagnostics(
+                run,
+                {
+                    "transport": "adb", "target": "serial", "package": "com.example",
+                    "observation_seconds": 15, "start_frida_server": "",
+                },
+                iteration, 2, ["trace_jni_registration"],
+            )
+            self.assertEqual(result["event_count"], 1)
+            self.assertEqual(result["actions"], ["trace_jni_registration"])
 
     @patch("ui.orchestrator.run_logged", return_value=(0, ""))
     @patch("ui.orchestrator.provider_adapter")

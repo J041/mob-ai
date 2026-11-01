@@ -4,7 +4,7 @@
   "properties": {
     "decision": {
       "type": "string",
-      "enum": ["updated", "no_change", "human_review"]
+      "enum": ["updated", "no_change", "diagnostics", "human_review"]
     },
     "rationale": {
       "type": "string"
@@ -20,6 +20,21 @@
     "remaining_risks": {
       "type": "array",
       "items": { "type": "string" }
+    },
+    "diagnostic_actions": {
+      "type": "array",
+      "maxItems": 3,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "enum": [
+          "trace_jni_registration",
+          "capture_native_exceptions",
+          "trace_termination_calls",
+          "inventory_executable_mappings",
+          "dump_runtime_payloads"
+        ]
+      }
     }
   },
   "required": [
@@ -28,6 +43,20 @@
     "changes_made",
     "evidence_used",
     "remaining_risks"
+  ],
+  "allOf": [
+    {
+      "if": {
+        "properties": { "decision": { "const": "diagnostics" } },
+        "required": ["decision"]
+      },
+      "then": {
+        "required": ["diagnostic_actions"],
+        "properties": {
+          "diagnostic_actions": { "minItems": 1 }
+        }
+      }
+    }
   ],
   "additionalProperties": false
 }

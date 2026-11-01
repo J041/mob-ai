@@ -1,7 +1,9 @@
 import argparse
 import json
 import subprocess
+import sys
 import tempfile
+import types
 from pathlib import Path
 import unittest
 import zipfile
@@ -11,6 +13,74 @@ import pipeline
 
 
 class PipelineTests(unittest.TestCase):
+    def test_adaptive_diagnostic_actions_are_allowlisted_and_bounded(self):
+        self.assertEqual(
+            pipeline.parse_diagnostic_actions("trace_jni_registration,capture_native_exceptions"),
+            ["trace_jni_registration", "capture_native_exceptions"],
+        )
+        with self.assertRaisesRegex(RuntimeError, "Unsupported diagnostic actions"):
+            pipeline.parse_diagnostic_actions("shell_command")
+        with self.assertRaisesRegex(RuntimeError, "at most three"):
+            pipeline.parse_diagnostic_actions(
+                "trace_jni_registration,capture_native_exceptions,trace_termination_calls,inventory_executable_mappings"
+            )
+
+    def test_adaptive_diagnostics_store_bounded_runtime_artifact(self):
+        class FakeScript:
+            def __init__(self):
+                self.callback = None
+
+            def on(self, _event, callback):
+                self.callback = callback
+
+            def load(self):
+                assert self.callback is not None
+                self.callback({
+                    "type": "send",
+                    "payload": {
+                        "source": "mob-ai-diagnostics", "kind": "runtime-payload",
+                        "detail": {"address": "0x1000", "reason": "mprotect"},
+                    },
+                }, b"ELF payload")
+
+        class FakeSession:
+            def create_script(self, _source):
+                return FakeScript()
+
+            def detach(self):
+                pass
+
+        class FakeDevice:
+            def spawn(self, _package):
+                return 123
+
+            def attach(self, _pid):
+                return FakeSession()
+
+            def resume(self, _pid):
+                pass
+
+        fake_frida = types.SimpleNamespace(
+            get_device_manager=lambda: types.SimpleNamespace(
+                add_remote_device=lambda _endpoint: FakeDevice()
+            )
+        )
+        args = argparse.Namespace(
+            device="serial", frida_endpoint="127.0.0.1:27042", observation_seconds=0,
+        )
+        with tempfile.TemporaryDirectory() as temp:
+            run_dir = Path(temp)
+            response = subprocess.CompletedProcess([], 0, "", "")
+            with mock.patch.dict(sys.modules, {"frida": fake_frida}), \
+                    mock.patch.object(pipeline, "adb", return_value=response):
+                manifest_path = pipeline.run_adaptive_diagnostics(
+                    args, run_dir, "com.example", ["dump_runtime_payloads"],
+                )
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            artifact = manifest["artifacts"][0]
+            self.assertEqual(artifact["size"], len(b"ELF payload"))
+            self.assertEqual((run_dir / artifact["path"]).read_bytes(), b"ELF payload")
+
     def test_prepare_reuses_static_artifacts_for_identical_apk(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -148,6 +218,15 @@ class PipelineTests(unittest.TestCase):
             passed, checks = pipeline.evaluate_success(args, "com.example.lab", "ready", "healthy", spec)
         self.assertTrue(passed)
         self.assertTrue(all(check["passed"] for check in checks))
+
+    def test_no_crash_policy_detects_native_fatal_signal(self):
+        args = argparse.Namespace(device="serial", success_regex=None)
+        spec = {"mode": "all", "checks": [{"type": "no_crash"}]}
+        passed, checks = pipeline.evaluate_success(
+            args, "com.example", "", "Fatal signal 11 (SIGSEGV), code 1", spec,
+        )
+        self.assertFalse(passed)
+        self.assertFalse(checks[0]["passed"])
 
     def test_success_policy_v2_repeat_and_ui_checks(self):
         with tempfile.TemporaryDirectory() as temp:

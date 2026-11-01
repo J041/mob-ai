@@ -224,5 +224,32 @@ def validate_provider_output(path: Path, schema_path: Path) -> bool:
             return False
         if rule.get("enum") and item not in rule["enum"]:
             return False
+        if expected == "array":
+            if "minItems" in rule and len(item) < int(rule["minItems"]):
+                return False
+            if "maxItems" in rule and len(item) > int(rule["maxItems"]):
+                return False
+            if rule.get("uniqueItems") and len({json.dumps(entry, sort_keys=True) for entry in item}) != len(item):
+                return False
+            item_rule = rule.get("items") or {}
+            if item_rule.get("enum") and any(entry not in item_rule["enum"] for entry in item):
+                return False
+    for conditional in schema.get("allOf") or []:
+        condition = conditional.get("if") or {}
+        matches = all(
+            key in value and (
+                "const" not in rule or value[key] == rule["const"]
+            )
+            for key, rule in (condition.get("properties") or {}).items()
+        ) and set(condition.get("required") or []).issubset(value)
+        if not matches:
+            continue
+        then = conditional.get("then") or {}
+        if not set(then.get("required") or []).issubset(value):
+            return False
+        for key, rule in (then.get("properties") or {}).items():
+            item = value.get(key)
+            if isinstance(item, list) and "minItems" in rule and len(item) < int(rule["minItems"]):
+                return False
     return True
 

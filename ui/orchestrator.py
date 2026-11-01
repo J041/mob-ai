@@ -36,6 +36,14 @@ GHIDRA_BRIDGE_URL = os.environ.get(
 NATIVE_BATCH_SIZE = 5
 NATIVE_TOTAL_LIMIT = 15
 GHIDRA_PREP_TIMEOUT_SECONDS = int(os.environ.get("MOB_AI_GHIDRA_PREP_TIMEOUT", "600"))
+DIAGNOSTIC_ACTIONS = {
+    "trace_jni_registration",
+    "capture_native_exceptions",
+    "trace_termination_calls",
+    "inventory_executable_mappings",
+    "dump_runtime_payloads",
+}
+MAX_DIAGNOSTIC_ROUNDS = 2
 
 
 class LoopError(RuntimeError):
@@ -1018,6 +1026,63 @@ class LoopRunner:
                 write_summary(run_dir, "codex_boundary_error", records, f"Codex wrote outside candidate.js in iteration {iteration}.")
                 return "codex_boundary_error"
             decision = read_json(decision_path)
+            if decision.get("decision") == "diagnostics":
+                if sha256(candidate) != sha256(candidate_snapshot):
+                    write_summary(
+                        run_dir, "codex_boundary_error", records,
+                        f"{adapter.label} changed candidate.js while requesting read-only diagnostics in iteration {iteration}.",
+                    )
+                    return "codex_boundary_error"
+                prior_rounds = sum(
+                    1 for item in records
+                    if isinstance(item, dict) and isinstance(item.get("diagnostics"), dict)
+                )
+                requested = list(dict.fromkeys(
+                    str(item) for item in (decision.get("diagnostic_actions") or [])
+                ))
+                previously_requested = {
+                    str(action)
+                    for item in records if isinstance(item, dict)
+                    for action in ((item.get("diagnostics") or {}).get("actions") or [])
+                }
+                actions = [action for action in requested if action not in previously_requested]
+                if prior_rounds >= MAX_DIAGNOSTIC_ROUNDS or not actions:
+                    reason = (
+                        f"The bounded {MAX_DIAGNOSTIC_ROUNDS}-round diagnostic allowance is exhausted."
+                        if prior_rounds >= MAX_DIAGNOSTIC_ROUNDS
+                        else "The requested diagnostic actions were already completed."
+                    )
+                    record = {"iteration": iteration, "codex": decision, "validation": None}
+                    records.append(record)
+                    write_json(iteration_dir / "record.json", record)
+                    write_summary(run_dir, "human_review", records, reason)
+                    return "human_review"
+                if len(actions) > 3 or any(action not in DIAGNOSTIC_ACTIONS for action in actions):
+                    write_summary(
+                        run_dir, "provider_error", records,
+                        f"{adapter.label} returned an invalid adaptive diagnostic request in iteration {iteration}.",
+                    )
+                    return "provider_error"
+                try:
+                    diagnostic = self._run_adaptive_diagnostics(
+                        run_dir, config, iteration_dir, iteration, actions,
+                    )
+                except (EnvironmentFailure, OSError, json.JSONDecodeError) as error:
+                    write_summary(
+                        run_dir, "environment_error", records, str(error),
+                        reason="adaptive_diagnostics_failure",
+                    )
+                    return "environment_error"
+                record = {
+                    "iteration": iteration, "candidate": workspace_relative(candidate),
+                    "candidate_sha256": sha256(candidate), "codex": decision,
+                    "diagnostics": diagnostic, "validation": None,
+                }
+                records.append(record)
+                write_json(iteration_dir / "record.json", record)
+                previous_candidate = candidate
+                previous_fingerprint = None
+                continue
             if decision.get("decision") == "human_review":
                 record = {"iteration": iteration, "codex": decision, "validation": None}
                 records.append(record)
@@ -1102,6 +1167,44 @@ class LoopRunner:
             previous_candidate = candidate
         write_summary(run_dir, "max_iterations", records, f"The policy did not pass within this invocation's {additional} attempts.")
         return "max_iterations"
+
+    def _run_adaptive_diagnostics(
+        self, run_dir: Path, config: dict[str, Any], iteration_dir: Path,
+        iteration: int, actions: list[str],
+    ) -> dict[str, Any]:
+        diagnostics_root = run_dir / "diagnostics"
+        existing = {path.resolve() for path in diagnostics_root.glob("pass-*/manifest.json")} if diagnostics_root.is_dir() else set()
+        command = pipeline_args(
+            "--authorized", "--strategy", "frida", "--resume", container_path(run_dir),
+            "--diagnostic-actions", ",".join(actions),
+            "--observation-seconds", str(config["observation_seconds"]),
+            *target_args(config),
+        )
+        if config.get("package"):
+            command.extend(["--package", config["package"]])
+        if config.get("start_frida_server"):
+            command.extend(["--start-frida-server", config["start_frida_server"]])
+        exit_code, _ = run_logged(command, self.log, artifact=iteration_dir / "diagnostics.log")
+        manifests = sorted(
+            (
+                path for path in diagnostics_root.glob("pass-*/manifest.json")
+                if path.resolve() not in existing
+            ),
+            key=lambda path: path.stat().st_mtime,
+        ) if diagnostics_root.is_dir() else []
+        if exit_code != 0 or not manifests:
+            raise EnvironmentFailure(
+                f"Adaptive diagnostics failed operationally in iteration {iteration}."
+            )
+        manifest = manifests[-1]
+        value = read_json(manifest)
+        return {
+            "actions": actions,
+            "manifest": workspace_relative(manifest),
+            "event_count": len(value.get("events") or []),
+            "artifact_count": len(value.get("artifacts") or []),
+            "errors": list(value.get("errors") or []),
+        }
 
     @staticmethod
     def _materialize_native_targets(
@@ -1694,12 +1797,19 @@ Native target selection: {container_path(selection_path)}
 
 Goal: make the smallest evidence-based change to the candidate Frida hook that can satisfy the success policy. Inspect report.json, observations.json, adaptive-plan.json, JADX output, and prior Frida/logcat/validation records. If native evidence is relevant, use read-only Ghidra MCP tools for native libraries from this run.
 
+Adaptive evidence escalation:
+- When existing evidence is insufficient for a narrow candidate but a bounded runtime diagnostic could resolve the uncertainty, return decision `diagnostics` instead of `human_review`.
+- Include one to three unique `diagnostic_actions` selected only from: trace_jni_registration, capture_native_exceptions, trace_termination_calls, inventory_executable_mappings, dump_runtime_payloads.
+- Prefer tracing and inventory before requesting runtime payload dumps. Request dump_runtime_payloads only when evidence indicates dynamically unpacked executable code; the worker enforces five 1 MiB artifacts and a 5 MiB total limit.
+- The deterministic orchestrator executes diagnostics on the exact recorded device and makes the manifest available under diagnostics/pass-*/manifest.json for the next iteration. Do not edit candidate.js when requesting diagnostics.
+- At most {MAX_DIAGNOSTIC_ROUNDS} diagnostic rounds are available, and completed actions cannot be requested again.
+
 Hard boundaries:
 - Edit only {candidate}. Do not modify the APK, pipeline, policy, reports, logs, or another file.
 - Do not run ADB, Frida, the pipeline, install commands, or interact with a device. Deterministic orchestration performs validation.
 - Do not rebuild or resign the APK.
 - Keep hooks narrowly tied to observed anti-root, anti-debugging, or anti-hooking behavior. Do not disable unrelated controls.
-- If evidence is insufficient, the next change is speculative/high-risk, or success requires remote-attestation defeat, return human_review without editing.
+- If evidence is insufficient and no remaining allowlisted diagnostic can resolve it, the next change is speculative/high-risk, or success requires remote-attestation defeat, return human_review without editing.
 - Never claim success; only the structured policy establishes it.
 
 Return the required structured decision after inspecting and, when justified, editing the candidate.
