@@ -118,6 +118,19 @@ class WebAppTests(unittest.TestCase):
         response.close()
         self.assertIn(".job-strip { flex: 0 0 clamp", styles)
         self.assertIn("display: flex; flex-direction: column", styles)
+
+    def test_all_terminal_error_statuses_are_red(self) -> None:
+        response = self.client.get("/styles.css")
+        styles = response.get_data(as_text=True)
+        response.close()
+        for status in (
+            "provider-error", "environment-error", "pipeline-error", "codex-error",
+            "codex-boundary-error", "assessment-failed", "worker-error", "needs-input",
+        ):
+            self.assertIn(f".job-status.status-{status}", styles)
+            self.assertIn(f".attempt-chip b.status-{status}", styles)
+        self.assertIn(".badge.provider_error", styles)
+        self.assertIn(".badge.assessment_failed", styles)
         self.assertIn(".job-group { flex: 0 0 auto", styles)
 
     def test_assessment_rows_share_grid_columns(self) -> None:

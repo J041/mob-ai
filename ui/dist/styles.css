@@ -204,7 +204,17 @@ input::placeholder { color: #465358; }
 .job-summary-copy small { overflow: hidden; color: var(--muted); font-size: 8px; text-overflow: ellipsis; white-space: nowrap; }
 .job-summary-meta { justify-items: end; }
 .job-summary-meta > b { color: var(--green); font: 9px var(--mono); }
-.job-status.status-human-review { color: var(--red); }
+.job-status.status-human-review,
+.job-status.status-provider-error,
+.job-status.status-environment-error,
+.job-status.status-pipeline-error,
+.job-status.status-codex-error,
+.job-status.status-codex-boundary-error,
+.job-status.status-assessment-failed,
+.job-status.status-worker-error,
+.job-status.status-needs-input,
+.job-status.status-error,
+.job-status.status-failed { color: var(--red); }
 .job-status.status-usage-limited { color: var(--amber); }
 .history-cta { display: flex; align-items: center; gap: 6px; border: 1px solid #405632; border-radius: 999px; padding: 4px 7px; color: var(--green); background: rgba(185,247,99,.055); font: normal 8px var(--mono); text-transform: uppercase; letter-spacing: .04em; }
 .history-cta i { display: inline-block; font: normal 14px/8px sans-serif; transition: transform .15s ease; }
@@ -225,7 +235,17 @@ input::placeholder { color: #465358; }
 .attempt-chip:hover, .attempt-chip.active { color: var(--text); background: var(--surface-2); }
 .attempt-chip.active { border-color: #405632; }
 .attempt-chip b { flex: 0 0 auto; color: var(--green); font: 8px var(--mono); white-space: nowrap; }
-.attempt-chip b.status-human-review { color: var(--red); }
+.attempt-chip b.status-human-review,
+.attempt-chip b.status-provider-error,
+.attempt-chip b.status-environment-error,
+.attempt-chip b.status-pipeline-error,
+.attempt-chip b.status-codex-error,
+.attempt-chip b.status-codex-boundary-error,
+.attempt-chip b.status-assessment-failed,
+.attempt-chip b.status-worker-error,
+.attempt-chip b.status-needs-input,
+.attempt-chip b.status-error,
+.attempt-chip b.status-failed { color: var(--red); }
 .attempt-chip b.status-usage-limited { color: var(--amber); }
 .console { flex: 1 1 auto; width: 100%; min-width: 0; min-height: 0; max-height: none; overflow: auto; margin: 0; padding: 16px; background: #080c0e; color: #b9c6c5; font: 10.5px/1.62 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }
 .console-muted { color: #465358; }
@@ -249,8 +269,11 @@ input::placeholder { color: #465358; }
 .badge.success, .badge.success_without_bypass { color: var(--green); background: rgba(185,247,99,.08); }
 .badge.max_iterations { color: var(--amber); background: rgba(246,196,91,.08); }
 .badge.usage_limited { color: var(--amber); background: rgba(246,196,91,.08); }
-.badge.human_review, .badge.pipeline_error, .badge.codex_error, .badge.environment_error, .badge.needs_input { color: var(--red); background: rgba(255,124,124,.08); }
-.badge.assessment_failed { color: var(--amber); background: rgba(246,196,91,.08); }
+.badge.human_review, .badge.pipeline_error, .badge.provider_error, .badge.codex_error,
+.badge.codex_boundary_error, .badge.environment_error, .badge.assessment_failed,
+.badge.worker_error, .badge.needs_input, .badge.error, .badge.failed {
+  color: var(--red); background: rgba(255,124,124,.08);
+}
 .resume-button { border: 1px solid var(--line); background: transparent; color: var(--green); border-radius: 7px; padding: 7px 9px; font-size: 9px; cursor: pointer; }
 .resume-button:disabled { color: #465358; cursor: default; }
 .run-actions { display: flex; justify-content: flex-end; gap: 7px; flex-wrap: wrap; }
