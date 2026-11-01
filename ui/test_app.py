@@ -704,10 +704,22 @@ class WebAppTests(unittest.TestCase):
             self.assertEqual(len(selection["selected"]), 1)
             self.assertEqual(len(selection["queue"]), 1)
 
-            def fake_ghidra(method, _path, body=None):
-                if method == "POST":
+            opened: set[str] = set()
+
+            def fake_ghidra(method, path, body=None):
+                if path == "/list_open_programs":
+                    return {"programs": [
+                        {"name": name, "path": f"/{name}", "is_current": index == 0}
+                        for index, name in enumerate(sorted(opened))
+                    ]}
+                if path == "/open_program":
+                    opened.add(body["path"])
+                    return {"success": True, "name": body["path"]}
+                if path == "/import_file":
+                    name = Path(body["file_path"]).name
+                    opened.add(name)
                     return {"success": True, "data": {
-                        "name": Path(body["file_path"]).name, "analyzing": True,
+                        "name": name, "analyzing": True,
                     }}
                 return {"success": True, "data": {"analyzing": False, "function_count": 42}}
 
@@ -717,8 +729,10 @@ class WebAppTests(unittest.TestCase):
             self.assertEqual(preparation["status"], "complete")
             self.assertEqual(len(preparation["programs"]), 2)
             self.assertTrue(all(item["function_count"] == 42 for item in preparation["programs"]))
-            self.assertEqual(cached, preparation)
-            self.assertEqual(ghidra.call_count, 4)
+            self.assertTrue(all(item["mcp_ready"] for item in preparation["programs"]))
+            self.assertEqual(cached["status"], preparation["status"])
+            self.assertEqual(cached["programs"], preparation["programs"])
+            self.assertEqual(ghidra.call_count, 8)
             self.assertTrue(LoopRunner(StringIO())._replenish_native_queue(run, {
                 "provider": "codex", "model": "test-model", "reasoning_effort": "high",
             }, 1))
@@ -808,6 +822,10 @@ class WebAppTests(unittest.TestCase):
         rendered = " ".join(arguments)
         self.assertIn("/opt/ghidra-mcp/venv/bin/bridge-mcp-ghidra", rendered)
         self.assertIn("GHIDRA_MCP_AUTH_TOKEN", rendered)
+        self.assertIn("http://127.0.0.1:18089", rendered)
+        self.assertIn("GHIDRA_MCP_REQUIRE_PROGRAM_SELECTORS", rendered)
+        self.assertIn("listing,function,program,xref,analysis,malware", rendered)
+        self.assertNotIn("http://reverse-engineering:8089", rendered)
         self.assertNotIn("cmd.exe", rendered)
 
 

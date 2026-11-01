@@ -8,6 +8,7 @@ import traceback
 import uuid
 
 from ui.job_queue import atomic_write_json, claim_next_job, recover_abandoned_jobs, touch_heartbeat, utc_now
+from ui.ghidra_proxy import GhidraLoopbackProxy
 from ui.orchestrator import EnvironmentFailure, LoopError, LoopRunner
 
 
@@ -69,6 +70,9 @@ def execute(directory, state: dict, request: dict) -> None:
 def main() -> int:
     worker_id = f"{os.uname().nodename}-{uuid.uuid4().hex[:8]}"
     stopping = threading.Event()
+    ghidra_proxy = GhidraLoopbackProxy(
+        os.environ.get("GHIDRA_MCP_URL", "http://reverse-engineering:8089")
+    ).start()
 
     def stop(_signum, _frame) -> None:
         stopping.set()
@@ -83,14 +87,17 @@ def main() -> int:
     recover_abandoned_jobs()
     heartbeat_thread = threading.Thread(target=heartbeat, name="mob-ai-worker-heartbeat", daemon=True)
     heartbeat_thread.start()
-    while not stopping.is_set():
-        claimed = claim_next_job(worker_id)
-        if claimed:
-            execute(*claimed)
-            continue
-        stopping.wait(POLL_SECONDS)
-    touch_heartbeat(worker_id)
-    return 0
+    try:
+        while not stopping.is_set():
+            claimed = claim_next_job(worker_id)
+            if claimed:
+                execute(*claimed)
+                continue
+            stopping.wait(POLL_SECONDS)
+        touch_heartbeat(worker_id)
+        return 0
+    finally:
+        ghidra_proxy.close()
 
 
 if __name__ == "__main__":

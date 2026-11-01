@@ -147,6 +147,13 @@ Security defaults:
 - MCP write tools require user approval in Codex;
 - Ghidra MCP and its Python bridge are version-pinned and checksum-verified.
 
+For unattended assessment reasoning, the worker exposes the private Compose backend
+through a token-preserving loopback-only relay because the upstream MCP bridge accepts
+only loopback server URLs. Trusted orchestration imports, analyzes, opens, and verifies
+the selected programs before the provider starts. Provider sessions auto-connect through
+that relay with strict program selectors and a bounded set of analysis groups; prompts
+forbid connection, import, open, and other state-changing MCP tools.
+
 Build, start, and verify the backend:
 
 ```powershell

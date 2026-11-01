@@ -1,14 +1,49 @@
 from __future__ import annotations
 
+import http.server
 import tempfile
 from pathlib import Path
+import threading
 import unittest
+import urllib.request
 from unittest import mock
 
 from ui import job_queue, worker
+from ui.ghidra_proxy import GhidraLoopbackProxy
 
 
 class DurableWorkerTests(unittest.TestCase):
+    def test_ghidra_proxy_is_loopback_only_and_preserves_http(self) -> None:
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                body = f"{self.path}|{self.headers.get('Authorization', '')}".encode()
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, _format, *_args) -> None:
+                pass
+
+        upstream = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=upstream.serve_forever, daemon=True)
+        thread.start()
+        proxy = GhidraLoopbackProxy(
+            f"http://127.0.0.1:{upstream.server_address[1]}", port=0,
+        ).start()
+        try:
+            request = urllib.request.Request(
+                f"{proxy.url}/check_connection", headers={"Authorization": "Bearer test-token"},
+            )
+            with urllib.request.urlopen(request, timeout=3) as response:
+                self.assertEqual(response.read().decode(), "/check_connection|Bearer test-token")
+            self.assertTrue(proxy.url.startswith("http://127.0.0.1:"))
+        finally:
+            proxy.close()
+            upstream.shutdown()
+            upstream.server_close()
+            thread.join(timeout=3)
+
     def test_claim_is_atomic_and_persists_running_state(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

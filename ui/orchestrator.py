@@ -29,6 +29,10 @@ CODEX = shutil.which("codex") or "codex"
 GHIDRA_BRIDGE = "/opt/ghidra-mcp/venv/bin/bridge-mcp-ghidra"
 GHIDRA_URL = os.environ.get("GHIDRA_MCP_URL", "http://reverse-engineering:8089")
 GHIDRA_TOKEN = os.environ.get("GHIDRA_MCP_AUTH_TOKEN", "")
+GHIDRA_BRIDGE_URL = os.environ.get(
+    "MOB_AI_GHIDRA_BRIDGE_URL",
+    f"http://127.0.0.1:{os.environ.get('MOB_AI_GHIDRA_PROXY_PORT', '18089')}",
+)
 NATIVE_BATCH_SIZE = 5
 NATIVE_TOTAL_LIMIT = 15
 GHIDRA_PREP_TIMEOUT_SECONDS = int(os.environ.get("MOB_AI_GHIDRA_PREP_TIMEOUT", "600"))
@@ -211,13 +215,16 @@ def checkpoint_recovery_available(summary: dict[str, Any]) -> bool:
 
 
 def codex_config() -> str:
-    bridge_env = {"GHIDRA_MCP_URL": GHIDRA_URL}
+    bridge_env = {
+        "GHIDRA_MCP_URL": GHIDRA_BRIDGE_URL,
+        "GHIDRA_MCP_REQUIRE_PROGRAM_SELECTORS": "1",
+    }
     if GHIDRA_TOKEN:
         bridge_env["GHIDRA_MCP_AUTH_TOKEN"] = GHIDRA_TOKEN
     env_toml = ", ".join(f"{key} = {json.dumps(value)}" for key, value in bridge_env.items())
     return f'''[mcp_servers.ghidra]
 command = "{GHIDRA_BRIDGE}"
-args = ["--transport", "stdio"]
+args = ["--transport", "stdio", "--default-groups", "listing,function,program,xref,analysis,malware"]
 env = {{ {env_toml} }}
 enabled = true
 required = false
@@ -229,7 +236,10 @@ default_tools_approval_mode = "auto"
 
 def codex_config_overrides() -> list[str]:
     """Force container-native MCP settings even when host project config is present."""
-    bridge_env = {"GHIDRA_MCP_URL": GHIDRA_URL}
+    bridge_env = {
+        "GHIDRA_MCP_URL": GHIDRA_BRIDGE_URL,
+        "GHIDRA_MCP_REQUIRE_PROGRAM_SELECTORS": "1",
+    }
     if GHIDRA_TOKEN:
         bridge_env["GHIDRA_MCP_AUTH_TOKEN"] = GHIDRA_TOKEN
     env_toml = "{ " + ", ".join(
@@ -237,7 +247,10 @@ def codex_config_overrides() -> list[str]:
     ) + " }"
     values = {
         "mcp_servers.ghidra.command": json.dumps(GHIDRA_BRIDGE),
-        "mcp_servers.ghidra.args": json.dumps(["--transport", "stdio"]),
+        "mcp_servers.ghidra.args": json.dumps([
+            "--transport", "stdio", "--default-groups",
+            "listing,function,program,xref,analysis,malware",
+        ]),
         "mcp_servers.ghidra.env": env_toml,
         "mcp_servers.ghidra.enabled": "true",
         "mcp_servers.ghidra.required": "false",
@@ -252,12 +265,18 @@ def codex_config_overrides() -> list[str]:
 
 
 def claude_mcp_config() -> dict[str, Any]:
-    environment = {"GHIDRA_MCP_URL": GHIDRA_URL}
+    environment = {
+        "GHIDRA_MCP_URL": GHIDRA_BRIDGE_URL,
+        "GHIDRA_MCP_REQUIRE_PROGRAM_SELECTORS": "1",
+    }
     if GHIDRA_TOKEN:
         environment["GHIDRA_MCP_AUTH_TOKEN"] = GHIDRA_TOKEN
     return {"mcpServers": {"ghidra": {
         "type": "stdio", "command": GHIDRA_BRIDGE,
-        "args": ["--transport", "stdio"], "env": environment,
+        "args": [
+            "--transport", "stdio", "--default-groups",
+            "listing,function,program,xref,analysis,malware",
+        ], "env": environment,
     }}}
 
 
@@ -1006,6 +1025,45 @@ class LoopRunner:
         return selected
 
     @staticmethod
+    def _ensure_ghidra_programs_open(programs: list[dict[str, Any]]) -> None:
+        """Open every analyzed target through trusted orchestration before MCP reasoning."""
+        targets = [
+            item for item in programs
+            if item.get("status") == "complete" and str(item.get("program") or "")
+        ]
+        if not targets:
+            return
+
+        def open_roster() -> dict[str, dict[str, Any]]:
+            response = ghidra_request("GET", "/list_open_programs")
+            data = response.get("data") if isinstance(response.get("data"), dict) else response
+            values = data.get("programs") if isinstance(data, dict) else []
+            return {
+                str(item.get("name") or ""): item for item in values
+                if isinstance(item, dict) and item.get("name")
+            }
+
+        roster = open_roster()
+        for entry in targets:
+            program = str(entry["program"])
+            if program not in roster:
+                ghidra_request("POST", "/open_program", {
+                    "path": program,
+                    "auto_analyze": False,
+                })
+        roster = open_roster()
+        missing = [str(item["program"]) for item in targets if str(item["program"]) not in roster]
+        if missing:
+            raise LoopError(f"Ghidra did not keep prepared programs open: {', '.join(missing)}")
+        for entry in targets:
+            opened = roster[str(entry["program"])]
+            entry.update({
+                "mcp_ready": True,
+                "open_path": opened.get("path"),
+                "is_current": bool(opened.get("is_current")),
+            })
+
+    @staticmethod
     def _prepare_ghidra_batch(run_dir: Path) -> dict[str, Any]:
         """Import and fully auto-analyze the active native batch before provider reasoning."""
         selection_path = run_dir / "native-selection.json"
@@ -1027,6 +1085,9 @@ class LoopRunner:
         expected = sorted(str(item.get("sha256") or "") for item in variants)
         existing = read_json(manifest_path) if manifest_path.is_file() else {}
         if existing.get("status") == "complete" and existing.get("expected_sha256") == expected:
+            LoopRunner._ensure_ghidra_programs_open(existing.get("programs") or [])
+            existing["updated_utc"] = datetime.now(timezone.utc).isoformat()
+            write_json(manifest_path, existing)
             return existing
         if not variants:
             value = {
@@ -1115,6 +1176,8 @@ class LoopRunner:
             "status": "complete" if programs and all(item.get("status") == "complete" for item in programs) else "partial",
             "programs": programs, "updated_utc": datetime.now(timezone.utc).isoformat(),
         })
+        LoopRunner._ensure_ghidra_programs_open(programs)
+        value["updated_utc"] = datetime.now(timezone.utc).isoformat()
         write_json(manifest_path, value)
         return value
 
@@ -1437,7 +1500,7 @@ Codex/provider native triage selected these exact targets:
 {rendered_targets}
 The deterministic orchestrator prepared them before this reasoning step. Preparation manifest: {preparation_path}
 Preparation status: {preparation.get('status', 'missing')}; Ghidra programs: {json.dumps(prepared_programs)}
-Inspect every complete active program with read-only Ghidra MCP before concluding this iteration, and cite the preparation manifest and inspected paths in evidence_used. Open the named prepared programs rather than importing duplicates. If a target is recorded as partial or failed, report that limitation and use MCP import only as a bounded fallback for that exact target. Do not patch a binary."""
+Every complete program above is already imported, analyzed, open, and marked mcp_ready by trusted orchestration. Inspect each one with approval-free, read-only Ghidra MCP tools before concluding this iteration, always passing its exact program name, and cite the preparation manifest and inspected paths in evidence_used. Do not call connect_instance, import_file, open_program, load_tool_group, or any other approval-gated or state-changing MCP tool. If a target is recorded as partial or failed, report that limitation. Do not patch a binary."""
         else:
             native_guidance = f"{queue_context} Native triage selected no Ghidra targets. Do not infer a native detector from raw string matches alone."
         if reasoning_mode == "parallel":
