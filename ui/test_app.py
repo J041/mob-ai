@@ -810,8 +810,8 @@ class WebAppTests(unittest.TestCase):
             self.assertEqual(result["event_count"], 1)
             self.assertEqual(result["actions"], ["trace_jni_registration"])
 
-    @patch("ui.orchestrator.run_logged", return_value=(0, ""))
-    @patch("ui.orchestrator.provider_adapter")
+    @patch("ui.orchestrator_native.run_logged", return_value=(0, ""))
+    @patch("ui.orchestrator_native.provider_adapter")
     def test_native_selection_is_provider_chosen_bounded_and_extracted(self, adapter_factory, _run_logged) -> None:
         class FakeAdapter:
             label = "Codex"
@@ -920,7 +920,7 @@ class WebAppTests(unittest.TestCase):
                     }}
                 return {"success": True, "data": {"analyzing": False, "function_count": 42}}
 
-            with patch("ui.orchestrator.ghidra_request", side_effect=fake_ghidra) as ghidra:
+            with patch("ui.orchestrator_native.ghidra_request", side_effect=fake_ghidra) as ghidra:
                 preparation = LoopRunner._prepare_ghidra_batch(run)
                 cached = LoopRunner._prepare_ghidra_batch(run)
             self.assertEqual(preparation["status"], "complete")

@@ -12,7 +12,8 @@ from ui.job_queue import (
     read_json, recover_abandoned_jobs, touch_heartbeat, utc_now,
 )
 from ui.ghidra_proxy import GhidraLoopbackProxy
-from ui.orchestrator import EnvironmentFailure, LoopError, LoopRunner
+from ui.orchestrator import LoopRunner
+from ui.orchestrator_runtime import EnvironmentFailure, LoopError
 
 
 POLL_SECONDS = float(os.environ.get("MOB_AI_WORKER_POLL_SECONDS", "1"))

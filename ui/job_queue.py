@@ -7,7 +7,7 @@ from pathlib import Path
 import uuid
 from typing import Any
 
-from ui.orchestrator import WORKSPACE
+from ui.orchestrator_runtime import WORKSPACE
 
 
 STATE_ROOT = WORKSPACE / "ui" / ".state" / "jobs"
