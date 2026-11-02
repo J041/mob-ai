@@ -7,6 +7,7 @@ import { createRunController } from './runs.js';
 import { createAuthController } from './auth.js';
 import { createAssistantController } from './assistant.js';
 import { createDeviceController } from './devices.js';
+import { connectOverviewEvents } from './events.js';
 import { updatePolicyBuilder } from './policy-builder.js';
 
 function setTab(name) {
@@ -242,15 +243,17 @@ async function refreshSelectedJob() {
     $('#livePill').classList.toggle('running', job.running);
     if (job.auto_resume_job_id) {
       state.selectedJob = job.auto_resume_job_id;
-      schedulePoll(500);
+      if (state.eventsConnected) refreshSelectedJob();
+      else schedulePoll(500);
       return;
     }
-    if (job.running || job.status === 'queued') schedulePoll();
-    else if (job.status === 'usage_limited' && job.auto_resume && job.resume_after_utc) schedulePoll(15000);
+    if (!state.eventsConnected && (job.running || job.status === 'queued')) schedulePoll();
+    else if (!state.eventsConnected && job.status === 'usage_limited' && job.auto_resume && job.resume_after_utc) schedulePoll(15000);
   } catch (error) { toast(error.message, true); }
 }
 
 function schedulePoll(delay = 2200) {
+  if (state.eventsConnected) return;
   clearTimeout(state.poll);
   state.poll = setTimeout(async () => {
     await refreshSelectedJob();
@@ -409,6 +412,10 @@ $('#copyAuthCode').addEventListener('click', async event => {
 });
 
 refreshOverview();
+connectOverviewEvents({
+  onOverview: renderOverview,
+  onFallback: () => schedulePoll(1200),
+});
 discoverDevices(false);
 updateTransport();
 updatePolicyBuilder();

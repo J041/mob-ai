@@ -26,6 +26,7 @@ from assessment.orchestrator import (
     validate_decision_schema_registry,
 )
 from backend.providers import ProviderRequest, detect_usage_limit, provider_adapter, validate_provider_output
+from backend.events import activity_revision
 
 
 class WebAppTests(unittest.TestCase):
@@ -107,6 +108,30 @@ class WebAppTests(unittest.TestCase):
         self.assertTrue(payload["diagnostic_recipes"])
         self.assertIn("ui_description", payload["diagnostic_recipes"][0])
         self.assertIn("artifact_limits", payload["diagnostic_recipes"][0])
+
+    def test_event_stream_emits_initial_overview(self) -> None:
+        response = self.client.get("/api/events", buffered=False)
+        try:
+            event = next(response.response).decode("utf-8")
+        finally:
+            response.close()
+        self.assertEqual(response.content_type, "text/event-stream; charset=utf-8")
+        self.assertIn("event: overview", event)
+        self.assertIn('"runs":', event)
+        self.assertEqual(response.headers["X-Accel-Buffering"], "no")
+
+    def test_event_revision_tracks_live_job_output(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            jobs = root / "jobs" / ("a" * 32)
+            jobs.mkdir(parents=True)
+            runs_root = root / "runs"
+            runs_root.mkdir()
+            with patch("backend.events.JOB_STATE_ROOT", root), patch("backend.events.RUNS_ROOT", runs_root):
+                before = activity_revision()
+                (jobs / "output.log").write_text("new worker output\n", encoding="utf-8")
+                after = activity_revision()
+        self.assertNotEqual(before, after)
 
     def test_claude_adapter_normalizes_json_result(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

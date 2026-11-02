@@ -12,7 +12,7 @@ import time
 from types import SimpleNamespace
 import uuid
 
-from flask import Flask, jsonify, request, send_file, send_from_directory
+from flask import Flask, Response, jsonify, request, send_file, send_from_directory, stream_with_context
 from werkzeug.exceptions import RequestEntityTooLarge
 from werkzeug.utils import secure_filename
 
@@ -45,6 +45,7 @@ from backend.auth import (
 )
 from backend.common import json_file, strip_terminal_controls, subprocess_capture_text, truthy, utc_now
 from backend.requests import ContinuationRequest, DeviceReadinessRequest, StartAssessmentRequest
+from backend.events import overview_event_stream
 from backend.run_catalog import recorded_success_policy, runs
 from backend.jobs import (
     infer_attempt_kind, infer_job_run_id, job_state, jobs, start_job,
@@ -385,7 +386,7 @@ def health():
     )
 
 
-def overview():
+def overview_payload() -> dict:
     apk_paths = [*WORKSPACE.glob("*.apk"), *UPLOAD_ROOT.glob("*.apk")]
     apks = [{"name": path.name, "path": workspace_relative(path), "size": path.stat().st_size} for path in apk_paths if path.is_file()]
     specs = [{"name": path.name, "path": workspace_relative(path)} for path in WORKSPACE.glob("*.json") if re.search(r"success|policy|spec", path.name, re.I)]
@@ -396,13 +397,27 @@ def overview():
     claude_state = provider_auth_state("claude")
     codex_models = provider_model_catalog("codex")
     claude_models = provider_model_catalog("claude")
-    return jsonify(
-        apks=apks, success_specs=specs, runs=runs(), jobs=jobs(),
-        diagnostic_recipes=diagnostic_recipe_catalog(),
-        codex=codex_state, models=codex_models,
-        providers={"codex": codex_state, "claude": claude_state},
-        model_catalogs={"codex": codex_models, "claude": claude_models},
+    return {
+        "apks": apks, "success_specs": specs, "runs": runs(), "jobs": jobs(),
+        "diagnostic_recipes": diagnostic_recipe_catalog(),
+        "codex": codex_state, "models": codex_models,
+        "providers": {"codex": codex_state, "claude": claude_state},
+        "model_catalogs": {"codex": codex_models, "claude": claude_models},
+    }
+
+
+def overview():
+    return jsonify(overview_payload())
+
+
+def events():
+    response = Response(
+        stream_with_context(overview_event_stream(overview_payload)),
+        content_type="text/event-stream; charset=utf-8",
     )
+    response.headers["Cache-Control"] = "no-cache, no-transform"
+    response.headers["X-Accel-Buffering"] = "no"
+    return response
 
 
 def models():
@@ -825,7 +840,7 @@ def retry():
 
 _handlers = SimpleNamespace(**{
     name: globals()[name] for name in (
-        "health", "overview", "models", "providers", "upload_apk",
+        "health", "overview", "events", "models", "providers", "upload_apk",
         "get_provider_auth", "begin_provider_auth", "logout_provider_auth",
         "get_auth", "begin_auth", "logout_auth", "devices",
         "connect_wireless_device", "device_readiness", "pair_wireless_device",

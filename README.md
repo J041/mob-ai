@@ -46,6 +46,11 @@ job requests and state under the ignored `worker/.state/` directory using atomic
 The dedicated worker claims queued jobs on disk, so restarting the web UI does not
 interrupt an assessment. If the worker itself stops during device interaction, the
 attempt is preserved as `interrupted` instead of silently repeating side effects.
+The dashboard receives run, attempt, and live-output changes through the
+`/api/events` server-sent event stream. The server watches bounded control files under
+`worker/.state/` and top-level run results, emitting a snapshot only when their
+revision changes plus an idle keepalive every 15 seconds. Browsers reconnect
+automatically; HTTP polling remains available only as a compatibility fallback.
 The separate Ghidra service is reachable only on the private Compose network and
 requires a bearer token. Wireless pairing
 codes are submitted directly to `adb pair` over stdin, cleared from the form after

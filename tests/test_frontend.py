@@ -42,7 +42,8 @@ class FrontendTests(unittest.TestCase):
         for path in (
             "/scripts/app.js", "/scripts/core.js", "/scripts/models.js",
             "/scripts/artifacts.js", "/scripts/assistant.js", "/scripts/auth.js",
-            "/scripts/devices.js", "/scripts/policy-builder.js", "/scripts/runs.js",
+            "/scripts/devices.js", "/scripts/events.js", "/scripts/policy-builder.js",
+            "/scripts/runs.js",
         ):
             response = self.client.get(path)
             self.assertEqual(response.status_code, 200, path)
@@ -54,6 +55,7 @@ class FrontendTests(unittest.TestCase):
         self.assertIn("from './core.js'", app_script)
         self.assertIn("from './artifacts.js'", app_script)
         self.assertIn("from './models.js'", app_script)
+        self.assertIn("connectOverviewEvents", app_script)
 
     def test_reassessment_entry_is_in_continue_workflow(self) -> None:
         response = self.client.get("/")
