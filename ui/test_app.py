@@ -22,7 +22,7 @@ from ui.app import (
 from ui.orchestrator import (
     WORKSPACE, LoopRunner, attempt_fingerprint, codex_config_overrides,
     codex_multi_agent_args, codex_reasoning_args, checkpoint_recovery_available,
-    frida_recovery_available, usage_limit_recovery_available,
+    frida_recovery_available, terminal_outcome, usage_limit_recovery_available,
 )
 from ui.providers import ProviderRequest, detect_usage_limit, provider_adapter, validate_provider_output
 
@@ -132,6 +132,14 @@ class WebAppTests(unittest.TestCase):
         self.assertIn(".badge.provider_error", styles)
         self.assertIn(".badge.assessment_failed", styles)
         self.assertIn(".job-group { flex: 0 0 auto", styles)
+
+    def test_actionable_terminal_status_ui_is_visible(self) -> None:
+        response = self.client.get("/app.js")
+        script = response.get_data(as_text=True)
+        response.close()
+        self.assertIn("terminal.recommended_action", script)
+        self.assertIn("Recommended:", script)
+        self.assertIn("job-terminal-reason", script)
 
     def test_assessment_rows_share_grid_columns(self) -> None:
         response = self.client.get("/styles.css")
@@ -1001,6 +1009,34 @@ class WebAppTests(unittest.TestCase):
             "status": "human_review", "recoverable": False,
             "checkpoint": None,
         }))
+
+    def test_terminal_outcome_explains_hidden_payload_and_remaining_diagnostics(self) -> None:
+        outcome = terminal_outcome({
+            "status": "human_review",
+            "detail": "The hidden runtime payload was unavailable and the payload dump produced no artifacts.",
+            "iterations": [
+                {"iteration": 1, "diagnostics": {"actions": ["dump_runtime_payloads"]}},
+                {"iteration": 2, "codex": {"decision": "human_review"}},
+            ],
+        })
+        self.assertEqual(outcome["code"], "protected_payload_unavailable")
+        self.assertEqual(outcome["diagnostics"], {"used": 1, "limit": 2, "remaining": 1})
+        self.assertEqual(outcome["action"], "retry_diagnostics")
+
+    def test_terminal_outcome_requires_completed_rounds_before_exhausted(self) -> None:
+        summary = {
+            "status": "human_review", "detail": "Both bounded diagnostic rounds are exhausted.",
+            "iterations": [{"diagnostics": {}}, {"diagnostics": {}}],
+        }
+        self.assertEqual(terminal_outcome(summary)["code"], "diagnostic_budget_exhausted")
+
+    def test_terminal_outcome_classifies_no_progress(self) -> None:
+        outcome = terminal_outcome({
+            "status": "assessment_failed", "reason": "no_progress",
+            "detail": "Two consecutive validations matched.", "iterations": [],
+        })
+        self.assertEqual(outcome["code"], "no_progress")
+        self.assertEqual(outcome["action"], "compare_attempts")
 
     def test_codex_uses_container_native_ghidra_bridge(self) -> None:
         arguments = codex_config_overrides()

@@ -265,6 +265,9 @@ input::placeholder { color: #465358; }
 .run-main strong { display: block; margin-bottom: 4px; font: 12px var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .run-main small, .run-cell small { color: var(--muted); font-size: 9px; }
 .run-cell { display: grid; gap: 4px; font: 10px var(--mono); color: #c3cecc; }
+.run-outcome { min-width: 0; display: grid; justify-items: start; gap: 5px; }
+.run-outcome small { max-width: 150px; color: var(--red); font: 8px/1.35 var(--mono); text-transform: uppercase; letter-spacing: .035em; }
+.outcome-action { max-width: 190px; display: -webkit-box; overflow: hidden; color: var(--muted); font-size: 8px; line-height: 1.4; -webkit-box-orient: vertical; -webkit-line-clamp: 3; }
 .badge { justify-self: start; padding: 5px 7px; border-radius: 999px; background: #1b272a; color: #a5b4b5; font: 8px var(--mono); text-transform: uppercase; letter-spacing: .06em; }
 .badge.success, .badge.success_without_bypass { color: var(--green); background: rgba(185,247,99,.08); }
 .badge.max_iterations { color: var(--amber); background: rgba(246,196,91,.08); }
@@ -277,6 +280,8 @@ input::placeholder { color: #465358; }
 .resume-button { border: 1px solid var(--line); background: transparent; color: var(--green); border-radius: 7px; padding: 7px 9px; font-size: 9px; cursor: pointer; }
 .resume-button:disabled { color: #465358; cursor: default; }
 .run-actions { display: flex; justify-content: flex-end; gap: 7px; flex-wrap: wrap; }
+.job-terminal-reason { max-width: 150px; color: var(--red); font: 7.5px/1.25 var(--mono); text-align: right; text-transform: uppercase; }
+.recommended-action { color: var(--green); }
 .resume-button.diagnostic { border-color: #53653c; background: rgba(185,247,99,.045); white-space: nowrap; }
 .resume-button.diagnostic:hover { border-color: var(--green); background: rgba(185,247,99,.09); }
 .resume-button.artifacts { color: #bcd9d6; white-space: nowrap; }

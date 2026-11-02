@@ -23,7 +23,7 @@ from werkzeug.utils import secure_filename
 from ui.orchestrator import (
     LoopError, RUNS_ROOT, WORKSPACE,
     checkpoint_recovery_available, frida_recovery_available, read_json,
-    sha256, usage_limit_recovery_available, workspace_relative, write_json,
+    sha256, terminal_outcome, usage_limit_recovery_available, workspace_relative, write_json,
 )
 from ui.job_queue import HEARTBEAT_PATH, STATE_ROOT, atomic_write_json
 from ui.providers import PROVIDER_IDS, ProviderRequest, provider_adapter, validate_provider_output
@@ -237,6 +237,7 @@ def artifact_manifest(run_id: str) -> dict:
     directory = resolve_run_directory(run_id)
     report = json_file(directory / "report.json") or {}
     summary = json_file(directory / "codex-loop-result.json") or {}
+    terminal = terminal_outcome(summary)
     categories = []
     allowed: set[str] = set()
     for identifier, label, description, patterns in ARTIFACT_CATEGORIES:
@@ -265,6 +266,7 @@ def artifact_manifest(run_id: str) -> dict:
             "id": run_id,
             "package": str(report.get("package") or run_id),
             "status": str(summary.get("status") or "analysis"),
+            "terminal": terminal,
             "created_utc": str(report.get("created_utc") or ""),
         },
         "categories": categories,
@@ -1256,6 +1258,7 @@ def runs() -> list[dict]:
         checkpoint_recoverable = bool(loop and config and checkpoint_recovery_available(loop))
         usage_recoverable = bool(loop and config and usage_limit_recovery_available(loop))
         usage = (loop.get("usage") or {}) if loop else {}
+        terminal = terminal_outcome(loop)
         resumable = bool(loop and loop.get("status") == "max_iterations" and config)
         retryable = bool(loop and config and (directory / "original.apk").is_file())
         actual_model = str(config.get("model") or "") if config else ""
@@ -1278,6 +1281,7 @@ def runs() -> list[dict]:
             "observation_events": int(latest.get("observation_events") or 0),
             "status": str(loop.get("status") if loop else ("success" if latest.get("success") else "analysis")),
             "detail": str(loop.get("detail") if loop else ""),
+            "terminal": terminal,
             "iterations": len(loop.get("iterations") or []) if loop else 0,
             "resumable": resumable,
             "frida_recoverable": frida_recoverable,

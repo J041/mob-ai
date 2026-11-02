@@ -329,6 +329,14 @@ A `human_review` run caused specifically by a recognized Frida connection or ser
 
 Operational ADB, Frida or device failures use `environment_error`, not `human_review`. When the failure occurred during observation or candidate validation, the run exposes **Recover** and records the exact checkpoint in `codex-loop-result.json`. Observation recovery keeps JADX output; validation recovery reuses the already-reviewed candidate and Codex decision. `needs_input` identifies missing or incompatible user configuration, while `assessment_failed` means validation completed but the structured policy remained unsatisfied with no justified progress. Genuine evidence or protection ambiguity remains `human_review`.
 
+Every non-success terminal summary also contains a structured `terminal` outcome with
+a stable cause code, operator-facing label, explanation, recommended action, and
+diagnostic-round usage. The dashboard derives the same structure for older runs
+without modifying their evidence. This distinguishes causes such as unavailable
+protected payloads, instrumentation perturbation, insufficient causal evidence,
+possible remote attestation, provider failures, and device/tool failures while
+preserving the compatible top-level status.
+
 For a wireless physical device, replace `--device SERIAL_FROM_ADB` with `--wireless-connect IP:CONNECTION_PORT`; add `--wireless-pair IP:PAIRING_PORT` on the first connection. The same installation, Frida forwarding, logging, and success checks then apply.
 
 If `frida-server` is already running, omit `--start-frida-server`. The pipeline forwards that device's port 27042 and connects through `127.0.0.1:27042`. For a remote server, use `--frida-endpoint HOST:PORT`.

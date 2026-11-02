@@ -174,13 +174,18 @@ function renderRuns(runs) {
   }
   list.innerHTML = runs.map(run => {
     const native = run.native_queue || {};
+    const terminal = run.terminal || {};
     const nativeProgress = native.total ? ` · native batch ${native.batch}/${native.batches} · ${native.processed}/${native.total} processed` : '';
     return `
     <article class="run-row">
       <div class="run-main"><strong>${escapeText(run.package || run.id)}</strong><small>${escapeText(run.id)} · ${run.static_findings} static findings${escapeText(nativeProgress)}</small></div>
       <div class="run-cell"><span>${escapeText(run.target || 'no target')}</span><small>${run.derived_from_run ? `derived from ${escapeText(run.derived_from_run)} - ` : ''}${escapeText(run.transport || 'analysis only')}</small></div>
       <div class="run-cell"><span>${run.iterations} iterations</span><small>${run.reasoning_mode === 'parallel' ? `${run.specialist_count} specialists` : 'single agent'} · ${run.observation_events} observations</small></div>
-      <span class="badge ${escapeText(run.status)}">${escapeText(run.status.replaceAll('_', ' '))}</span>
+      <div class="run-outcome">
+        <span class="badge ${escapeText(run.status)}">${escapeText(run.status.replaceAll('_', ' '))}</span>
+        ${terminal.label ? `<small title="${escapeText(terminal.explanation || '')}">${escapeText(terminal.label)}</small>` : ''}
+        ${terminal.recommended_action ? `<span class="outcome-action" title="${escapeText(terminal.recommended_action)}">${escapeText(terminal.recommended_action)}</span>` : ''}
+      </div>
       <div class="run-actions">
         <button class="resume-button assistant" data-assistant="${escapeText(run.id)}">Ask assistant</button>
         <button class="resume-button artifacts" data-artifacts="${escapeText(run.id)}">Artifacts</button>
@@ -400,7 +405,8 @@ async function openArtifactBrowser(runId, requestedPath = '') {
     if (state.artifactRun !== runId) return;
     state.artifactManifest = manifest;
     $('#artifactTitle').textContent = manifest.run.package || manifest.run.id;
-    $('#artifactSubtitle').textContent = `${manifest.run.id} · ${String(manifest.run.status || 'analysis').replaceAll('_', ' ')}`;
+    const terminal = manifest.run.terminal || {};
+    $('#artifactSubtitle').textContent = `${manifest.run.id} · ${String(manifest.run.status || 'analysis').replaceAll('_', ' ')}${terminal.label ? ` · ${terminal.label}` : ''}`;
     $('#artifactCategories').innerHTML = manifest.categories.map(category => `
       <button class="artifact-category" data-artifact-category="${escapeText(category.id)}">
         <strong>${escapeText(category.label)}</strong><span>${category.files.length}</span>
@@ -508,6 +514,7 @@ function renderJobs(jobs) {
   strip.innerHTML = [...groups.entries()].slice(0, 6).map(([key, attempts]) => {
     const latest = attempts[0];
     const run = state.overview?.runs.find(item => item.id === latest.run_id);
+    const terminal = run?.terminal || {};
     const selectedHere = attempts.some(job => job.id === state.selectedJob);
     const status = latest.running ? 'RUNNING' : String(latest.status || `exit ${latest.exit_code ?? '?'}`).replaceAll('_', ' ').toUpperCase();
     const title = run?.package || latest.run_id || latest.label;
@@ -528,7 +535,7 @@ function renderJobs(jobs) {
       return `<details class="job-group attempt-group ${selectedHere ? 'active' : ''}" data-run-group="${escapeText(key)}" ${state.expandedRuns.has(key) ? 'open' : ''}>
         <summary class="job-group-summary">
           <span class="job-summary-copy"><strong>${escapeText(title)}</strong><small>${escapeText(latest.run_id)} &middot; ${attempts.length} attempts</small></span>
-          <span class="job-summary-meta"><b class="job-status ${statusClass(latest.running ? 'running' : latest.status)}">${escapeText(status)}</b><em class="history-cta"><span class="history-show">View ${attempts.length} attempts</span><span class="history-hide">Hide attempts</span><i aria-hidden="true">&#8250;</i></em></span>
+          <span class="job-summary-meta"><b class="job-status ${statusClass(latest.running ? 'running' : latest.status)}">${escapeText(status)}</b>${!latest.running && terminal.label ? `<small class="job-terminal-reason">${escapeText(terminal.label)}</small>` : ''}<em class="history-cta"><span class="history-show">View ${attempts.length} attempts</span><span class="history-hide">Hide attempts</span><i aria-hidden="true">&#8250;</i></em></span>
         </summary>
         <div class="attempt-list">${history}</div>
       </details>`;
@@ -968,6 +975,7 @@ function updateResumeSummary() {
     return;
   }
   const policy = run.success_policy || {};
+  const terminal = run.terminal || {};
   reassessButton.disabled = false;
   policyHash.value = policy.sha256 || '';
   policyName.textContent = policy.valid ? policy.name : `${policy.name || 'Recorded success policy'} - unavailable or modified`;
@@ -994,7 +1002,10 @@ function updateResumeSummary() {
     ? 'Creates a new attempt under this assessment without overwriting earlier evidence.'
     : 'The previous candidate, validation delta, target, and policy hashes will be verified before continuation.';
   const mode = run.reasoning_mode === 'parallel' ? `parallel · ${run.specialist_count} specialists` : 'single agent';
-  summary.innerHTML = `<span>↳</span><p><strong>${escapeText(run.package || run.id)}</strong><br>${run.iterations} completed iterations · ${escapeText(run.target || 'unknown target')} · ${escapeText(mode)}<br>${escapeText(run.detail || action)}<br><strong>${escapeText(action)}</strong></p>`;
+  const outcome = terminal.label
+    ? `<br><strong>${escapeText(terminal.label)}</strong> — ${escapeText(terminal.explanation || run.detail || '')}<br><span class="recommended-action">Recommended: ${escapeText(terminal.recommended_action || action)}</span>`
+    : `<br>${escapeText(run.detail || action)}<br><strong>${escapeText(action)}</strong>`;
+  summary.innerHTML = `<span>↳</span><p><strong>${escapeText(run.package || run.id)}</strong><br>${run.iterations} completed iterations · ${escapeText(run.target || 'unknown target')} · ${escapeText(mode)}${outcome}</p>`;
 }
 
 function populateContinuationValues(run) {
