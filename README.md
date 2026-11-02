@@ -337,6 +337,13 @@ protected payloads, instrumentation perturbation, insufficient causal evidence,
 possible remote attestation, provider failures, and device/tool failures while
 preserving the compatible top-level status.
 
+Adaptive diagnostic definitions live in `pipeline/diagnostic_recipes.py`. This typed
+registry is the single source for the pipeline allowlist, orchestration limits,
+provider prompt, artifact caps, prerequisites, invasiveness rating, and public UI
+description. `/api/overview` exposes the safe catalog as `diagnostic_recipes`. The
+provider's concrete structured-output enum is checked against the registry before an
+iteration starts and by regression tests, so schema drift fails closed.
+
 For a wireless physical device, replace `--device SERIAL_FROM_ADB` with `--wireless-connect IP:CONNECTION_PORT`; add `--wireless-pair IP:PAIRING_PORT` on the first connection. The same installation, Frida forwarding, logging, and success checks then apply.
 
 If `frida-server` is already running, omit `--start-frida-server`. The pipeline forwards that device's port 27042 and connects through `127.0.0.1:27042`. For a remote server, use `--frida-endpoint HOST:PORT`.

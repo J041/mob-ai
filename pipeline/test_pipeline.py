@@ -11,6 +11,17 @@ from unittest import mock
 
 import pipeline
 
+try:
+    from pipeline.diagnostic_recipes import (
+        BOUNDED_CAPTURE, DIAGNOSTIC_ACTIONS, DIAGNOSTIC_RECIPES,
+        diagnostic_recipe_catalog,
+    )
+except ModuleNotFoundError:
+    from diagnostic_recipes import (  # type: ignore
+        BOUNDED_CAPTURE, DIAGNOSTIC_ACTIONS, DIAGNOSTIC_RECIPES,
+        diagnostic_recipe_catalog,
+    )
+
 
 class PipelineTests(unittest.TestCase):
     def test_adaptive_diagnostic_actions_are_allowlisted_and_bounded(self):
@@ -20,7 +31,7 @@ class PipelineTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(RuntimeError, "Unsupported diagnostic actions"):
             pipeline.parse_diagnostic_actions("shell_command")
-        with self.assertRaisesRegex(RuntimeError, "at most three"):
+        with self.assertRaisesRegex(RuntimeError, "at most 3"):
             pipeline.parse_diagnostic_actions(
                 "trace_jni_registration,capture_native_exceptions,trace_termination_calls,inventory_executable_mappings"
             )
@@ -30,6 +41,25 @@ class PipelineTests(unittest.TestCase):
             ),
             ["compare_launch_modes", "late_attach_observer", "trace_dynamic_loading"],
         )
+
+    def test_diagnostic_recipe_registry_has_complete_metadata(self):
+        catalog = diagnostic_recipe_catalog()
+        self.assertEqual(set(DIAGNOSTIC_RECIPES), set(DIAGNOSTIC_ACTIONS))
+        self.assertEqual(len(catalog), len(DIAGNOSTIC_ACTIONS))
+        for recipe in catalog:
+            self.assertIn(recipe["invasiveness"], {"low", "moderate", "high"})
+            self.assertTrue(recipe["prerequisites"])
+            self.assertTrue(recipe["ui_description"])
+            self.assertEqual(recipe["artifact_limits"]["scope"], "shared_pass")
+        self.assertEqual(pipeline.DIAGNOSTIC_MAX_DUMPS, BOUNDED_CAPTURE.max_artifacts)
+        self.assertEqual(pipeline.DIAGNOSTIC_MAX_DUMP_BYTES, BOUNDED_CAPTURE.max_artifact_bytes)
+        self.assertEqual(pipeline.DIAGNOSTIC_MAX_TOTAL_BYTES, BOUNDED_CAPTURE.max_total_bytes)
+
+    def test_structured_decision_schema_matches_recipe_registry(self):
+        schema = json.loads((Path(__file__).parent / "codex-decision.schema.json").read_text(encoding="utf-8"))
+        values = schema["properties"]["diagnostic_actions"]["items"]["enum"]
+        self.assertEqual(set(values), set(DIAGNOSTIC_ACTIONS))
+        self.assertEqual(len(values), len(DIAGNOSTIC_ACTIONS))
 
     def test_process_mapping_parser_preserves_executable_memfd(self):
         mappings = pipeline.parse_process_mappings(
@@ -106,6 +136,9 @@ class PipelineTests(unittest.TestCase):
                 )
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             artifact = manifest["artifacts"][0]
+            self.assertEqual(manifest["recipes"][0]["name"], "dump_runtime_payloads")
+            self.assertEqual(manifest["recipes"][0]["invasiveness"], "high")
+            self.assertEqual(manifest["recipes"][0]["artifact_limits"]["scope"], "shared_pass")
             self.assertEqual(artifact["size"], len(b"ELF payload"))
             self.assertEqual((run_dir / artifact["path"]).read_bytes(), b"ELF payload")
             self.assertEqual((manifest_path.parent / "logcat.log").read_text(encoding="utf-8"), "diagnostic output")

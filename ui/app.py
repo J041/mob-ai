@@ -20,6 +20,7 @@ from flask import Flask, jsonify, request, send_file, send_from_directory
 from werkzeug.exceptions import RequestEntityTooLarge
 from werkzeug.utils import secure_filename
 
+from pipeline.diagnostic_recipes import diagnostic_recipe_catalog
 from ui.orchestrator import (
     LoopError, RUNS_ROOT, WORKSPACE,
     checkpoint_recovery_available, frida_recovery_available, read_json,
@@ -1645,6 +1646,7 @@ def overview():
     claude_models = provider_model_catalog("claude")
     return jsonify(
         apks=apks, success_specs=specs, runs=runs(), jobs=jobs(),
+        diagnostic_recipes=diagnostic_recipe_catalog(),
         codex=codex_state, models=codex_models,
         providers={"codex": codex_state, "claude": claude_state},
         model_catalogs={"codex": codex_models, "claude": claude_models},

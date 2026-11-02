@@ -15,6 +15,10 @@ import urllib.parse
 import urllib.request
 import zipfile
 
+from pipeline.diagnostic_recipes import (
+    DIAGNOSTIC_ACTIONS, DIAGNOSTIC_MAX_ACTIONS_PER_PASS, DIAGNOSTIC_MAX_ROUNDS,
+    diagnostic_recipe_prompt,
+)
 from pipeline.pipeline import group_native_libraries, scan_native
 from ui.providers import ProviderRequest, detect_usage_limit, provider_adapter, validate_provider_output
 
@@ -36,24 +40,6 @@ GHIDRA_BRIDGE_URL = os.environ.get(
 NATIVE_BATCH_SIZE = 5
 NATIVE_TOTAL_LIMIT = 15
 GHIDRA_PREP_TIMEOUT_SECONDS = int(os.environ.get("MOB_AI_GHIDRA_PREP_TIMEOUT", "600"))
-DIAGNOSTIC_ACTIONS = {
-    "trace_jni_registration",
-    "capture_native_exceptions",
-    "trace_termination_calls",
-    "inventory_executable_mappings",
-    "dump_runtime_payloads",
-    "compare_launch_modes",
-    "late_attach_observer",
-    "snapshot_process_mappings",
-    "dump_new_executable_regions",
-    "trace_dynamic_loading",
-    "trace_signal_handlers",
-    "capture_runtime_dex",
-    "extract_embedded_payload",
-}
-MAX_DIAGNOSTIC_ROUNDS = 2
-
-
 class LoopError(RuntimeError):
     """A bounded orchestration or compatibility failure."""
 
@@ -120,6 +106,17 @@ def container_path(path: Path) -> str:
 
 def read_json(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8-sig"))
+
+
+def validate_decision_schema_registry(path: Path = DECISION_SCHEMA) -> None:
+    """Fail closed if the CLI's concrete JSON enum drifts from the registry."""
+    try:
+        schema = read_json(path)
+        values = schema["properties"]["diagnostic_actions"]["items"]["enum"]
+    except (OSError, json.JSONDecodeError, KeyError, TypeError) as error:
+        raise LoopError("The provider decision schema has no diagnostic recipe enum.") from error
+    if set(values) != set(DIAGNOSTIC_ACTIONS) or len(values) != len(DIAGNOSTIC_ACTIONS):
+        raise LoopError("The provider decision schema diagnostic recipes do not match the shared registry.")
 
 
 def write_json(path: Path, value: Any) -> None:
@@ -243,7 +240,7 @@ def terminal_outcome(summary: dict[str, Any] | None) -> dict[str, Any]:
         "codex": codex,
     }, ensure_ascii=False).lower()
     diagnostic_rounds = sum(1 for item in iterations if isinstance(item.get("diagnostics"), dict))
-    diagnostic_remaining = max(0, MAX_DIAGNOSTIC_ROUNDS - diagnostic_rounds)
+    diagnostic_remaining = max(0, DIAGNOSTIC_MAX_ROUNDS - diagnostic_rounds)
 
     def outcome(
         code: str, label: str, explanation: str, recommended_action: str,
@@ -258,7 +255,7 @@ def terminal_outcome(summary: dict[str, Any] | None) -> dict[str, Any]:
             "severity": severity,
             "diagnostics": {
                 "used": diagnostic_rounds,
-                "limit": MAX_DIAGNOSTIC_ROUNDS,
+                "limit": DIAGNOSTIC_MAX_ROUNDS,
                 "remaining": diagnostic_remaining,
             },
         }
@@ -332,7 +329,7 @@ def terminal_outcome(summary: dict[str, Any] | None) -> dict[str, Any]:
             "Review the attestation evidence and authorization scope. A local Frida hook may not be sufficient or appropriate.",
             "manual_scope_review",
         )
-    if diagnostic_rounds >= MAX_DIAGNOSTIC_ROUNDS and any(marker in evidence for marker in (
+    if diagnostic_rounds >= DIAGNOSTIC_MAX_ROUNDS and any(marker in evidence for marker in (
         "diagnostic round", "diagnostic allowance", "diagnostics are exhausted", "both bounded",
     )):
         return outcome(
@@ -1097,6 +1094,7 @@ class LoopRunner:
         additional: int, previous_candidate: Path | None, previous_fingerprint: str | None,
         restart_frida: bool,
     ) -> str:
+        validate_decision_schema_registry()
         agent_dir = run_dir / "agent"
         try:
             self._ensure_native_selection(run_dir, config)
@@ -1247,10 +1245,10 @@ class LoopRunner:
                     for action in ((item.get("diagnostics") or {}).get("actions") or [])
                 }
                 actions = [action for action in requested if action not in previously_requested]
-                if prior_rounds >= MAX_DIAGNOSTIC_ROUNDS or not actions:
+                if prior_rounds >= DIAGNOSTIC_MAX_ROUNDS or not actions:
                     reason = (
-                        f"The bounded {MAX_DIAGNOSTIC_ROUNDS}-round diagnostic allowance is exhausted."
-                        if prior_rounds >= MAX_DIAGNOSTIC_ROUNDS
+                        f"The bounded {DIAGNOSTIC_MAX_ROUNDS}-round diagnostic allowance is exhausted."
+                        if prior_rounds >= DIAGNOSTIC_MAX_ROUNDS
                         else "The requested diagnostic actions were already completed."
                     )
                     record = {"iteration": iteration, "codex": decision, "validation": None}
@@ -1258,7 +1256,7 @@ class LoopRunner:
                     write_json(iteration_dir / "record.json", record)
                     write_summary(run_dir, "human_review", records, reason)
                     return "human_review"
-                if len(actions) > 3 or any(action not in DIAGNOSTIC_ACTIONS for action in actions):
+                if len(actions) > DIAGNOSTIC_MAX_ACTIONS_PER_PASS or any(action not in DIAGNOSTIC_ACTIONS for action in actions):
                     write_summary(
                         run_dir, "provider_error", records,
                         f"{adapter.label} returned an invalid adaptive diagnostic request in iteration {iteration}.",
@@ -1401,6 +1399,7 @@ class LoopRunner:
         value = read_json(manifest)
         return {
             "actions": actions,
+            "recipes": list(value.get("recipes") or []),
             "manifest": workspace_relative(manifest),
             "event_count": len(value.get("events") or []),
             "artifact_count": len(value.get("artifacts") or []),
@@ -1983,6 +1982,7 @@ Every complete program above is already imported, analyzed, open, and marked mcp
 With only two useful scopes, do not create an unnecessary third specialist. Subagents must not edit candidate.js or any other file, run device tools, or claim success. The root agent is the only writer and remains responsible for the final structured decision."""
         else:
             delegation = "Single-agent mode is enabled. Do not spawn subagents; inspect and decide within this root session."
+        recipe_guidance = diagnostic_recipe_prompt()
         return f"""You are the reasoning step in an explicitly authorized Android application assessment loop.
 
 Iteration: {iteration} (this invocation covers {start_iteration} through {end_iteration})
@@ -2000,11 +2000,12 @@ Goal: make the smallest evidence-based change to the candidate Frida hook that c
 
 Adaptive evidence escalation:
 - When existing evidence is insufficient for a narrow candidate but a bounded runtime diagnostic could resolve the uncertainty, return decision `diagnostics` instead of `human_review`.
-- Include one to three unique `diagnostic_actions` selected only from: trace_jni_registration, capture_native_exceptions, trace_termination_calls, inventory_executable_mappings, dump_runtime_payloads, compare_launch_modes, late_attach_observer, snapshot_process_mappings, dump_new_executable_regions, trace_dynamic_loading, trace_signal_handlers, capture_runtime_dex, extract_embedded_payload.
+- Include one to {DIAGNOSTIC_MAX_ACTIONS_PER_PASS} unique `diagnostic_actions` selected only from this registry:
+{recipe_guidance}
 - `diagnostic_actions` is required in every structured response. Return an empty array for updated, no_change, and human_review decisions.
-- Prefer compare_launch_modes and a single isolated trace before invasive capture. Use late_attach_observer when spawn instrumentation changes loader behavior. Request memory/DEX dumps or extract_embedded_payload only when evidence indicates dynamically loaded code; the worker scopes capture to the selected package and enforces five 1 MiB artifacts and a 5 MiB total limit.
+- Prefer compare_launch_modes and a single isolated trace before invasive capture. Use late_attach_observer when spawn instrumentation changes loader behavior. Request memory/DEX dumps or extract_embedded_payload only when evidence indicates dynamically loaded code; the worker scopes capture to the selected package and enforces the registry's shared artifact limits.
 - The deterministic orchestrator executes diagnostics on the exact recorded device and makes the manifest available under diagnostics/pass-*/manifest.json for the next iteration. Do not edit candidate.js when requesting diagnostics.
-- At most {MAX_DIAGNOSTIC_ROUNDS} diagnostic rounds are available, and completed actions cannot be requested again.
+- At most {DIAGNOSTIC_MAX_ROUNDS} diagnostic rounds are available, and completed actions cannot be requested again.
 
 Hard boundaries:
 - Edit only {candidate}. Do not modify the APK, pipeline, policy, reports, logs, or another file.

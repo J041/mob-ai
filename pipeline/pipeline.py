@@ -18,6 +18,17 @@ import sys
 import time
 import zipfile
 
+try:
+    from pipeline.diagnostic_recipes import (
+        BOUNDED_CAPTURE, DIAGNOSTIC_ACTIONS, DIAGNOSTIC_MAX_ACTIONS_PER_PASS,
+        DIAGNOSTIC_RECIPES,
+    )
+except ModuleNotFoundError:  # Direct execution from /workspace/pipeline.
+    from diagnostic_recipes import (  # type: ignore
+        BOUNDED_CAPTURE, DIAGNOSTIC_ACTIONS, DIAGNOSTIC_MAX_ACTIONS_PER_PASS,
+        DIAGNOSTIC_RECIPES,
+    )
+
 PATTERNS = {
     "root_framework": re.compile(r"RootBeer|Magisk|SuperSU|rooted|isRooted", re.I),
     "root_binary": re.compile(r"(/system/(?:x?bin)/su|/sbin/su|which\s+su)", re.I),
@@ -36,24 +47,9 @@ MODULE_MIN_LEVEL = {
     "native-antidebug": 3, "anti-frida": 3,
 }
 
-DIAGNOSTIC_ACTIONS = {
-    "trace_jni_registration",
-    "capture_native_exceptions",
-    "trace_termination_calls",
-    "inventory_executable_mappings",
-    "dump_runtime_payloads",
-    "compare_launch_modes",
-    "late_attach_observer",
-    "snapshot_process_mappings",
-    "dump_new_executable_regions",
-    "trace_dynamic_loading",
-    "trace_signal_handlers",
-    "capture_runtime_dex",
-    "extract_embedded_payload",
-}
-DIAGNOSTIC_MAX_DUMPS = 5
-DIAGNOSTIC_MAX_DUMP_BYTES = 1024 * 1024
-DIAGNOSTIC_MAX_TOTAL_BYTES = 5 * 1024 * 1024
+DIAGNOSTIC_MAX_DUMPS = BOUNDED_CAPTURE.max_artifacts
+DIAGNOSTIC_MAX_DUMP_BYTES = BOUNDED_CAPTURE.max_artifact_bytes
+DIAGNOSTIC_MAX_TOTAL_BYTES = BOUNDED_CAPTURE.max_total_bytes
 
 
 def run(
@@ -392,8 +388,10 @@ def parse_diagnostic_actions(value: str) -> list[str]:
         raise RuntimeError(f"Unsupported diagnostic actions: {', '.join(unknown)}")
     if not actions:
         raise RuntimeError("At least one diagnostic action is required")
-    if len(actions) > 3:
-        raise RuntimeError("A diagnostic pass may request at most three actions")
+    if len(actions) > DIAGNOSTIC_MAX_ACTIONS_PER_PASS:
+        raise RuntimeError(
+            f"A diagnostic pass may request at most {DIAGNOSTIC_MAX_ACTIONS_PER_PASS} actions"
+        )
     return actions
 
 
@@ -710,6 +708,7 @@ def run_adaptive_diagnostics(
     manifest = {
         "version": 1, "pass": number, "package": package, "device": args.device,
         "actions": actions, "duration_seconds": args.observation_seconds,
+        "recipes": [DIAGNOSTIC_RECIPES[action].public_dict() for action in actions],
         "created_utc": dt.datetime.now(dt.timezone.utc).isoformat(),
         "limits": {
             "max_dumps": DIAGNOSTIC_MAX_DUMPS,

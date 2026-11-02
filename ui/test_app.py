@@ -20,9 +20,10 @@ from ui.app import (
     wireless_device_view,
 )
 from ui.orchestrator import (
-    WORKSPACE, LoopRunner, attempt_fingerprint, codex_config_overrides,
+    WORKSPACE, LoopError, LoopRunner, attempt_fingerprint, codex_config_overrides,
     codex_multi_agent_args, codex_reasoning_args, checkpoint_recovery_available,
     frida_recovery_available, terminal_outcome, usage_limit_recovery_available,
+    validate_decision_schema_registry,
 )
 from ui.providers import ProviderRequest, detect_usage_limit, provider_adapter, validate_provider_output
 
@@ -103,6 +104,9 @@ class WebAppTests(unittest.TestCase):
         self.assertIn("codex", payload)
         self.assertIn("runs", payload)
         self.assertIn("success_specs", payload)
+        self.assertTrue(payload["diagnostic_recipes"])
+        self.assertIn("ui_description", payload["diagnostic_recipes"][0])
+        self.assertIn("artifact_limits", payload["diagnostic_recipes"][0])
 
     def test_reassessment_entry_is_in_continue_workflow(self) -> None:
         response = self.client.get("/")
@@ -1037,6 +1041,15 @@ class WebAppTests(unittest.TestCase):
         })
         self.assertEqual(outcome["code"], "no_progress")
         self.assertEqual(outcome["action"], "compare_attempts")
+
+    def test_decision_schema_is_guarded_against_registry_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = Path(temp) / "schema.json"
+            path.write_text(json.dumps({
+                "properties": {"diagnostic_actions": {"items": {"enum": ["unknown_recipe"]}}},
+            }), encoding="utf-8")
+            with self.assertRaisesRegex(LoopError, "shared registry"):
+                validate_decision_schema_registry(path)
 
     def test_codex_uses_container_native_ghidra_bridge(self) -> None:
         arguments = codex_config_overrides()
