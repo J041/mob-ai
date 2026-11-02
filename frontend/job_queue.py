@@ -7,11 +7,11 @@ from pathlib import Path
 import uuid
 from typing import Any
 
-from ui.orchestrator_runtime import WORKSPACE
+from frontend.orchestrator_runtime import WORKSPACE
 
 
-STATE_ROOT = WORKSPACE / "ui" / ".state" / "jobs"
-HEARTBEAT_PATH = WORKSPACE / "ui" / ".state" / "worker-heartbeat"
+STATE_ROOT = WORKSPACE / "frontend" / ".state" / "jobs"
+HEARTBEAT_PATH = WORKSPACE / "frontend" / ".state" / "worker-heartbeat"
 STATE_ROOT.mkdir(parents=True, exist_ok=True)
 
 

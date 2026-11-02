@@ -12,22 +12,22 @@ from pipeline.diagnostic_recipes import (
     DIAGNOSTIC_ACTIONS, DIAGNOSTIC_MAX_ACTIONS_PER_PASS, DIAGNOSTIC_MAX_ROUNDS,
     diagnostic_recipe_prompt,
 )
-from ui.orchestrator_diagnostics import run_adaptive_diagnostics
-from ui.orchestrator_native import NativeAnalysisMixin
-from ui.orchestrator_outcomes import terminal_outcome
-from ui.orchestrator_recovery import RecoveryMixin
-from ui.orchestrator_state import (
+from frontend.orchestrator_diagnostics import run_adaptive_diagnostics
+from frontend.orchestrator_native import NativeAnalysisMixin
+from frontend.orchestrator_outcomes import terminal_outcome
+from frontend.orchestrator_recovery import RecoveryMixin
+from frontend.orchestrator_state import (
     checkpoint_recovery_available, frida_recovery_available,
     usage_limit_recovery_available, write_summary,
 )
-from ui.orchestrator_runtime import (
+from frontend.orchestrator_runtime import (
     DECISION_SCHEMA, RUNS_ROOT, WORKSPACE, EnvironmentFailure, LoopError, ProviderUsageLimit,
     attempt_fingerprint, claude_mcp_config, codex_config, codex_config_overrides,
     codex_multi_agent_args, codex_reasoning_args, container_path,
     pipeline_args, read_json, run_logged, sha256, target_args,
     validate_decision_schema_registry, workspace_relative, write_json,
 )
-from ui.providers import ProviderRequest, detect_usage_limit, provider_adapter, validate_provider_output
+from frontend.providers import ProviderRequest, detect_usage_limit, provider_adapter, validate_provider_output
 
 
 class LoopRunner(RecoveryMixin, NativeAnalysisMixin):

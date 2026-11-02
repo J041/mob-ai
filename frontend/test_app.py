@@ -11,7 +11,7 @@ import unittest
 from unittest.mock import patch
 import zipfile
 
-from ui.app import (
+from frontend.app import (
     _readiness, app, artifact_manifest, codex_model_catalog, parse_resume, parse_retry, parse_start,
     infer_attempt_kind, infer_job_run_id, resolve_workspace_item, sign_out_codex,
     assistant_evidence_snapshot, assistant_history, recorded_success_policy, run_assistant_turn,
@@ -19,13 +19,13 @@ from ui.app import (
     subprocess_capture_text,
     wireless_device_view,
 )
-from ui.orchestrator import (
+from frontend.orchestrator import (
     WORKSPACE, LoopError, LoopRunner, attempt_fingerprint, codex_config_overrides,
     codex_multi_agent_args, codex_reasoning_args, checkpoint_recovery_available,
     frida_recovery_available, terminal_outcome, usage_limit_recovery_available,
     validate_decision_schema_registry,
 )
-from ui.providers import ProviderRequest, detect_usage_limit, provider_adapter, validate_provider_output
+from frontend.providers import ProviderRequest, detect_usage_limit, provider_adapter, validate_provider_output
 
 
 class WebAppTests(unittest.TestCase):
@@ -87,10 +87,10 @@ class WebAppTests(unittest.TestCase):
             self.assertEqual(iterations.call_args.kwargs["additional"], 3)
             self.assertEqual(iterations.call_args.kwargs["previous_candidate"], recovered / snapshot.name)
 
-    @patch("ui.app.jobs", return_value=[])
-    @patch("ui.app.codex_authenticated", return_value=True)
+    @patch("frontend.app.jobs", return_value=[])
+    @patch("frontend.web_auth.codex_authenticated", return_value=True)
     def test_start_job_is_durably_queued(self, _authenticated, _jobs) -> None:
-        with tempfile.TemporaryDirectory() as temp, patch("ui.app.STATE_ROOT", Path(temp)):
+        with tempfile.TemporaryDirectory() as temp, patch("frontend.app.STATE_ROOT", Path(temp)):
             state = start_job("start", "sample.apk", {"apk": "/workspace/uploads/sample.apk"})
             directory = Path(temp) / state["id"]
             stored = json.loads((directory / "job.json").read_text(encoding="utf-8"))
@@ -107,6 +107,24 @@ class WebAppTests(unittest.TestCase):
         self.assertTrue(payload["diagnostic_recipes"])
         self.assertIn("ui_description", payload["diagnostic_recipes"][0])
         self.assertIn("artifact_limits", payload["diagnostic_recipes"][0])
+
+    def test_frontend_modules_are_served(self) -> None:
+        response = self.client.get("/")
+        page = response.get_data(as_text=True)
+        response.close()
+        self.assertIn('type="module"', page)
+        self.assertIn('src="/app.js?v=20261102-modules"', page)
+        for path in ("/app.js", "/core.js", "/models.js", "/artifacts.js"):
+            response = self.client.get(path)
+            self.assertEqual(response.status_code, 200, path)
+            self.assertIn("javascript", response.content_type, path)
+            response.close()
+        response = self.client.get("/app.js")
+        app_script = response.get_data(as_text=True)
+        response.close()
+        self.assertIn("from './core.js'", app_script)
+        self.assertIn("from './artifacts.js'", app_script)
+        self.assertIn("from './models.js'", app_script)
 
     def test_reassessment_entry_is_in_continue_workflow(self) -> None:
         response = self.client.get("/")
@@ -221,11 +239,11 @@ class WebAppTests(unittest.TestCase):
             self.assertTrue((destination / "codex.log").is_file())
             self.assertIn("incomplete-iterations", archived)
 
-    @patch("ui.app.codex_model_catalog", return_value={"models": [{
+    @patch("frontend.web_assistant.provider_model_catalog", return_value={"models": [{
         "id": "test-model", "reasoning_levels": [{"effort": "high"}],
     }], "source": "test"})
-    @patch("ui.app.codex_authenticated", return_value=True)
-    @patch("ui.app.subprocess.run")
+    @patch("frontend.web_assistant.provider_authenticated", return_value=True)
+    @patch("frontend.web_assistant.subprocess.run")
     def test_run_assistant_persists_cited_answer_and_action(self, run, _authenticated, _catalog) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -252,7 +270,7 @@ class WebAppTests(unittest.TestCase):
                 return subprocess.CompletedProcess(command, 0, "ok", "")
 
             run.side_effect = complete
-            with patch("ui.app.RUNS_ROOT", root):
+            with patch("frontend.web_artifacts.RUNS_ROOT", root):
                 turn = run_assistant_turn("run-123", {
                     "question": "Why human review?", "model": "test-model",
                     "reasoning_effort": "high",
@@ -301,7 +319,7 @@ class WebAppTests(unittest.TestCase):
             (run / "logs" / "observation-logcat.log").write_text("SIGBUS", encoding="utf-8")
             (run / "agent" / "iteration-1" / "decision.json").write_text('{"decision":"continue"}', encoding="utf-8")
             (run / "ghidra" / "native-analysis.txt").write_text("function guard", encoding="utf-8")
-            with patch("ui.app.RUNS_ROOT", root):
+            with patch("frontend.web_artifacts.RUNS_ROOT", root):
                 manifest = artifact_manifest("run-123")
                 categories = {item["id"]: item["files"] for item in manifest["categories"]}
                 self.assertEqual(categories["hooks"][0]["path"], "frida/bypass.js")
@@ -321,8 +339,8 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertIn("authorization", response.get_json()["error"].lower())
 
-    @patch("ui.app.success_policy")
-    @patch("ui.app.resolve_workspace_item")
+    @patch("frontend.app.success_policy")
+    @patch("frontend.app.resolve_workspace_item")
     def test_start_requires_matching_readiness_token(self, resolve, policy) -> None:
         resolve.return_value = WORKSPACE / "uploads" / "sample.apk"
         policy.return_value = WORKSPACE / "policies" / "generated" / "policy.json"
@@ -348,7 +366,7 @@ class WebAppTests(unittest.TestCase):
                 "readiness_token": "ready-token", "policy_preset": "basic",
             })
 
-    @patch("ui.app.success_policy")
+    @patch("frontend.app.success_policy")
     def test_reassessment_uses_recorded_apk_and_links_source(self, policy) -> None:
         import hashlib
         with tempfile.TemporaryDirectory(dir=WORKSPACE / "runs") as temp:
@@ -398,11 +416,11 @@ class WebAppTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 400)
 
-    @patch("ui.app.subprocess.run")
+    @patch("frontend.app.subprocess.run")
     def test_wireless_pairing_sends_code_over_stdin(self, run) -> None:
         run.return_value = subprocess.CompletedProcess([], 0, "Successfully paired", "")
         with tempfile.TemporaryDirectory() as temp, patch(
-            "ui.app.WIRELESS_DEVICES_PATH", Path(temp) / "wireless-devices.json",
+            "frontend.app.WIRELESS_DEVICES_PATH", Path(temp) / "wireless-devices.json",
         ):
             response = self.client.post(
                 "/api/devices/pair",
@@ -417,7 +435,7 @@ class WebAppTests(unittest.TestCase):
         self.assertNotIn("123456", stored)
         self.assertIn("192.168.1.20:37001", stored)
 
-    @patch("ui.app.subprocess.run")
+    @patch("frontend.app.subprocess.run")
     def test_wireless_pairing_removes_contradictory_success_suffix(self, run) -> None:
         run.return_value = subprocess.CompletedProcess(
             [], 1, "", "error: protocol fault (couldn't read status message): Success\n",
@@ -443,7 +461,7 @@ class WebAppTests(unittest.TestCase):
                 "connection_endpoint": "192.168.1.20:41993",
                 "last_connected_utc": "2026-10-30T01:00:00+00:00",
             }]}), encoding="utf-8")
-            with patch("ui.app.WIRELESS_DEVICES_PATH", registry):
+            with patch("frontend.app.WIRELESS_DEVICES_PATH", registry):
                 record_wireless_device(pairing_endpoint="192.168.1.20:39725")
                 stored = json.loads(registry.read_text(encoding="utf-8"))["devices"][0]
         self.assertEqual(stored["pairing_endpoint"], "192.168.1.20:39725")
@@ -460,13 +478,13 @@ class WebAppTests(unittest.TestCase):
                 "connection_endpoint": "192.168.1.20:38501",
                 "last_connected_utc": "2026-10-31T15:43:39+00:00",
             }]}), encoding="utf-8")
-            with patch("ui.app.WIRELESS_DEVICES_PATH", registry):
+            with patch("frontend.app.WIRELESS_DEVICES_PATH", registry):
                 device = wireless_device_view([], [])[0]
         self.assertEqual(device["endpoint"], "")
         self.assertTrue(device["connection_required"])
         self.assertEqual(device["pairing_endpoint"], "192.168.1.20:39725")
 
-    @patch("ui.app.subprocess.run")
+    @patch("frontend.app.subprocess.run")
     def test_device_discovery_distinguishes_previously_paired_and_discovered(self, run) -> None:
         run.side_effect = [
             subprocess.CompletedProcess([], 0, "List of devices attached\n", ""),
@@ -478,7 +496,7 @@ class WebAppTests(unittest.TestCase):
                 "id": "known-phone", "host": "192.168.1.20",
                 "pairing_endpoint": "192.168.1.20:37001", "paired_utc": "2026-10-30T00:00:00+00:00",
             }]}), encoding="utf-8")
-            with patch("ui.app.WIRELESS_DEVICES_PATH", registry):
+            with patch("frontend.app.WIRELESS_DEVICES_PATH", registry):
                 response = self.client.get("/api/devices")
         payload = response.get_json()
         self.assertEqual(response.status_code, 200)
@@ -493,7 +511,7 @@ class WebAppTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 400)
 
-    @patch("ui.app.subprocess.run")
+    @patch("frontend.app.subprocess.run")
     def test_device_readiness_returns_bound_token(self, run) -> None:
         def result(command, **_kwargs):
             rendered = " ".join(command)
@@ -584,9 +602,9 @@ class WebAppTests(unittest.TestCase):
         finally:
             path.unlink(missing_ok=True)
 
-    @patch("ui.app.codex_authenticated", return_value=True)
-    @patch("ui.app.read_connected_account_models", side_effect=RuntimeError("catalog unavailable"))
-    @patch("ui.app.read_codex_models")
+    @patch("frontend.web_auth.codex_authenticated", return_value=True)
+    @patch("frontend.web_auth.read_connected_account_models", side_effect=RuntimeError("catalog unavailable"))
+    @patch("frontend.web_auth.read_codex_models")
     def test_model_catalog_uses_codex_app_server(self, read_models, read_account, authenticated) -> None:
         read_models.return_value = [{
             "id": "test-model", "model": "test-model",
@@ -597,16 +615,16 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(catalog["models"][0]["id"], "test-model")
         self.assertTrue(catalog["models"][0]["is_default"])
 
-    @patch("ui.app.codex_authenticated", return_value=False)
-    @patch("ui.app.read_codex_models")
+    @patch("frontend.web_auth.codex_authenticated", return_value=False)
+    @patch("frontend.web_auth.read_codex_models")
     def test_model_catalog_requires_connected_account(self, read_models, authenticated) -> None:
         catalog = codex_model_catalog(force=True)
         self.assertEqual(catalog, {"models": [], "source": "authentication_required"})
         read_models.assert_not_called()
 
-    @patch("ui.app.codex_authenticated", return_value=True)
-    @patch("ui.app.read_connected_account_models")
-    @patch("ui.app.read_codex_models")
+    @patch("frontend.web_auth.codex_authenticated", return_value=True)
+    @patch("frontend.web_auth.read_connected_account_models")
+    @patch("frontend.web_auth.read_codex_models")
     def test_model_catalog_prefers_connected_account(self, read_local, read_account, authenticated) -> None:
         read_account.return_value = [{
             "id": "account-model", "display_name": "Account Model", "is_default": False,
@@ -624,7 +642,7 @@ class WebAppTests(unittest.TestCase):
         self.assertTrue(catalog["models"][0]["is_default"])
         read_local.assert_called_once()
 
-    @patch("ui.app.resolve_workspace_item")
+    @patch("frontend.app.resolve_workspace_item")
     def test_resume_accepts_thinking_level(self, resolve) -> None:
         run = WORKSPACE / "runs" / "example"
         resolve.return_value = run
@@ -634,7 +652,7 @@ class WebAppTests(unittest.TestCase):
         })
         self.assertEqual(request["reasoning_effort"], "xhigh")
 
-    @patch("ui.app.resolve_workspace_item")
+    @patch("frontend.app.resolve_workspace_item")
     def test_resume_accepts_claude_provider(self, resolve) -> None:
         resolve.return_value = WORKSPACE / "runs" / "example"
         _, request = parse_resume({
@@ -644,8 +662,8 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(request["provider"], "claude")
         self.assertEqual(request["model"], "sonnet")
 
-    @patch("ui.app.json_file")
-    @patch("ui.app.resolve_workspace_item")
+    @patch("frontend.app.json_file")
+    @patch("frontend.app.resolve_workspace_item")
     def test_resume_rejects_policy_from_another_run(self, resolve, read_json) -> None:
         resolve.return_value = WORKSPACE / "runs" / "example"
         read_json.return_value = {"success_spec_sha256": "a" * 64}
@@ -655,7 +673,7 @@ class WebAppTests(unittest.TestCase):
                 "success_spec_sha256": "b" * 64,
             })
 
-    @patch("ui.app.resolve_workspace_item")
+    @patch("frontend.app.resolve_workspace_item")
     def test_retry_accepts_any_completed_run(self, resolve) -> None:
         run = WORKSPACE / "runs" / "example"
         resolve.return_value = run
@@ -667,13 +685,13 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(label, "example")
         self.assertEqual(request["run"], str(run))
 
-    @patch("ui.app.resolve_workspace_item")
+    @patch("frontend.app.resolve_workspace_item")
     def test_retry_requires_completed_run(self, resolve) -> None:
         resolve.return_value = WORKSPACE / "runs" / "unfinished"
         with self.assertRaisesRegex(ValueError, "completed assessment"):
             parse_retry({"authorized": True, "run": "runs/unfinished", "max_iterations": 1})
 
-    @patch("ui.app.resolve_workspace_item")
+    @patch("frontend.app.resolve_workspace_item")
     def test_resume_accepts_parallel_specialists(self, resolve) -> None:
         resolve.return_value = WORKSPACE / "runs" / "example"
         _, request = parse_resume({
@@ -683,7 +701,7 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(request["reasoning_mode"], "parallel")
         self.assertEqual(request["specialist_count"], 2)
 
-    @patch("ui.app.resolve_workspace_item")
+    @patch("frontend.app.resolve_workspace_item")
     def test_resume_rejects_invalid_parallel_specialist_count(self, resolve) -> None:
         resolve.return_value = WORKSPACE / "runs" / "example"
         with self.assertRaisesRegex(ValueError, "specialist count"):
@@ -692,7 +710,7 @@ class WebAppTests(unittest.TestCase):
                 "reasoning_mode": "parallel", "specialist_count": 8,
             })
 
-    @patch("ui.app.resolve_workspace_item")
+    @patch("frontend.app.resolve_workspace_item")
     def test_resume_accepts_device_frida_server_path(self, resolve) -> None:
         resolve.return_value = WORKSPACE / "runs" / "example"
         _, request = parse_resume({
@@ -701,8 +719,8 @@ class WebAppTests(unittest.TestCase):
         })
         self.assertEqual(request["frida_server"], "/data/local/tmp/frida-server-17.5.1")
 
-    @patch("ui.app.json_file")
-    @patch("ui.app.resolve_workspace_item")
+    @patch("frontend.app.json_file")
+    @patch("frontend.app.resolve_workspace_item")
     def test_resume_changed_target_requires_bound_readiness(self, resolve, read_json) -> None:
         resolve.return_value = WORKSPACE / "runs" / "example"
         read_json.return_value = {
@@ -716,8 +734,8 @@ class WebAppTests(unittest.TestCase):
                 "frida_server": "/data/local/tmp/frida-server",
             })
 
-    @patch("ui.app.json_file")
-    @patch("ui.app.resolve_workspace_item")
+    @patch("frontend.app.json_file")
+    @patch("frontend.app.resolve_workspace_item")
     def test_resume_accepts_ready_alternate_target(self, resolve, read_json) -> None:
         resolve.return_value = WORKSPACE / "runs" / "example"
         read_json.return_value = {
@@ -738,7 +756,7 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(request["transport"], "wireless")
         self.assertTrue(request["target_settings_changed"])
 
-    @patch("ui.app.resolve_workspace_item")
+    @patch("frontend.app.resolve_workspace_item")
     def test_resume_rejects_unsafe_frida_server_path(self, resolve) -> None:
         resolve.return_value = WORKSPACE / "runs" / "example"
         with self.assertRaisesRegex(ValueError, "Frida Server path"):
@@ -747,7 +765,7 @@ class WebAppTests(unittest.TestCase):
                 "frida_server": "/data/local/tmp/frida-server; reboot",
             })
 
-    @patch("ui.app.resolve_workspace_item")
+    @patch("frontend.app.resolve_workspace_item")
     def test_resume_rejects_unknown_thinking_level(self, resolve) -> None:
         resolve.return_value = WORKSPACE / "runs" / "example"
         with self.assertRaisesRegex(ValueError, "thinking level"):
@@ -780,7 +798,7 @@ class WebAppTests(unittest.TestCase):
         self.assertIn("dump_runtime_payloads", prompt)
         self.assertIn("At most 2 diagnostic rounds", prompt)
 
-    @patch("ui.orchestrator.run_logged")
+    @patch("frontend.orchestrator.run_logged")
     def test_adaptive_diagnostic_worker_uses_allowlisted_pipeline_action(self, run_logged) -> None:
         with tempfile.TemporaryDirectory(dir=WORKSPACE) as temp:
             run = Path(temp)
@@ -810,8 +828,8 @@ class WebAppTests(unittest.TestCase):
             self.assertEqual(result["event_count"], 1)
             self.assertEqual(result["actions"], ["trace_jni_registration"])
 
-    @patch("ui.orchestrator_native.run_logged", return_value=(0, ""))
-    @patch("ui.orchestrator_native.provider_adapter")
+    @patch("frontend.orchestrator_native.run_logged", return_value=(0, ""))
+    @patch("frontend.orchestrator_native.provider_adapter")
     def test_native_selection_is_provider_chosen_bounded_and_extracted(self, adapter_factory, _run_logged) -> None:
         class FakeAdapter:
             label = "Codex"
@@ -920,7 +938,7 @@ class WebAppTests(unittest.TestCase):
                     }}
                 return {"success": True, "data": {"analyzing": False, "function_count": 42}}
 
-            with patch("ui.orchestrator_native.ghidra_request", side_effect=fake_ghidra) as ghidra:
+            with patch("frontend.orchestrator_native.ghidra_request", side_effect=fake_ghidra) as ghidra:
                 preparation = LoopRunner._prepare_ghidra_batch(run)
                 cached = LoopRunner._prepare_ghidra_batch(run)
             self.assertEqual(preparation["status"], "complete")
@@ -957,7 +975,7 @@ class WebAppTests(unittest.TestCase):
     def test_timeout_output_accepts_bytes_for_visible_failure(self) -> None:
         self.assertEqual(subprocess_capture_text(b"partial\r\n", b"error\n"), "partial\nerror\n")
 
-    @patch("ui.app.subprocess.run")
+    @patch("frontend.web_auth.subprocess.run")
     def test_sign_out_uses_codex_logout_and_clears_catalog(self, run) -> None:
         run.return_value = subprocess.CompletedProcess([], 0, "Logged out", "")
         result = sign_out_codex()

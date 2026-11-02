@@ -7,13 +7,13 @@ import threading
 import traceback
 import uuid
 
-from ui.job_queue import (
+from frontend.job_queue import (
     atomic_write_json, claim_next_job, enqueue_due_usage_limit_jobs,
     read_json, recover_abandoned_jobs, touch_heartbeat, utc_now,
 )
-from ui.ghidra_proxy import GhidraLoopbackProxy
-from ui.orchestrator import LoopRunner
-from ui.orchestrator_runtime import EnvironmentFailure, LoopError
+from frontend.ghidra_proxy import GhidraLoopbackProxy
+from frontend.orchestrator import LoopRunner
+from frontend.orchestrator_runtime import EnvironmentFailure, LoopError
 
 
 POLL_SECONDS = float(os.environ.get("MOB_AI_WORKER_POLL_SECONDS", "1"))

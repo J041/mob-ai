@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Callable, TextIO
 
-from ui.orchestrator_runtime import (
+from frontend.orchestrator_runtime import (
     EnvironmentFailure, container_path, pipeline_args, read_json, run_logged,
     target_args, workspace_relative,
 )

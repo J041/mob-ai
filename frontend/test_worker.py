@@ -9,8 +9,8 @@ import unittest
 import urllib.request
 from unittest import mock
 
-from ui import job_queue, worker
-from ui.ghidra_proxy import GhidraLoopbackProxy
+from frontend import job_queue, worker
+from frontend.ghidra_proxy import GhidraLoopbackProxy
 
 
 class DurableWorkerTests(unittest.TestCase):

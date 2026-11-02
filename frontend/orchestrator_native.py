@@ -13,13 +13,13 @@ import urllib.parse
 import zipfile
 
 from pipeline.pipeline import group_native_libraries, scan_native
-from ui.orchestrator_runtime import (
+from frontend.orchestrator_runtime import (
     GHIDRA_PREP_TIMEOUT_SECONDS, NATIVE_BATCH_SIZE, NATIVE_REPLENISHMENT_SCHEMA,
     NATIVE_SELECTION_SCHEMA, NATIVE_TOTAL_LIMIT, WORKSPACE, LoopError,
     ProviderUsageLimit, ghidra_request, normalize_android_abi, read_json,
     recorded_device_abi, run_logged, sha256, workspace_relative, write_json,
 )
-from ui.providers import ProviderRequest, detect_usage_limit, provider_adapter, validate_provider_output
+from frontend.providers import ProviderRequest, detect_usage_limit, provider_adapter, validate_provider_output
 
 
 class NativeAnalysisMixin:

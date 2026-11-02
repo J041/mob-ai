@@ -42,7 +42,7 @@ Uploaded APKs are stored in the ignored `uploads/` directory and validated as AP
 files before a run starts. The default limit is 1024 MB. The host port binds only to
 `127.0.0.1`. The Flask API validates paths under this
 workspace, exposes fixed operations rather than arbitrary shell commands, and keeps
-job requests and state under the ignored `ui/.state/` directory using atomic writes.
+job requests and state under the ignored `frontend/.state/` directory using atomic writes.
 The dedicated worker claims queued jobs on disk, so restarting the web UI does not
 interrupt an assessment. If the worker itself stops during device interaction, the
 attempt is preserved as `interrupted` instead of silently repeating side effects.
@@ -269,7 +269,7 @@ debugging screen before starting the assessment. Pairing is normally required on
 Before **Start assessment** is enabled, run **Device readiness** for the exact target. The wizard checks ADB state, root access, ABI, Android SDK, temporary storage, SELinux, Frida client/server versions, port forwarding and Frida connectivity. You may optionally select a trusted Frida Server binary to push to the configured device path and start it. A successful check issues a ten-minute token bound to the target, transport and Frida path; changing any of those values requires another check. Pairing codes are never included in readiness state.
 
 The Wireless section also keeps a local, non-secret registry of successful pairings
-under `ui/.state/`. It combines that history with `adb devices` and ADB mDNS discovery
+under `frontend/.state/`. It combines that history with `adb devices` and ADB mDNS discovery
 to distinguish **Connected**, **Previously paired**, **Discovered**, **Unauthorized**,
 and **Offline** devices. Pairing and last-used connection endpoints and timestamps may
 be retained; six-digit pairing codes are never stored. A previously paired label is
@@ -279,7 +279,7 @@ host history rather than proof that Android has not subsequently revoked the pai
 
 Native triage is auditable under append-only `runs/RUN_ID/agent/native-selection/attempt-N/` directories, with its final validated selection at `runs/RUN_ID/native-selection.json`. Each hook iteration is auditable under `runs/RUN_ID/agent/iteration-N/` and contains the prompt, candidate hook, provider decision and log, Frida/logcat output, validation result, and combined record. `codex-loop-result.json` retains its compatibility filename and records the terminal status and complete history. The loop never rebuilds or resigns the APK, and it directs the provider to request human review for remote attestation or unsupported/high-risk changes.
 
-Reasoning execution is normalized in `ui/providers.py`. CLI providers receive the same
+Reasoning execution is normalized in `frontend/providers.py`. CLI providers receive the same
 prompt, JSON schema, model/effort selection, working directory, and access mode, then
 return the same validated JSON object. This is the extension point for a future
 self-hosted adapter: add its transport and authentication/model catalog while preserving
@@ -344,7 +344,7 @@ description. `/api/overview` exposes the safe catalog as `diagnostic_recipes`. T
 provider's concrete structured-output enum is checked against the registry before an
 iteration starts and by regression tests, so schema drift fails closed.
 
-The autonomous worker is split into responsibility-focused modules under `ui/`:
+The autonomous worker is split into responsibility-focused modules under `frontend/`:
 `orchestrator.py` is the stable `LoopRunner` coordinator and compatibility facade;
 `orchestrator_recovery.py` owns checkpoint recovery and evidence-preserving retries;
 `orchestrator_native.py` owns native selection, its bounded queue, and deterministic
@@ -354,6 +354,17 @@ passes; `orchestrator_state.py` persists summaries and recovery predicates;
 `orchestrator_runtime.py` contains shared paths, process execution, provider/MCP
 configuration, and errors. Web request handling imports the narrow modules directly
 instead of loading the worker coordinator.
+
+The Flask control plane follows the same boundary-first layout. `frontend/app.py` is the
+stable route and request-validation layer; `web_auth.py` owns provider authentication
+and account model discovery; `web_assistant.py` owns evidence-bounded run questions;
+`web_artifacts.py` resolves, classifies, previews, and downloads run artifacts; and
+`web_common.py` contains small HTTP-safe utilities shared by those modules. The
+browser entry point is an ES module: `frontend/dist/core.js` owns shared state and API
+helpers, `models.js` renders provider/model choices, and `artifacts.js` implements the
+artifact browser. `frontend/dist/app.js` composes those features and wires the page events.
+This keeps the public API and single-command deployment unchanged while making each
+subsystem independently testable.
 
 For a wireless physical device, replace `--device SERIAL_FROM_ADB` with `--wireless-connect IP:CONNECTION_PORT`; add `--wireless-pair IP:PAIRING_PORT` on the first connection. The same installation, Frida forwarding, logging, and success checks then apply.
 
