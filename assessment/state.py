@@ -7,8 +7,8 @@ import json
 from pathlib import Path
 from typing import Any
 
-from frontend.orchestrator_outcomes import terminal_outcome
-from frontend.orchestrator_runtime import workspace_relative, write_json
+from assessment.outcomes import terminal_outcome
+from assessment.runtime import workspace_relative, write_json
 
 
 def write_summary(

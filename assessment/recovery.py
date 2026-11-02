@@ -9,12 +9,12 @@ import re
 import shutil
 from typing import Any
 
-from frontend.orchestrator_runtime import (
+from assessment.runtime import (
     WORKSPACE, LoopError, ProviderUsageLimit, attempt_fingerprint, container_path,
     pipeline_args, read_json, run_logged, sha256, target_args,
     workspace_relative, write_json,
 )
-from frontend.orchestrator_state import write_summary
+from assessment.state import write_summary
 
 
 class RecoveryMixin:

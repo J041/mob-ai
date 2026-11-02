@@ -62,7 +62,7 @@ services:
       - "8"
       - --timeout
       - "0"
-      - frontend.app:app
+      - backend.app:app
     init: true
     working_dir: /workspace
     depends_on:
@@ -110,7 +110,7 @@ services:
         CLAUDE_CODE_VERSION: ${CLAUDE_CODE_VERSION:-2.1.316}
         NODE_VERSION: ${NODE_VERSION:-22.23.4}
     image: mob-ai-worker:local
-    command: ["python3", "-m", "frontend.worker"]
+    command: ["python3", "-m", "worker.main"]
     init: true
     restart: unless-stopped
     working_dir: /workspace
@@ -130,7 +130,7 @@ services:
       MOB_AI_WORKER_POLL_SECONDS: ${MOB_AI_WORKER_POLL_SECONDS:-1}
       PYTHONUNBUFFERED: "1"
     healthcheck:
-      test: ["CMD", "python3", "-c", "from pathlib import Path; import time; p=Path('/workspace/frontend/.state/worker-heartbeat'); raise SystemExit(0 if p.is_file() and time.time()-p.stat().st_mtime < 30 else 1)"]
+      test: ["CMD", "python3", "-c", "from pathlib import Path; import time; p=Path('/workspace/worker/.state/worker-heartbeat'); raise SystemExit(0 if p.is_file() and time.time()-p.stat().st_mtime < 30 else 1)"]
       interval: 5s
       timeout: 3s
       retries: 12

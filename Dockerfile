@@ -75,7 +75,7 @@ WORKDIR /workspace
 USER analyst
 
 FROM provider-runtime AS web
-CMD ["gunicorn", "--bind", "0.0.0.0:8787", "--workers", "1", "--threads", "8", "--timeout", "0", "frontend.app:app"]
+CMD ["gunicorn", "--bind", "0.0.0.0:8787", "--workers", "1", "--threads", "8", "--timeout", "0", "backend.app:app"]
 
 # The worker owns device execution and APK analysis. It reuses the provider
 # runtime layers, then adds only the tools required by pipeline/pipeline.py.
@@ -118,7 +118,7 @@ RUN set -eux; \
     chown -R analyst:analyst /opt/ghidra-mcp
 
 USER analyst
-CMD ["python3", "-m", "frontend.worker"]
+CMD ["python3", "-m", "worker.main"]
 
 # Full Ghidra is isolated in the native-analysis service and is not inherited
 # by either the web or worker image.

@@ -10,12 +10,12 @@ import subprocess
 import threading
 import uuid
 
-from frontend.job_queue import atomic_write_json
-from frontend.orchestrator_runtime import WORKSPACE, read_json, write_json
-from frontend.providers import PROVIDER_IDS, ProviderRequest, provider_adapter, validate_provider_output
-from frontend.web_artifacts import ARTIFACT_PREVIEW_SUFFIXES, artifact_manifest, resolve_run_directory
-from frontend.web_auth import REASONING_EFFORTS, provider_authenticated, provider_model_catalog
-from frontend.web_common import json_file, strip_terminal_controls, subprocess_capture_text, utc_now
+from worker.queue import atomic_write_json
+from assessment.runtime import WORKSPACE, read_json, write_json
+from backend.providers import PROVIDER_IDS, ProviderRequest, provider_adapter, validate_provider_output
+from backend.artifacts import ARTIFACT_PREVIEW_SUFFIXES, artifact_manifest, resolve_run_directory
+from backend.auth import REASONING_EFFORTS, provider_authenticated, provider_model_catalog
+from backend.common import json_file, strip_terminal_controls, subprocess_capture_text, utc_now
 
 
 ASSISTANT_SCHEMA = WORKSPACE / "pipeline" / "assistant-response.schema.json"

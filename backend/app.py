@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import json
 import os
 from pathlib import Path
@@ -10,6 +9,7 @@ import subprocess
 import tempfile
 import threading
 import time
+from types import SimpleNamespace
 import uuid
 
 from flask import Flask, jsonify, request, send_file, send_from_directory
@@ -17,26 +17,25 @@ from werkzeug.exceptions import RequestEntityTooLarge
 from werkzeug.utils import secure_filename
 
 from pipeline.diagnostic_recipes import diagnostic_recipe_catalog
-from frontend.orchestrator_outcomes import terminal_outcome
-from frontend.orchestrator_runtime import (
+from assessment.runtime import (
     LoopError, RUNS_ROOT, WORKSPACE, read_json, sha256, workspace_relative, write_json,
 )
-from frontend.orchestrator_state import (
+from assessment.state import (
     checkpoint_recovery_available, frida_recovery_available,
     usage_limit_recovery_available,
 )
-from frontend.job_queue import HEARTBEAT_PATH, STATE_ROOT, atomic_write_json
-from frontend.providers import PROVIDER_IDS
-from frontend.web_artifacts import (
+from worker.queue import HEARTBEAT_PATH, atomic_write_json
+from backend.providers import PROVIDER_IDS
+from backend.artifacts import (
     ARTIFACT_PREVIEW_SUFFIXES, artifact_manifest, resolve_run_artifact,
     resolve_run_directory,
 )
-from frontend.web_assistant import (
+from backend.assistant import (
     assistant_evidence_bundle, assistant_evidence_snapshot, assistant_history,
     assistant_request_state, failed_assistant_requests, run_assistant_turn,
     start_assistant_request,
 )
-from frontend.web_auth import (
+from backend.auth import (
     REASONING_EFFORTS,
     auth_state, claude_auth_state, claude_login_status, codex_authenticated,
     codex_login_status, codex_model_catalog, provider_auth_state,
@@ -44,13 +43,22 @@ from frontend.web_auth import (
     read_connected_account_models, sign_out_claude, sign_out_codex,
     start_claude_auth, start_device_auth,
 )
-from frontend.web_common import json_file, strip_terminal_controls, subprocess_capture_text, truthy, utc_now
+from backend.common import json_file, strip_terminal_controls, subprocess_capture_text, truthy, utc_now
+from backend.requests import ContinuationRequest, DeviceReadinessRequest, StartAssessmentRequest
+from backend.run_catalog import recorded_success_policy, runs
+from backend.jobs import (
+    infer_attempt_kind, infer_job_run_id, job_state, jobs, start_job,
+)
+from backend.routes import (
+    create_auth_blueprint, create_devices_blueprint, create_jobs_blueprint,
+    create_runs_blueprint, create_system_blueprint,
+)
 
 
-STATIC_ROOT = WORKSPACE / "frontend" / "dist"
+STATIC_ROOT = WORKSPACE / "frontend"
 UPLOAD_ROOT = WORKSPACE / "uploads"
 POLICY_ROOT = WORKSPACE / "policies" / "generated"
-WIRELESS_DEVICES_PATH = WORKSPACE / "frontend" / ".state" / "wireless-devices.json"
+WIRELESS_DEVICES_PATH = WORKSPACE / "worker" / ".state" / "wireless-devices.json"
 UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
 POLICY_ROOT.mkdir(parents=True, exist_ok=True)
 
@@ -101,51 +109,6 @@ def record_wireless_device(*, pairing_endpoint: str = "", connection_endpoint: s
         item["updated_utc"] = now
         atomic_write_json(WIRELESS_DEVICES_PATH, {"devices": devices})
         return dict(item)
-
-
-def recorded_success_policy(config: dict | None) -> dict:
-    """Return safe display metadata for the immutable policy bound to a run."""
-    config = config or {}
-    relative = str(config.get("success_spec") or "")
-    expected_hash = str(config.get("success_spec_sha256") or "")
-    policy: dict = {}
-    valid = False
-    if relative:
-        try:
-            path = (WORKSPACE / relative).resolve()
-            path.relative_to(WORKSPACE)
-            policy = json_file(path) or {}
-            valid = bool(policy and expected_hash and sha256(path) == expected_hash)
-        except (ValueError, OSError):
-            pass
-    checks = []
-    expected_activity = ""
-    expected_ui_pattern = ""
-    forbidden_ui_pattern = ""
-    for check in policy.get("checks") or []:
-        check_type = str(check.get("type") or "") if isinstance(check, dict) else ""
-        if check_type:
-            checks.append(check_type)
-        if check_type == "activity_reached":
-            expected_activity = str(check.get("activity") or "")
-        elif check_type == "ui_text_regex":
-            expected_ui_pattern = str(check.get("pattern") or "")
-        elif check_type == "ui_text_not_regex":
-            forbidden_ui_pattern = str(check.get("pattern") or "")
-    return {
-        "name": str(policy.get("name") or "Recorded success policy"),
-        "preset": str(policy.get("preset") or "advanced"),
-        "repeat": int(policy.get("repeat") or 1),
-        "min_passes": int(policy.get("min_passes") or policy.get("repeat") or 1),
-        "baseline_required": bool(policy.get("baseline_required")),
-        "checks": checks,
-        "sha256": expected_hash,
-        "valid": valid,
-        "path": relative,
-        "expected_activity": expected_activity,
-        "expected_ui_pattern": expected_ui_pattern,
-        "forbidden_ui_pattern": forbidden_ui_pattern,
-    }
 
 
 def resolve_workspace_item(value: str, *, directory: bool = False) -> Path:
@@ -229,222 +192,8 @@ def success_policy(body: dict) -> Path:
 
 
 
-def runs() -> list[dict]:
-    if not RUNS_ROOT.is_dir():
-        return []
-    result: list[dict] = []
-    for directory in sorted(RUNS_ROOT.iterdir(), key=lambda path: path.stat().st_mtime, reverse=True):
-        if not directory.is_dir():
-            continue
-        report = json_file(directory / "report.json")
-        if not report:
-            continue
-        latest = json_file(directory / "result.json") or {}
-        loop = json_file(directory / "codex-loop-result.json")
-        config = json_file(directory / "codex-loop-config.json")
-        native_selection = json_file(directory / "native-selection.json") or {}
-        native_batches = native_selection.get("batches") or []
-        native_queue = native_selection.get("queue") or []
-        native_libraries = {
-            str(name)
-            for batch in native_batches if isinstance(batch, dict)
-            for name in (batch.get("libraries") or []) if name
-        }
-        native_libraries.update(
-            str(item.get("library")) for item in native_queue
-            if isinstance(item, dict) and item.get("library")
-        )
-        native_processed = sum(
-            len(batch.get("libraries") or []) for batch in native_batches
-            if isinstance(batch, dict) and batch.get("status") in {"inconclusive", "resolved"}
-        )
-        policy = recorded_success_policy(config)
-        frida_recoverable = bool(loop and config and frida_recovery_available(loop))
-        checkpoint_recoverable = bool(loop and config and checkpoint_recovery_available(loop))
-        usage_recoverable = bool(loop and config and usage_limit_recovery_available(loop))
-        usage = (loop.get("usage") or {}) if loop else {}
-        terminal = terminal_outcome(loop)
-        resumable = bool(loop and loop.get("status") == "max_iterations" and config)
-        retryable = bool(loop and config and (directory / "original.apk").is_file())
-        actual_model = str(config.get("model") or "") if config else ""
-        actual_effort = str(config.get("reasoning_effort") or "") if config else ""
-        if (not actual_model or not actual_effort) and (directory / "agent").is_dir():
-            logs = sorted((directory / "agent").glob("iteration-*/codex.log"), key=lambda path: path.stat().st_mtime, reverse=True)
-            if logs:
-                header = logs[0].read_text(encoding="utf-8", errors="replace")[:4000]
-                model_match = re.search(r"(?m)^model:\s*(\S+)", header)
-                effort_match = re.search(r"(?m)^reasoning effort:\s*(\S+)", header)
-                actual_model = actual_model or (model_match.group(1) if model_match else "")
-                actual_effort = actual_effort or (effort_match.group(1) if effort_match else "")
-        result.append({
-            "id": directory.name,
-            "path": workspace_relative(directory),
-            "package": str(report.get("package") or ""),
-            "apk_sha256": str(report.get("sha256") or ""),
-            "created_utc": str(report.get("created_utc") or ""),
-            "static_findings": len(report.get("findings") or []),
-            "observation_events": int(latest.get("observation_events") or 0),
-            "status": str(loop.get("status") if loop else ("success" if latest.get("success") else "analysis")),
-            "detail": str(loop.get("detail") if loop else ""),
-            "terminal": terminal,
-            "iterations": len(loop.get("iterations") or []) if loop else 0,
-            "resumable": resumable,
-            "frida_recoverable": frida_recoverable,
-            "checkpoint_recoverable": checkpoint_recoverable,
-            "usage_recoverable": usage_recoverable,
-            "continuable": bool(resumable or frida_recoverable or checkpoint_recoverable or usage_recoverable),
-            "retryable": retryable,
-            "recovery_stage": str(((loop.get("checkpoint") or {}).get("stage") if loop else "") or ""),
-            "reason": str((loop.get("reason") if loop else "") or ""),
-            "usage_reset_utc": str(usage.get("reset_utc") or ""),
-            "usage_auto_resume": bool(usage.get("auto_resume")),
-            "frida_server": str(config.get("start_frida_server") if config else ""),
-            "reasoning_mode": str((config.get("reasoning_mode") if config else "single") or "single"),
-            "provider": str((config.get("provider") if config else "codex") or "codex"),
-            "model": actual_model,
-            "reasoning_effort": actual_effort,
-            "specialist_count": int(config.get("specialist_count") or 3) if config else 3,
-            "target": str(config.get("target") if config else latest.get("device") or ""),
-            "transport": str(config.get("transport") if config else latest.get("transport") or ""),
-            "success_policy": policy,
-            "apk_name": Path(str(config.get("apk") or "original.apk")).name if config else "original.apk",
-            "observation_seconds": int(config.get("observation_seconds") or 15) if config else 15,
-            "run_seconds": int(config.get("run_seconds") or 20) if config else 20,
-            "derived_from_run": str(config.get("derived_from_run") or "") if config else "",
-            "native_queue": {
-                "status": str(native_selection.get("queue_status") or "not_started"),
-                "batch": int((native_batches[-1].get("number") if native_batches else 0) or 0),
-                "batches": ((len(native_libraries) + 4) // 5) if native_libraries else 0,
-                "processed": native_processed,
-                "total": len(native_libraries),
-                "queued": len(native_queue),
-            },
-            "updated_utc": datetime.fromtimestamp(directory.stat().st_mtime, timezone.utc).isoformat(),
-        })
-    return result
-
-
-def job_log_tail(job_id: str, limit: int = 120_000) -> str:
-    log_path = STATE_ROOT / job_id / "output.log"
-    if not log_path.is_file():
-        return ""
-    with log_path.open("rb") as stream:
-        stream.seek(max(0, log_path.stat().st_size - limit))
-        return stream.read().decode("utf-8", errors="replace")
-
-
-def job_log_head(job_id: str, limit: int = 8_000) -> str:
-    log_path = STATE_ROOT / job_id / "output.log"
-    if not log_path.is_file():
-        return ""
-    with log_path.open("rb") as stream:
-        return stream.read(limit).decode("utf-8", errors="replace")
-
-
-def infer_job_run_id(state: dict, log_text: str) -> str:
-    recorded = str(state.get("run_id") or "")
-    if re.fullmatch(r"[A-Za-z0-9._-]+", recorded):
-        return recorded
-    matches = re.findall(r"(?:/workspace/)?runs/([A-Za-z0-9._-]+)", log_text)
-    return matches[-1] if matches else ""
-
-
-def infer_attempt_kind(state: dict, log_text: str) -> str:
-    recorded = str(state.get("attempt_kind") or "")
-    if recorded:
-        return recorded
-    if state.get("kind") == "start":
-        return "initial"
-    if "--observation-mode only" in log_text:
-        return "frida_recovery" if "--start-frida-server" in log_text else "observation_recovery"
-    if "--candidate-script" in log_text and "checkpoint-recovery" in log_text:
-        return "validation_recovery"
-    return "resume"
-
-
-def job_state(job_id: str, *, include_output: bool = True) -> dict:
-    if not re.fullmatch(r"[a-f0-9]{32}", job_id):
-        raise ValueError("Invalid job identifier.")
-    stored = json_file(STATE_ROOT / job_id / "job.json")
-    if not stored:
-        raise FileNotFoundError("Job not found.")
-    state = dict(stored)
-    log_text = job_log_tail(job_id, 120_000 if include_output else 32_000)
-    inference_text = job_log_head(job_id) + "\n" + log_text
-    state["run_id"] = infer_job_run_id(state, inference_text)
-    state["attempt_kind"] = infer_attempt_kind(state, inference_text)
-    if include_output:
-        state["stdout"] = log_text
-        state["stderr"] = ""
-    return state
-
-
-def jobs() -> list[dict]:
-    directories = sorted((path for path in STATE_ROOT.iterdir() if path.is_dir()), key=lambda path: path.stat().st_mtime, reverse=True)
-    result = []
-    for directory in directories[:20]:
-        try:
-            result.append(job_state(directory.name, include_output=False))
-        except (ValueError, FileNotFoundError):
-            pass
-    previous_by_run: dict[str, str] = {}
-    count_by_run: dict[str, int] = {}
-    for state in sorted(result, key=lambda item: str(item.get("started_utc") or item.get("queued_utc") or "")):
-        run_id = str(state.get("run_id") or "")
-        if not run_id:
-            state.setdefault("attempt_number", 1)
-            state.setdefault("parent_job_id", "")
-            continue
-        count_by_run[run_id] = count_by_run.get(run_id, 0) + 1
-        state["attempt_number"] = int(state.get("attempt_number") or count_by_run[run_id])
-        state["parent_job_id"] = str(state.get("parent_job_id") or previous_by_run.get(run_id) or "")
-        previous_by_run[run_id] = state["id"]
-    return result
-
-
-def resume_attempt_kind(run_dir: Path) -> str:
-    summary = json_file(run_dir / "codex-loop-result.json") or {}
-    if usage_limit_recovery_available(summary):
-        return "usage_limit_resume"
-    if frida_recovery_available(summary):
-        return "frida_recovery"
-    if checkpoint_recovery_available(summary):
-        stage = str((summary.get("checkpoint") or {}).get("stage") or "")
-        return f"{stage}_recovery" if stage else "checkpoint_recovery"
-    return "resume"
-
-
-def start_job(kind: str, label: str, payload: dict) -> dict:
-    provider = str(payload.get("provider") or "codex")
-    if provider not in PROVIDER_IDS:
-        raise ValueError("Unsupported reasoning provider.")
-    if not provider_authenticated(provider):
-        account = "ChatGPT" if provider == "codex" else "Claude"
-        raise ValueError(f"{account} is not connected. Connect it from the dashboard first.")
-    run_id = Path(payload["run"]).name if kind in {"resume", "retry"} else ""
-    existing = jobs() if run_id else []
-    related = [job for job in existing if job.get("run_id") == run_id]
-    parent_job_id = related[0]["id"] if related else ""
-    attempt_number = max((int(job.get("attempt_number") or 0) for job in related), default=0) + 1
-    attempt_kind = "diagnostic_retry" if kind == "retry" else (resume_attempt_kind(Path(payload["run"])) if kind == "resume" else "initial")
-    with _lock:
-        if any(job.get("running") or job.get("status") == "queued" for job in jobs()):
-            raise ValueError("Another assessment job is running or queued.")
-        job_id = uuid.uuid4().hex
-        directory = STATE_ROOT / job_id
-        directory.mkdir(parents=True)
-        state = {
-            "id": job_id, "kind": kind, "label": label, "queued_utc": utc_now(),
-            "started_utc": "", "running": False, "exit_code": None, "status": "queued",
-            "run_id": run_id, "attempt_number": attempt_number,
-            "attempt_kind": attempt_kind, "parent_job_id": parent_job_id,
-        }
-        atomic_write_json(directory / "request.json", {"kind": kind, "label": label, "payload": payload})
-        atomic_write_json(directory / "job.json", state)
-    return job_state(job_id)
-
-
 def parse_start(body: dict) -> tuple[str, dict]:
+    body = StartAssessmentRequest.from_mapping(body)
     if not body.get("authorized"):
         raise ValueError("Confirm ownership or explicit testing authorization.")
     derived_from_run = str(body.get("source_run") or "")
@@ -522,6 +271,7 @@ def parse_start(body: dict) -> tuple[str, dict]:
 
 
 def parse_resume(body: dict) -> tuple[str, dict]:
+    body = ContinuationRequest.from_mapping(body)
     if not body.get("authorized"):
         raise ValueError("Confirm testing authorization before resuming.")
     run_dir = resolve_workspace_item(str(body.get("run") or ""), directory=True)
@@ -627,7 +377,6 @@ def upload_too_large(_error):
     return jsonify(error=f"Upload exceeds the {limit} MB limit."), 413
 
 
-@app.get("/api/health")
 def health():
     worker_age = time.time() - HEARTBEAT_PATH.stat().st_mtime if HEARTBEAT_PATH.is_file() else None
     return jsonify(
@@ -636,7 +385,6 @@ def health():
     )
 
 
-@app.get("/api/overview")
 def overview():
     apk_paths = [*WORKSPACE.glob("*.apk"), *UPLOAD_ROOT.glob("*.apk")]
     apks = [{"name": path.name, "path": workspace_relative(path), "size": path.stat().st_size} for path in apk_paths if path.is_file()]
@@ -657,23 +405,19 @@ def overview():
     )
 
 
-@app.get("/api/models")
 def models():
     provider = str(request.args.get("provider") or "codex")
     return jsonify(provider_model_catalog(provider, force=request.args.get("refresh") == "1"))
 
 
-@app.get("/api/providers")
 def providers():
     return jsonify(providers={provider: provider_auth_state(provider) for provider in sorted(PROVIDER_IDS)})
 
 
-@app.get("/api/providers/<provider>/auth")
 def get_provider_auth(provider: str):
     return jsonify(provider_auth_state(provider))
 
 
-@app.post("/api/providers/<provider>/auth/login")
 def begin_provider_auth(provider: str):
     if provider == "codex":
         return jsonify(start_device_auth()), 202
@@ -682,7 +426,6 @@ def begin_provider_auth(provider: str):
     raise ValueError("Unsupported reasoning provider.")
 
 
-@app.post("/api/providers/<provider>/auth/logout")
 def logout_provider_auth(provider: str):
     if provider == "codex":
         return jsonify(sign_out_codex())
@@ -691,22 +434,18 @@ def logout_provider_auth(provider: str):
     raise ValueError("Unsupported reasoning provider.")
 
 
-@app.get("/api/auth")
 def get_auth():
     return jsonify(auth_state())
 
 
-@app.post("/api/auth/device")
 def begin_auth():
     return jsonify(start_device_auth()), 202
 
 
-@app.post("/api/auth/logout")
 def logout_auth():
     return jsonify(sign_out_codex())
 
 
-@app.post("/api/apks")
 def upload_apk():
     uploaded = request.files.get("apk")
     if not uploaded or not uploaded.filename:
@@ -805,7 +544,6 @@ def wireless_device_view(found: list[dict], mdns: list[dict]) -> list[dict]:
     return sorted(output, key=lambda item: (order.get(item["status"], 9), item.get("host") or ""))
 
 
-@app.get("/api/devices")
 def devices():
     result = subprocess.run(["adb", "devices", "-l"], text=True, capture_output=True, timeout=20)
     if result.returncode:
@@ -819,7 +557,6 @@ def devices():
     return jsonify(devices=found, wireless_devices=wireless_device_view(found, mdns))
 
 
-@app.post("/api/devices/connect")
 def connect_wireless_device():
     body = request.get_json(force=True, silent=False) or {}
     endpoint = token(str(body.get("endpoint") or ""), "wireless connection address", r"[A-Za-z0-9._:\-\[\]]+")
@@ -845,18 +582,24 @@ def readiness_check(name: str, passed: bool, detail: str, *, required: bool = Tr
     }
 
 
-@app.post("/api/devices/readiness")
 def device_readiness():
-    transport = str(request.form.get("transport") or "")
+    readiness_request = DeviceReadinessRequest(
+        transport=str(request.form.get("transport") or ""),
+        target=str(request.form.get("target") or ""),
+        frida_server=str(request.form.get("frida_server") or ""),
+        start_frida=truthy(request.form.get("start_frida")),
+        authorized=truthy(request.form.get("authorized")),
+    )
+    transport = readiness_request.transport
     if transport not in {"adb", "wireless"}:
         raise ValueError("Invalid transport.")
-    target = token(str(request.form.get("target") or ""), "device target", r"[A-Za-z0-9._:\-\[\]]+")
-    frida_server = str(request.form.get("frida_server") or "")
+    target = token(readiness_request.target, "device target", r"[A-Za-z0-9._:\-\[\]]+")
+    frida_server = readiness_request.frida_server
     if frida_server:
         token(frida_server, "Frida Server path", r"/[A-Za-z0-9_./-]+")
     uploaded = request.files.get("frida_binary")
-    start_frida = truthy(request.form.get("start_frida"))
-    authorized = truthy(request.form.get("authorized"))
+    start_frida = readiness_request.start_frida
+    authorized = readiness_request.authorized
     if (uploaded and uploaded.filename) or start_frida:
         if not authorized:
             raise ValueError("Confirm testing authorization before deploying or starting Frida Server.")
@@ -958,7 +701,6 @@ def device_readiness():
     )
 
 
-@app.post("/api/devices/pair")
 def pair_wireless_device():
     body = request.get_json(force=True, silent=False) or {}
     endpoint = token(str(body.get("endpoint") or ""), "pairing address", r"[A-Za-z0-9._:\-\[\]]+")
@@ -993,12 +735,10 @@ def pair_wireless_device():
     )
 
 
-@app.get("/api/runs")
 def list_runs():
     return jsonify(runs=runs())
 
 
-@app.get("/api/runs/<run_id>/artifacts")
 def list_run_artifacts(run_id: str):
     try:
         manifest = artifact_manifest(run_id)
@@ -1008,7 +748,6 @@ def list_run_artifacts(run_id: str):
     return jsonify(manifest)
 
 
-@app.get("/api/runs/<run_id>/artifacts/content")
 def preview_run_artifact(run_id: str):
     try:
         path = resolve_run_artifact(run_id, str(request.args.get("path") or ""))
@@ -1024,7 +763,6 @@ def preview_run_artifact(run_id: str):
     return jsonify(path=path.name, content=content, truncated=truncated)
 
 
-@app.get("/api/runs/<run_id>/artifacts/download")
 def download_run_artifact(run_id: str):
     try:
         path = resolve_run_artifact(run_id, str(request.args.get("path") or ""))
@@ -1033,7 +771,6 @@ def download_run_artifact(run_id: str):
     return send_file(path, as_attachment=True, download_name=path.name, max_age=0)
 
 
-@app.get("/api/runs/<run_id>/assistant")
 def get_run_assistant(run_id: str):
     try:
         history = assistant_history(run_id)
@@ -1043,7 +780,6 @@ def get_run_assistant(run_id: str):
     return jsonify(run_id=run_id, turns=history, failures=failures)
 
 
-@app.post("/api/runs/<run_id>/assistant")
 def ask_run_assistant(run_id: str):
     body = request.get_json(force=True, silent=False) or {}
     try:
@@ -1053,7 +789,6 @@ def ask_run_assistant(run_id: str):
     return jsonify(state), 202
 
 
-@app.get("/api/runs/<run_id>/assistant/requests/<request_id>")
 def get_run_assistant_request(run_id: str, request_id: str):
     try:
         state = assistant_request_state(run_id, request_id)
@@ -1062,12 +797,10 @@ def get_run_assistant_request(run_id: str, request_id: str):
     return jsonify(state)
 
 
-@app.get("/api/jobs")
 def list_jobs():
     return jsonify(jobs=jobs())
 
 
-@app.get("/api/jobs/<job_id>")
 def get_job(job_id: str):
     try:
         return jsonify(job_state(job_id))
@@ -1075,22 +808,38 @@ def get_job(job_id: str):
         return jsonify(error=str(error)), 404
 
 
-@app.post("/api/start")
 def start():
     label, payload = parse_start(request.get_json(force=True, silent=False) or {})
     return jsonify(start_job("start", label, payload)), 202
 
 
-@app.post("/api/resume")
 def resume():
     label, payload = parse_resume(request.get_json(force=True, silent=False) or {})
     return jsonify(start_job("resume", label, payload)), 202
 
 
-@app.post("/api/retry")
 def retry():
     label, payload = parse_retry(request.get_json(force=True, silent=False) or {})
     return jsonify(start_job("retry", label, payload)), 202
+
+
+_handlers = SimpleNamespace(**{
+    name: globals()[name] for name in (
+        "health", "overview", "models", "providers", "upload_apk",
+        "get_provider_auth", "begin_provider_auth", "logout_provider_auth",
+        "get_auth", "begin_auth", "logout_auth", "devices",
+        "connect_wireless_device", "device_readiness", "pair_wireless_device",
+        "list_runs", "list_run_artifacts", "preview_run_artifact",
+        "download_run_artifact", "get_run_assistant", "ask_run_assistant",
+        "get_run_assistant_request", "list_jobs", "get_job", "start",
+        "resume", "retry",
+    )
+})
+app.register_blueprint(create_system_blueprint(_handlers))
+app.register_blueprint(create_auth_blueprint(_handlers))
+app.register_blueprint(create_devices_blueprint(_handlers))
+app.register_blueprint(create_runs_blueprint(_handlers))
+app.register_blueprint(create_jobs_blueprint(_handlers))
 
 
 @app.get("/")

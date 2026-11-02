@@ -15,7 +15,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from frontend.web_common import strip_terminal_controls, utc_now
+from backend.common import strip_terminal_controls, utc_now
 
 
 MODEL_FALLBACK = [
@@ -187,6 +187,8 @@ def read_codex_models() -> list[dict]:
         except subprocess.TimeoutExpired:
             process.kill()
             process.wait(timeout=3)
+        if process.stdout:
+            process.stdout.close()
 
 
 def codex_model_catalog(*, force: bool = False) -> dict:

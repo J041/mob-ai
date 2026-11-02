@@ -7,8 +7,8 @@ import json
 from pathlib import Path, PurePosixPath
 import re
 
-from frontend.orchestrator_outcomes import terminal_outcome
-from frontend.orchestrator_runtime import RUNS_ROOT
+from assessment.outcomes import terminal_outcome
+from assessment.runtime import RUNS_ROOT
 
 
 ARTIFACT_PREVIEW_SUFFIXES = {".json", ".log", ".txt", ".js", ".md", ".toml", ".xml", ".yaml", ".yml", ".csv"}
