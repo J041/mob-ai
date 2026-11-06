@@ -27,7 +27,11 @@ from assessment.runtime import (
     pipeline_args, read_json, run_logged, sha256, target_args,
     set_control_run_dir, validate_decision_schema_registry, workspace_relative, write_json,
 )
-from backend.providers import ProviderRequest, detect_usage_limit, provider_adapter, validate_provider_output
+from assessment.usage import record_provider_usage
+from backend.providers import (
+    ProviderRequest, detect_usage_limit, provider_adapter, provider_token_usage,
+    validate_provider_output,
+)
 
 
 class LoopRunner(RecoveryMixin, NativeAnalysisMixin):
@@ -376,6 +380,11 @@ class LoopRunner(RecoveryMixin, NativeAnalysisMixin):
                 command, self.log, cwd=iteration_dir, input_text=provider_prompt, artifact=provider_log,
                 stage=f"provider_iteration_{iteration}",
             )
+            call_usage = provider_token_usage(provider, output)
+            record_provider_usage(
+                run_dir, call_usage, phase=f"iteration_{iteration}", artifact=provider_log,
+                model=str(config.get("model") or ""),
+            )
             completed = adapter.finalize(provider_request, exit_code, output)
             if not completed or not validate_provider_output(decision_path, DECISION_SCHEMA):
                 limit = detect_usage_limit(output)
@@ -441,7 +450,10 @@ class LoopRunner(RecoveryMixin, NativeAnalysisMixin):
                         if prior_rounds >= DIAGNOSTIC_MAX_ROUNDS
                         else "The requested diagnostic actions were already completed."
                     )
-                    record = {"iteration": iteration, "codex": decision, "validation": None}
+                    record = {
+                        "iteration": iteration, "codex": decision, "validation": None,
+                        "provider_usage": call_usage,
+                    }
                     records.append(record)
                     write_json(iteration_dir / "record.json", record)
                     write_summary(run_dir, "human_review", records, reason)
@@ -466,6 +478,7 @@ class LoopRunner(RecoveryMixin, NativeAnalysisMixin):
                     "iteration": iteration, "candidate": workspace_relative(candidate),
                     "candidate_sha256": sha256(candidate), "codex": decision,
                     "diagnostics": diagnostic, "validation": None,
+                    "provider_usage": call_usage,
                 }
                 records.append(record)
                 write_json(iteration_dir / "record.json", record)
@@ -474,7 +487,10 @@ class LoopRunner(RecoveryMixin, NativeAnalysisMixin):
                 self._pause_boundary(run_dir, records, iteration + 1, f"diagnostics_iteration_{iteration}")
                 continue
             if decision.get("decision") == "human_review":
-                record = {"iteration": iteration, "codex": decision, "validation": None}
+                record = {
+                    "iteration": iteration, "codex": decision, "validation": None,
+                    "provider_usage": call_usage,
+                }
                 records.append(record)
                 write_json(iteration_dir / "record.json", record)
                 write_summary(run_dir, "human_review", records, decision.get("rationale", "Codex requested review."))
@@ -519,6 +535,7 @@ class LoopRunner(RecoveryMixin, NativeAnalysisMixin):
                 "iteration": iteration, "candidate": workspace_relative(candidate),
                 "candidate_sha256": candidate_hash, "codex": decision,
                 "pipeline_exit_code": exit_code, "validation": validation,
+                "provider_usage": call_usage,
             }
             records.append(record)
             write_json(iteration_dir / "record.json", record)

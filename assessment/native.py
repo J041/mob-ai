@@ -10,13 +10,17 @@ from typing import Any
 import zipfile
 
 from pipeline.pipeline import group_native_libraries, scan_native
+from assessment.usage import record_provider_usage
 from assessment.runtime import (
     NATIVE_BATCH_SIZE, NATIVE_REPLENISHMENT_SCHEMA,
     NATIVE_SELECTION_SCHEMA, NATIVE_TOTAL_LIMIT, WORKSPACE, LoopError,
     ProviderUsageLimit, normalize_android_abi, read_json,
     recorded_device_abi, run_logged, sha256, workspace_relative, write_json,
 )
-from backend.providers import ProviderRequest, detect_usage_limit, provider_adapter, validate_provider_output
+from backend.providers import (
+    ProviderRequest, detect_usage_limit, provider_adapter, provider_token_usage,
+    validate_provider_output,
+)
 from assessment.ghidra import ensure_ghidra_programs_open, prepare_ghidra_batch
 from assessment.native_inventory import NativeInventoryMixin
 from assessment.native_queue import NativeQueueMixin
@@ -122,6 +126,10 @@ Do not edit any file, invoke a device, or claim assessment success. Return only 
         exit_code, output = run_logged(
             command, self.log, cwd=selection_dir, input_text=provider_prompt,
             artifact=selection_dir / f"{provider}.log",
+        )
+        record_provider_usage(
+            run_dir, provider_token_usage(provider, output), phase="native_selection",
+            artifact=selection_dir / f"{provider}.log", model=str(config.get("model") or ""),
         )
         limit = detect_usage_limit(output)
         if limit:

@@ -26,8 +26,12 @@ from assessment.orchestrator import (
     validate_decision_schema_registry,
 )
 from assessment.runtime import JobControl, JobPaused, install_job_control
-from backend.providers import ProviderRequest, detect_usage_limit, provider_adapter, validate_provider_output
+from backend.providers import (
+    ProviderRequest, detect_usage_limit, provider_adapter, provider_token_usage,
+    validate_provider_output,
+)
 from backend.events import activity_revision
+from assessment.usage import assessment_token_usage, record_provider_usage, token_usage_delta
 
 
 class WebAppTests(unittest.TestCase):
@@ -49,6 +53,47 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(usage["code"], "subscription_sharing_usage_limit_exceeded")
         self.assertEqual(usage["reset_utc"], "2026-11-01T05:30:00+00:00")
         self.assertIsNone(detect_usage_limit("429 rate_limit_exceeded; retry after 2 seconds"))
+
+    def test_provider_token_usage_normalizes_codex_and_claude(self) -> None:
+        codex = provider_token_usage("codex", "\n".join((
+            '{"type":"thread.started","thread_id":"t"}',
+            '{"type":"turn.completed","usage":{"input_tokens":120,"cached_input_tokens":20,"output_tokens":30,"total_tokens":150}}',
+        )))
+        claude = provider_token_usage("claude", json.dumps({
+            "result": "{}", "usage": {
+                "input_tokens": 40, "cache_read_input_tokens": 10,
+                "cache_creation_input_tokens": 5, "output_tokens": 15,
+            },
+        }))
+        legacy = provider_token_usage("codex", "tokens used\n71,471\n")
+        self.assertEqual(codex["total_tokens"], 150)
+        self.assertEqual(codex["cached_input_tokens"], 20)
+        self.assertEqual(claude["total_tokens"], 70)
+        self.assertEqual(legacy["total_tokens"], 71471)
+        self.assertFalse(legacy["detail_available"])
+
+    def test_assessment_usage_ledger_backfills_legacy_and_tracks_delta(self) -> None:
+        with tempfile.TemporaryDirectory(dir=WORKSPACE) as temp:
+            run = Path(temp)
+            legacy_log = run / "agent" / "iteration-1" / "codex.log"
+            legacy_log.parent.mkdir(parents=True)
+            legacy_log.write_text("tokens used\n1,200\n", encoding="utf-8")
+            before = assessment_token_usage(run)
+            current_log = run / "agent" / "iteration-2" / "codex.log"
+            current_log.parent.mkdir(parents=True)
+            current_log.write_text("structured trace\n", encoding="utf-8")
+            record_provider_usage(run, {
+                "provider": "codex", "input_tokens": 300, "cached_input_tokens": 50,
+                "cache_creation_input_tokens": 0, "output_tokens": 100,
+                "reasoning_output_tokens": 20, "total_tokens": 400,
+                "detail_available": True, "source": "structured",
+            }, phase="iteration_2", artifact=current_log, model="test-model")
+            after = assessment_token_usage(run)
+            delta = token_usage_delta(after, before)
+        self.assertEqual(before["total_tokens"], 1200)
+        self.assertEqual(after["total_tokens"], 1600)
+        self.assertEqual(after["calls"], 2)
+        self.assertEqual(delta["total_tokens"], 400)
 
     def test_usage_limit_checkpoint_is_resumable(self) -> None:
         self.assertTrue(usage_limit_recovery_available({
@@ -181,6 +226,19 @@ class WebAppTests(unittest.TestCase):
         self.assertIn("matching this schema exactly", prompt)
         self.assertTrue(completed)
         self.assertTrue(valid)
+
+    def test_codex_adapter_requests_structured_usage_events(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            schema = root / "schema.json"
+            schema.write_text('{}', encoding="utf-8")
+            request = ProviderRequest(
+                provider="codex", prompt="Answer", cwd=root,
+                schema_path=schema, output_path=root / "answer.json",
+            )
+            command, _prompt = provider_adapter("codex").prepare(request)
+        self.assertIn("--json", command)
+        self.assertIn("--output-last-message", command)
 
     def test_diagnostic_decision_requires_allowlisted_actions(self) -> None:
         schema = WORKSPACE / "pipeline" / "codex-decision.schema.json"

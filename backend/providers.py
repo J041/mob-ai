@@ -12,6 +12,76 @@ from typing import Any
 PROVIDER_IDS = {"codex", "claude"}
 
 
+def provider_token_usage(provider: str, output: str) -> dict[str, Any] | None:
+    """Normalize provider-reported token counts without estimating missing fields."""
+    records: list[dict[str, Any]] = []
+    if provider == "codex":
+        for line in (output or "").splitlines():
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            usage = event.get("usage") if isinstance(event, dict) and event.get("type") == "turn.completed" else None
+            if isinstance(usage, dict):
+                records.append(usage)
+    elif provider == "claude":
+        try:
+            envelope = json.loads(output or "")
+        except json.JSONDecodeError:
+            envelope = None
+        usage = envelope.get("usage") if isinstance(envelope, dict) else None
+        if isinstance(usage, dict):
+            records.append(usage)
+
+    if records:
+        input_tokens = sum(int(item.get("input_tokens") or 0) for item in records)
+        output_tokens = sum(int(item.get("output_tokens") or 0) for item in records)
+        cached_input_tokens = sum(int(
+            item.get("cached_input_tokens") or item.get("cache_read_input_tokens") or 0
+        ) for item in records)
+        cache_creation_input_tokens = sum(int(
+            item.get("cache_creation_input_tokens") or 0
+        ) for item in records)
+        reasoning_output_tokens = sum(int(
+            ((item.get("output_tokens_details") or {}).get("reasoning_tokens") or 0)
+            if isinstance(item.get("output_tokens_details"), dict) else 0
+        ) for item in records)
+        reported_totals = [int(item.get("total_tokens") or 0) for item in records]
+        if any(reported_totals):
+            total_tokens = sum(reported_totals)
+        elif provider == "claude":
+            total_tokens = input_tokens + output_tokens + cached_input_tokens + cache_creation_input_tokens
+        else:
+            total_tokens = input_tokens + output_tokens
+        return {
+            "provider": provider,
+            "input_tokens": input_tokens,
+            "cached_input_tokens": cached_input_tokens,
+            "cache_creation_input_tokens": cache_creation_input_tokens,
+            "output_tokens": output_tokens,
+            "reasoning_output_tokens": reasoning_output_tokens,
+            "total_tokens": total_tokens,
+            "detail_available": True,
+            "source": "structured",
+        }
+
+    if provider == "codex":
+        matches = re.findall(r"(?m)^tokens used\s*\r?\n\s*([\d,]+)\s*$", output or "", re.I)
+        if matches:
+            return {
+                "provider": provider,
+                "input_tokens": 0,
+                "cached_input_tokens": 0,
+                "cache_creation_input_tokens": 0,
+                "output_tokens": 0,
+                "reasoning_output_tokens": 0,
+                "total_tokens": int(matches[-1].replace(",", "")),
+                "detail_available": False,
+                "source": "legacy_total",
+            }
+    return None
+
+
 def detect_usage_limit(output: str, *, now: datetime | None = None) -> dict[str, str] | None:
     """Recognize plan-usage exhaustion without conflating transient request throttling."""
     text = output or ""
@@ -108,7 +178,7 @@ class CodexAdapter(ProviderAdapter):
             self.executable(), "exec", "--sandbox", "workspace-write" if request.writable else "read-only",
             "--skip-git-repo-check",
             "--enable" if request.reasoning_mode == "parallel" else "--disable", "multi_agent",
-            "--color", "never", "--config", 'approval_policy="never"',
+            "--json", "--color", "never", "--config", 'approval_policy="never"',
         ]
         if request.reasoning_effort:
             command.extend(["--config", f"model_reasoning_effort={json.dumps(request.reasoning_effort)}"])

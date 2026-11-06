@@ -48,6 +48,7 @@ The dashboard provides:
 - provider, model, and thinking-level selection for connected Codex and Claude accounts;
 - durable queued start, resume, and diagnostic-retry jobs with live output;
 - cooperative **Pause after stage** and **Cancel run** controls that preserve completed evidence;
+- provider-reported token totals per attempt and cumulative assessment, with input/output detail when available;
 - a run ledger showing findings, observations, status and resumability;
 - a per-run artifact browser for findings, hooks, comparisons, crash logs, Codex decisions, saved Ghidra results, and success-policy checks;
 - authorization confirmation before every start or resume operation.
@@ -333,6 +334,16 @@ or Ghidra preparation. New and continuation forms can opt into automatic resume,
 the worker schedules it only when the provider returned an explicit reset timestamp;
 an unknown reset time always requires manual continuation. A later manual attempt
 supersedes any older automatic checkpoint so it cannot launch a duplicate job.
+
+Reasoning token usage is displayed on each attempt in **Agent console** and as a
+cumulative total in **Assessment runs**. New Codex calls use the CLI's JSONL event
+stream and record `turn.completed.usage`; Claude JSON usage is normalized into the
+same fields. The append-only `provider-usage.jsonl` ledger is available in the
+Artifact browser under **Agent decisions**. Older Codex logs are backfilled from their
+reported `tokens used` total, so they are labeled **total only** and cannot be split
+reliably into input, cached-input, reasoning, and output tokens. These values are
+provider-reported token counts, not credit or currency estimates. Run-assistant chat
+usage is intentionally separate from assessment execution totals.
 
 The **Continue / retry** panel displays the success policy bound to the selected
 assessment, including its checks, repeat threshold, and baseline requirement. The

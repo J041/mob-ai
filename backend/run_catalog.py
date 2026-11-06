@@ -8,6 +8,7 @@ import re
 
 from assessment.outcomes import terminal_outcome
 from assessment.runtime import RUNS_ROOT, WORKSPACE, sha256, workspace_relative
+from assessment.usage import assessment_token_usage
 from assessment.state import (
     checkpoint_recovery_available, frida_recovery_available, pause_recovery_available,
     usage_limit_recovery_available,
@@ -95,6 +96,7 @@ def runs() -> list[dict]:
         pause_recoverable = bool(loop and config and pause_recovery_available(loop))
         usage = (loop.get("usage") or {}) if loop else {}
         terminal = terminal_outcome(loop)
+        token_usage = assessment_token_usage(directory)
         resumable = bool(loop and loop.get("status") == "max_iterations" and config)
         retryable = bool(loop and config and (directory / "original.apk").is_file())
         actual_model = str(config.get("model") or "") if config else ""
@@ -119,6 +121,7 @@ def runs() -> list[dict]:
             "detail": str(loop.get("detail") if loop else ""),
             "terminal": terminal,
             "iterations": len(loop.get("iterations") or []) if loop else 0,
+            "token_usage": token_usage,
             "resumable": resumable,
             "frida_recoverable": frida_recoverable,
             "checkpoint_recoverable": checkpoint_recoverable,

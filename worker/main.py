@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 import signal
 import subprocess
 import threading
@@ -17,6 +18,7 @@ from assessment.runtime import (
     EnvironmentFailure, JobCancelled, JobControl, JobPaused, LoopError,
     install_job_control,
 )
+from assessment.usage import aggregate_token_usage, assessment_token_usage, token_usage_delta
 
 
 POLL_SECONDS = float(os.environ.get("MOB_AI_WORKER_POLL_SECONDS", "1"))
@@ -28,6 +30,12 @@ def execute(directory, state: dict, request: dict) -> None:
     exit_code = 1
     status = "error"
     run_dir = None
+    requested_run = Path(str(payload.get("run") or "")) if payload.get("run") else None
+    usage_before = (
+        assessment_token_usage(requested_run)
+        if requested_run is not None and requested_run.is_dir()
+        else aggregate_token_usage([])
+    )
     control = JobControl()
     monitoring = threading.Event()
 
@@ -132,6 +140,10 @@ def execute(directory, state: dict, request: dict) -> None:
                         "run_id": run_dir.name if run_dir is not None else "",
                     },
                 })
+            if run_dir is not None and run_dir.is_dir():
+                assessment_usage = assessment_token_usage(run_dir)
+                state["token_usage"] = token_usage_delta(assessment_usage, usage_before)
+                state["assessment_token_usage"] = assessment_usage
             atomic_write_json(directory / "job.json", state)
 
 

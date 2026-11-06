@@ -109,6 +109,14 @@ class FrontendTests(unittest.TestCase):
         self.assertIn("controlSelectedJob('pause')", script)
         self.assertIn("controlSelectedJob('cancel')", script)
 
+    def test_run_and_attempt_token_usage_is_visible(self) -> None:
+        response = self.client.get("/scripts/app.js")
+        script = response.get_data(as_text=True)
+        response.close()
+        self.assertIn("function tokenLabel", script)
+        self.assertIn("run.token_usage", script)
+        self.assertIn("job.token_usage", script)
+
     def test_assessment_rows_share_grid_columns(self) -> None:
         response = self.client.get("/styles/styles.css")
         styles = response.get_data(as_text=True)

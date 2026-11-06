@@ -11,14 +11,14 @@ from assessment.outcomes import terminal_outcome
 from assessment.runtime import RUNS_ROOT
 
 
-ARTIFACT_PREVIEW_SUFFIXES = {".json", ".log", ".txt", ".js", ".md", ".toml", ".xml", ".yaml", ".yml", ".csv"}
+ARTIFACT_PREVIEW_SUFFIXES = {".json", ".jsonl", ".log", ".txt", ".js", ".md", ".toml", ".xml", ".yaml", ".yml", ".csv"}
 ARTIFACT_CATEGORIES = (
     ("findings", "Findings", "Static and runtime discovery reports.", ("report.json", "adaptive-plan.json", "observations.json", "native-selection.json")),
     ("hooks", "Generated hooks", "Generated and Codex-refined Frida scripts.", ("frida/*.js", "agent/iteration-*/candidate.js")),
     ("comparisons", "Attempt comparisons", "Before/after evidence from diagnostic retries.", ("agent/diagnostic-retry-*/comparison.json",)),
     ("runtime-diagnostics", "Runtime diagnostics", "Bounded adaptive traces, executable mappings and runtime payload captures.", ("diagnostics/**/*", "agent/iteration-*/diagnostics.log")),
     ("logs", "Logcat and crash reports", "Runtime, crash-buffer, exit-info and tombstone evidence.", ("logs/*.log", "agent/**/logs/*.log", "agent/**/pipeline.log")),
-    ("decisions", "Agent decisions", "Structured native triage, iteration records and provider execution logs.", ("codex-loop-result.json", "agent/native-selection/**/*", "agent/iteration-*/decision.json", "agent/iteration-*/record.json", "agent/iteration-*/codex.log", "agent/iteration-*/claude.log")),
+    ("decisions", "Agent decisions", "Structured native triage, token usage, iteration records and provider execution logs.", ("codex-loop-result.json", "provider-usage.jsonl", "agent/native-selection/**/*", "agent/iteration-*/decision.json", "agent/iteration-*/record.json", "agent/iteration-*/codex.log", "agent/iteration-*/claude.log")),
     ("ghidra", "Ghidra results", "Selected native inputs and saved analysis results produced through Ghidra.", ("native/selected/**/*", "ghidra/**/*", "ghidra-results/**/*", "agent/**/ghidra-*")),
     ("success", "Success-policy checks", "Recorded policy, baseline and validation outcomes.", ("result.json", "codex-loop-config.json", "agent/**/result.json")),
     ("assistant", "Assistant conversation", "Run-scoped questions, cited answers and read-only agent logs.", ("assistant/**/*",)),
@@ -90,7 +90,7 @@ def resolve_run_artifact(run_id: str, relative: str) -> Path:
     normalized = PurePosixPath(str(relative).replace("\\", "/")).as_posix().lstrip("/")
     parts = PurePosixPath(normalized).parts
     allowed = any((
-        normalized in {"report.json", "adaptive-plan.json", "observations.json", "native-selection.json", "codex-loop-result.json", "result.json", "codex-loop-config.json"},
+        normalized in {"report.json", "adaptive-plan.json", "observations.json", "native-selection.json", "codex-loop-result.json", "provider-usage.jsonl", "result.json", "codex-loop-config.json"},
         len(parts) == 2 and parts[0] == "frida" and normalized.endswith(".js"),
         len(parts) == 3 and parts[0] == "agent" and parts[1].startswith("iteration-") and parts[2] in {"candidate.js", "decision.json", "record.json", "codex.log", "claude.log", "diagnostics.log", "result.json", "provider-mcp.json"},
         len(parts) == 3 and parts[0] == "agent" and parts[1].startswith("diagnostic-retry-") and parts[2] in {"comparison.json", "pipeline.log", "result.json"},

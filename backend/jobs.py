@@ -20,6 +20,7 @@ from worker.queue import STATE_ROOT, atomic_write_json
 _lock = threading.RLock()
 _log_cache: dict[tuple[str, str], str] = {}
 _log_cache_lock = threading.Lock()
+_job_usage_cache: dict[str, tuple[tuple[int, int], dict]] = {}
 
 
 def _read_job_log(log_path: Path, limit: int, mode: str) -> str:
@@ -50,6 +51,32 @@ def job_log_tail(job_id: str, limit: int = 120_000) -> str:
 def job_log_head(job_id: str, limit: int = 8_000) -> str:
     log_path = STATE_ROOT / job_id / "output.log"
     return _read_job_log(log_path, limit, "head")
+
+
+def legacy_job_token_usage(job_id: str) -> dict:
+    log_path = STATE_ROOT / job_id / "output.log"
+    try:
+        stat = log_path.stat()
+    except OSError:
+        stat = None
+    signature = (stat.st_mtime_ns, stat.st_size) if stat else (0, 0)
+    cached = _job_usage_cache.get(str(log_path))
+    if cached and cached[0] == signature:
+        return dict(cached[1])
+    text = _read_job_log(log_path, stat.st_size if stat else 0, "full") if stat else ""
+    values = [
+        int(value.replace(",", ""))
+        for value in re.findall(r"(?m)^tokens used\s*\r?\n\s*([\d,]+)\s*$", text, re.I)
+    ]
+    usage = {
+        "input_tokens": 0, "cached_input_tokens": 0,
+        "cache_creation_input_tokens": 0, "output_tokens": 0,
+        "reasoning_output_tokens": 0, "total_tokens": sum(values),
+        "calls": len(values), "detailed_calls": 0,
+        "total_only_calls": len(values), "complete": False,
+    }
+    _job_usage_cache[str(log_path)] = (signature, usage)
+    return dict(usage)
 
 
 def request_job_control(job_id: str, action: str) -> dict:
@@ -126,6 +153,8 @@ def job_state(job_id: str, *, include_output: bool = True) -> dict:
     inference_text = job_log_head(job_id) + "\n" + log_text
     state["run_id"] = infer_job_run_id(state, inference_text)
     state["attempt_kind"] = infer_attempt_kind(state, inference_text)
+    if include_output and not isinstance(state.get("token_usage"), dict):
+        state["token_usage"] = legacy_job_token_usage(job_id)
     if include_output:
         state["stdout"] = log_text
         state["stderr"] = ""

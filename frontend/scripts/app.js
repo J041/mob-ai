@@ -10,6 +10,12 @@ import { createDeviceController } from './devices.js';
 import { connectOverviewEvents } from './events.js';
 import { updatePolicyBuilder } from './policy-builder.js';
 
+function tokenLabel(usage) {
+  const total = Number(usage?.total_tokens || 0);
+  if (!total) return 'no reported tokens';
+  return `${total.toLocaleString()} tokens${usage?.complete ? '' : ' (total only)'}`;
+}
+
 function setTab(name) {
   $$('.segment').forEach(button => {
     const active = button.dataset.tab === name;
@@ -68,7 +74,7 @@ function renderRuns(runs) {
     <article class="run-row">
       <div class="run-main"><strong>${escapeText(run.package || run.id)}</strong><small>${escapeText(run.id)} · ${run.static_findings} static findings${escapeText(nativeProgress)}</small></div>
       <div class="run-cell"><span>${escapeText(run.target || 'no target')}</span><small>${run.derived_from_run ? `derived from ${escapeText(run.derived_from_run)} - ` : ''}${escapeText(run.transport || 'analysis only')}</small></div>
-      <div class="run-cell"><span>${run.iterations} iterations</span><small>${run.reasoning_mode === 'parallel' ? `${run.specialist_count} specialists` : 'single agent'} · ${run.observation_events} observations</small></div>
+      <div class="run-cell"><span>${run.iterations} iterations</span><small title="${escapeText(tokenLabel(run.token_usage))}">${run.reasoning_mode === 'parallel' ? `${run.specialist_count} specialists` : 'single agent'} · ${run.observation_events} observations · ${escapeText(tokenLabel(run.token_usage))}</small></div>
       <div class="run-outcome">
         <span class="badge ${escapeText(run.status)}">${escapeText(run.status.replaceAll('_', ' '))}</span>
         ${terminal.label ? `<small title="${escapeText(terminal.explanation || '')}">${escapeText(terminal.label)}</small>` : ''}
@@ -191,7 +197,9 @@ function renderJobs(jobs) {
     const selectedHere = attempts.some(job => job.id === state.selectedJob);
     const status = displayStatus(latest);
     const title = run?.package || latest.run_id || latest.label;
-    const subtitle = latest.run_id ? `${latest.run_id} · ${attempts.length} attempt${attempts.length === 1 ? '' : 's'}` : 'Preparing run checkpoint';
+    const subtitle = latest.run_id
+      ? `${latest.run_id} · ${attempts.length} attempt${attempts.length === 1 ? '' : 's'} · ${tokenLabel(run?.token_usage)}`
+      : 'Preparing run checkpoint';
     if (attempts.length > 1) {
       if (!state.knownAttemptRuns.has(key)) {
         state.knownAttemptRuns.add(key);
@@ -202,7 +210,7 @@ function renderJobs(jobs) {
       }
       const history = attempts.map(job => `
         <button class="attempt-chip ${job.id === state.selectedJob ? 'active' : ''}" data-job="${job.id}">
-          <span><strong>Attempt ${job.attempt_number || 1}</strong><small>${escapeText(attemptName(job.attempt_kind))}</small></span>
+          <span><strong>Attempt ${job.attempt_number || 1}</strong><small>${escapeText(attemptName(job.attempt_kind))} · ${escapeText(tokenLabel(job.token_usage))}</small></span>
           <b class="job-status ${statusClass(job.status)}">${escapeText(displayStatus(job))}</b>
         </button>`).join('');
       return `<details class="job-group attempt-group ${selectedHere ? 'active' : ''}" data-run-group="${escapeText(key)}" ${state.expandedRuns.has(key) ? 'open' : ''}>

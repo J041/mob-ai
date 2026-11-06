@@ -11,7 +11,11 @@ from assessment.runtime import (
     NATIVE_BATCH_SIZE, NATIVE_REPLENISHMENT_SCHEMA, NATIVE_TOTAL_LIMIT, LoopError,
     ProviderUsageLimit, read_json, run_logged, write_json,
 )
-from backend.providers import ProviderRequest, detect_usage_limit, provider_adapter, validate_provider_output
+from assessment.usage import record_provider_usage
+from backend.providers import (
+    ProviderRequest, detect_usage_limit, provider_adapter, provider_token_usage,
+    validate_provider_output,
+)
 
 
 class NativeQueueMixin:
@@ -81,6 +85,10 @@ Do not edit files, invoke devices, rerun tools, or claim success. Return only th
             exit_code, output = run_logged(
                 command, self.log, cwd=attempt_dir, input_text=provider_prompt,
                 artifact=attempt_dir / f"{provider}.log",
+            )
+            record_provider_usage(
+                run_dir, provider_token_usage(provider, output), phase="native_replenishment",
+                artifact=attempt_dir / f"{provider}.log", model=str(config.get("model") or ""),
             )
             limit = detect_usage_limit(output)
             if limit:
