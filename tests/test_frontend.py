@@ -97,6 +97,14 @@ class FrontendTests(unittest.TestCase):
         self.assertIn("Recommended:", run_script)
         self.assertIn("job-terminal-reason", script)
 
+    def test_resume_recommendation_does_not_inherit_icon_typography(self) -> None:
+        response = self.client.get("/styles/styles.css")
+        styles = response.get_data(as_text=True)
+        response.close()
+        self.assertIn(".resume-summary > span", styles)
+        self.assertIn(".resume-summary .recommended-action { font: inherit; }", styles)
+        self.assertNotIn(".resume-summary span {", styles)
+
     def test_agent_console_exposes_pause_and_cancel_controls(self) -> None:
         response = self.client.get("/")
         page = response.get_data(as_text=True)

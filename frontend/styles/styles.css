@@ -163,8 +163,9 @@ input::placeholder { color: #465358; }
 .form-footer { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding-top: 2px; }
 .form-footer p { max-width: 54%; margin: 0; color: var(--muted); font-size: 10px; line-height: 1.55; }
 .resume-summary { min-height: 95px; border: 1px dashed #334146; border-radius: 9px; padding: 15px; display: flex; gap: 12px; color: var(--muted); font-size: 11px; line-height: 1.55; }
-.resume-summary span { color: var(--green); font: 18px var(--mono); }
+.resume-summary > span { flex: 0 0 auto; color: var(--green); font: 18px var(--mono); }
 .resume-summary p { margin: 0; }
+.resume-summary .recommended-action { font: inherit; }
 .resume-policy { display: grid; gap: 10px; padding: 13px 14px; border: 1px solid var(--line); border-radius: 9px; background: rgba(255,255,255,.012); }
 .resume-policy > div:first-child { display: flex; align-items: baseline; justify-content: space-between; gap: 14px; }
 .resume-policy strong { font-size: 11px; }
