@@ -161,8 +161,9 @@ The current Ghidra archive is checksum-verified. JADX and Google's rolling Platf
 
 The Compose service starts a headless Ghidra MCP backend on the private Compose
 network. It is not published to the host or LAN. The web service's Codex process
-connects through the installed stdio bridge. Interactive host Codex sessions can
-still use `scripts/ghidra-mcp.cmd` through the project `.codex/config.toml`.
+connects through the installed stdio bridge. Interactive host Codex sessions use
+the project `.codex/config.toml`, which launches the bridge with the portable
+`docker compose exec -T worker` command on Windows and Linux.
 
 Security defaults:
 
@@ -188,7 +189,10 @@ docker compose ps
 
 Then start a new Codex session from this trusted project so `.codex/config.toml` is reloaded. Codex should expose a `ghidra` MCP server with tools for importing binaries, listing functions and symbols, decompiling functions, examining callers/callees, and following cross-references. If MCP is unavailable, the existing `analyzeHeadless` workflow remains usable.
 
-The checked-in Codex configuration contains the absolute Windows workspace path for reliable process startup. Update the `args` entry in `.codex/config.toml` if the repository is moved.
+The checked-in MCP command is repository-location independent, but it expects the
+Compose stack to be running and Codex to be started from this project directory so
+Docker Compose can discover `compose.yaml`. Use `docker compose up -d --build --wait`
+before opening a new host Codex session.
 
 ## Authorized anti-root/anti-hooking assessment pipeline
 

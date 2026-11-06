@@ -754,6 +754,16 @@ class WebAppTests(unittest.TestCase):
         self.assertNotIn("http://reverse-engineering:8089", rendered)
         self.assertNotIn("cmd.exe", rendered)
 
+    def test_host_codex_ghidra_config_is_cross_platform(self) -> None:
+        config = (WORKSPACE / ".codex" / "config.toml").read_text(encoding="utf-8")
+        self.assertIn('command = "docker"', config)
+        self.assertIn('"compose", "exec", "-T"', config)
+        self.assertIn('GHIDRA_MCP_URL=http://127.0.0.1:18089', config)
+        self.assertIn('GHIDRA_MCP_REQUIRE_PROGRAM_SELECTORS=1', config)
+        self.assertIn('/opt/ghidra-mcp/venv/bin/bridge-mcp-ghidra', config)
+        self.assertNotIn("cmd.exe", config)
+        self.assertNotIn("C:\\", config)
+
 
 if __name__ == "__main__":
     unittest.main()
