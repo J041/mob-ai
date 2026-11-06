@@ -26,6 +26,19 @@ On Windows, `.\scripts\ui.cmd` is an equivalent one-command launcher. Open
 Docker volume (`codex-state` or `claude-state`). To use another port or change the upload limit, copy
 `.env.example` to `.env` and edit it. Stop the application with `docker compose down`.
 
+> [!IMPORTANT]
+> **Preventing paid ChatGPT credit use:** signing in to Codex can use available
+> ChatGPT credits after the account's included allowance is exhausted. If you do
+> not want Mob-AI to consume paid credits, open **ChatGPT Settings → Usage**, find
+> the app/Codex usage controls, disable credit access or set its credit limit to
+> zero, and disable automatic credit reload if it is enabled. Mob-AI does not buy
+> credits or enable automatic reload, but Codex CLI has no documented
+> `--included-usage-only` argument, so this account-level limit is the authoritative
+> safeguard. When OpenAI rejects a request because its usage allowance is exhausted,
+> Mob-AI checkpoints the assessment as `usage_limited` instead of starting another
+> provider iteration. See OpenAI's
+> [app usage and credit controls](https://developers.openai.com/siwc/token-sharing-open-source/profiles-and-sessions#tracking-usage).
+
 The dashboard provides:
 
 - direct APK upload and success-policy selection;
