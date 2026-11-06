@@ -14,6 +14,9 @@ from pipeline.diagnostic_recipes import (
 )
 from assessment.control_points import control_point_prompt, validate_control_point_decision
 from assessment.diagnostics import run_adaptive_diagnostics
+from assessment.goals import (
+    ensure_assessment_goal, goal_instruction, goal_workspace, record_goal_turn,
+)
 from assessment.native import NativeAnalysisMixin
 from assessment.outcomes import terminal_outcome
 from assessment.recovery import RecoveryMixin
@@ -345,6 +348,22 @@ class LoopRunner(RecoveryMixin, NativeAnalysisMixin):
                 shutil.copy2(previous_candidate, candidate)
             else:
                 shutil.copy2(run_dir / "frida" / "bypass-level-1.js", candidate)
+            goal = {}
+            provider_cwd = iteration_dir
+            working_candidate = candidate
+            goal_config_path: Path | None = None
+            goal_first_turn = False
+            session_id = ""
+            if provider == "codex":
+                goal = ensure_assessment_goal(run_dir, config)
+                provider_cwd = goal_workspace(run_dir)
+                goal_config_path = provider_cwd / ".codex" / "config.toml"
+                goal_config_path.parent.mkdir(exist_ok=True)
+                goal_config_path.write_text(codex_config(), encoding="utf-8")
+                working_candidate = provider_cwd / "candidate.js"
+                shutil.copy2(candidate, working_candidate)
+                session_id = str(goal.get("thread_id") or "")
+                goal_first_turn = not bool(goal.get("activation_verified"))
             prior_dir = agent_dir / f"iteration-{iteration - 1}" if iteration > 1 else None
             self.log.write(f"Preparing Ghidra native batch before iteration {iteration}...\n")
             self.log.flush()
@@ -364,36 +383,45 @@ class LoopRunner(RecoveryMixin, NativeAnalysisMixin):
             )
             self.log.flush()
             prompt = self._prompt(
-                run_dir, candidate, prior_dir, iteration, start_iteration, end_iteration,
+                run_dir, working_candidate, prior_dir, iteration, start_iteration, end_iteration,
                 reasoning_mode=str(config.get("reasoning_mode") or "single"),
                 specialist_count=int(config.get("specialist_count") or 3),
             )
+            if provider == "codex":
+                prompt = goal_instruction(goal, first_turn=goal_first_turn) + "\n" + prompt
             prompt_path = iteration_dir / "prompt.txt"
             decision_path = iteration_dir / "decision.json"
             provider_log = iteration_dir / f"{provider}.log"
             prompt_path.write_text(prompt, encoding="utf-8")
             candidate_snapshot = iteration_dir / "candidate.before-provider.js"
-            shutil.copy2(candidate, candidate_snapshot)
+            shutil.copy2(working_candidate, candidate_snapshot)
             protected = {
                 prompt_path: sha256(prompt_path), config_path: sha256(config_path),
                 candidate_snapshot: sha256(candidate_snapshot),
             }
+            if goal_config_path is not None:
+                protected[goal_config_path] = sha256(goal_config_path)
             if mcp_path.is_file():
                 protected[mcp_path] = sha256(mcp_path)
             provider_request = ProviderRequest(
-                provider=provider, prompt=prompt, cwd=iteration_dir,
+                provider=provider, prompt=prompt, cwd=provider_cwd,
                 schema_path=DECISION_SCHEMA, output_path=decision_path,
                 model=str(config.get("model") or ""),
                 reasoning_effort=str(config.get("reasoning_effort") or ""),
                 reasoning_mode=str(config.get("reasoning_mode") or "single"),
                 writable=True, mcp_config=mcp_path if mcp_path.is_file() else None,
                 extra_args=tuple(codex_config_overrides()) if provider == "codex" else (),
+                session_id=session_id,
             )
             command, provider_prompt = adapter.prepare(provider_request)
             exit_code, output = run_logged(
-                command, self.log, cwd=iteration_dir, input_text=provider_prompt, artifact=provider_log,
+                command, self.log, cwd=provider_cwd, input_text=provider_prompt, artifact=provider_log,
                 stage=f"provider_iteration_{iteration}",
             )
+            if provider == "codex":
+                goal = record_goal_turn(
+                    run_dir, output, iteration=iteration, resumed=not goal_first_turn,
+                )
             call_usage = provider_token_usage(provider, output)
             record_provider_usage(
                 run_dir, call_usage, phase=f"iteration_{iteration}", artifact=provider_log,
@@ -421,6 +449,8 @@ class LoopRunner(RecoveryMixin, NativeAnalysisMixin):
                     return "usage_limited"
                 write_summary(run_dir, "provider_error", records, f"{adapter.label} failed in iteration {iteration}.")
                 return "provider_error"
+            if provider == "codex":
+                shutil.copy2(working_candidate, candidate)
             allowed = {
                 candidate.resolve(), candidate_snapshot.resolve(), prompt_path.resolve(),
                 decision_path.resolve(), provider_log.resolve(), config_path.resolve(),
@@ -428,6 +458,14 @@ class LoopRunner(RecoveryMixin, NativeAnalysisMixin):
             if mcp_path.is_file():
                 allowed.add(mcp_path.resolve())
             unexpected = [path for path in iteration_dir.rglob("*") if path.is_file() and path.resolve() not in allowed]
+            if provider == "codex":
+                goal_allowed = {working_candidate.resolve()}
+                if goal_config_path is not None:
+                    goal_allowed.add(goal_config_path.resolve())
+                unexpected.extend(
+                    path for path in provider_cwd.rglob("*")
+                    if path.is_file() and path.resolve() not in goal_allowed
+                )
             if any(sha256(path) != digest for path, digest in protected.items()) or unexpected:
                 write_summary(run_dir, "codex_boundary_error", records, f"Codex wrote outside candidate.js in iteration {iteration}.")
                 return "codex_boundary_error"

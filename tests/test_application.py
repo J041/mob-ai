@@ -33,6 +33,9 @@ from backend.providers import (
 )
 from backend.events import activity_revision
 from assessment.usage import assessment_token_usage, record_provider_usage, token_usage_delta
+from assessment.goals import (
+    ensure_assessment_goal, goal_instruction, record_goal_turn, update_goal_for_pipeline_status,
+)
 
 
 class WebAppTests(unittest.TestCase):
@@ -240,6 +243,48 @@ class WebAppTests(unittest.TestCase):
             command, _prompt = provider_adapter("codex").prepare(request)
         self.assertIn("--json", command)
         self.assertIn("--output-last-message", command)
+
+    def test_codex_adapter_resumes_persistent_goal_thread(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            schema = root / "schema.json"
+            schema.write_text('{}', encoding="utf-8")
+            request = ProviderRequest(
+                provider="codex", prompt="Continue the Goal", cwd=root,
+                schema_path=schema, output_path=root / "answer.json",
+                session_id="019a-test-thread",
+            )
+            command, _prompt = provider_adapter("codex").prepare(request)
+        self.assertEqual(Path(command[0]).name, "codex")
+        self.assertEqual(command[1:3], ["exec", "resume"])
+        self.assertIn("019a-test-thread", command)
+        self.assertNotIn("--sandbox", command)
+        self.assertEqual(command[-1], "-")
+
+    def test_assessment_goal_persists_thread_and_deterministic_status(self) -> None:
+        with tempfile.TemporaryDirectory(dir=WORKSPACE) as temp:
+            run = Path(temp)
+            policy = run / "policy.json"
+            policy.write_text(json.dumps({
+                "name": "Warning removed", "checks": [{"type": "process_alive"}],
+            }), encoding="utf-8")
+            goal = ensure_assessment_goal(run, {
+                "package": "com.example", "success_spec": str(policy.relative_to(WORKSPACE)),
+                "success_spec_sha256": hashlib.sha256(policy.read_bytes()).hexdigest(),
+            })
+            instruction = goal_instruction(goal, first_turn=True)
+            output = "\n".join((
+                '{"type":"thread.started","thread_id":"thread-123"}',
+                '{"type":"item.completed","item":{"type":"tool_call","name":"create_goal"}}',
+            ))
+            active = record_goal_turn(run, output, iteration=1, resumed=False)
+            update_goal_for_pipeline_status(run, "success", "All checks passed.")
+            completed = json.loads((run / "assessment-goal.json").read_text(encoding="utf-8"))
+        self.assertIn("call the Codex `create_goal` tool", instruction)
+        self.assertEqual(active["thread_id"], "thread-123")
+        self.assertTrue(active["activation_verified"])
+        self.assertEqual(completed["status"], "complete")
+        self.assertEqual(completed["pipeline_status"], "success")
 
     def test_diagnostic_decision_requires_allowlisted_actions(self) -> None:
         schema = WORKSPACE / "pipeline" / "codex-decision.schema.json"

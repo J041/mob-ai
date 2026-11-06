@@ -70,11 +70,12 @@ function renderRuns(runs) {
     const native = run.native_queue || {};
     const terminal = run.terminal || {};
     const nativeProgress = native.total ? ` · native batch ${native.batch}/${native.batches} · ${native.processed}/${native.total} processed` : '';
+    const goalProgress = run.goal?.status ? ` · goal ${String(run.goal.status).replaceAll('_', ' ')}` : '';
     return `
     <article class="run-row">
       <div class="run-main"><strong>${escapeText(run.package || run.id)}</strong><small>${escapeText(run.id)} · ${run.static_findings} static findings${escapeText(nativeProgress)}</small></div>
       <div class="run-cell"><span>${escapeText(run.target || 'no target')}</span><small>${run.derived_from_run ? `derived from ${escapeText(run.derived_from_run)} - ` : ''}${escapeText(run.transport || 'analysis only')}</small></div>
-      <div class="run-cell"><span>${run.iterations} iterations</span><small title="${escapeText(tokenLabel(run.token_usage))}">${run.reasoning_mode === 'parallel' ? `${run.specialist_count} specialists` : 'single agent'} · ${run.observation_events} observations · ${escapeText(tokenLabel(run.token_usage))}</small></div>
+      <div class="run-cell"><span>${run.iterations} iterations</span><small title="${escapeText(run.goal?.objective || tokenLabel(run.token_usage))}">${run.reasoning_mode === 'parallel' ? `${run.specialist_count} specialists` : 'single agent'} · ${run.observation_events} observations${escapeText(goalProgress)} · ${escapeText(tokenLabel(run.token_usage))}</small></div>
       <div class="run-outcome">
         <span class="badge ${escapeText(run.status)}">${escapeText(run.status.replaceAll('_', ' '))}</span>
         ${terminal.label ? `<small title="${escapeText(terminal.explanation || '')}">${escapeText(terminal.label)}</small>` : ''}

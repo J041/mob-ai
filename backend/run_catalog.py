@@ -9,6 +9,7 @@ import re
 from assessment.outcomes import terminal_outcome
 from assessment.runtime import RUNS_ROOT, WORKSPACE, sha256, workspace_relative
 from assessment.usage import assessment_token_usage
+from assessment.goals import goal_summary
 from assessment.state import (
     checkpoint_recovery_available, frida_recovery_available, pause_recovery_available,
     usage_limit_recovery_available,
@@ -157,6 +158,7 @@ def runs() -> list[dict]:
                 "total": len(native_libraries),
                 "queued": len(native_queue),
             },
+            "goal": goal_summary(directory),
             "updated_utc": datetime.fromtimestamp(directory.stat().st_mtime, timezone.utc).isoformat(),
         })
     return result

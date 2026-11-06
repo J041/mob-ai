@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from assessment.outcomes import terminal_outcome
+from assessment.goals import update_goal_for_pipeline_status
 from assessment.runtime import workspace_relative, write_json
 
 
@@ -29,6 +30,7 @@ def write_summary(
     }
     payload["terminal"] = terminal_outcome(payload)
     write_json(run_dir / "codex-loop-result.json", payload)
+    update_goal_for_pipeline_status(run_dir, status, detail)
 
 
 

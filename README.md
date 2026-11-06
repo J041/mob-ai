@@ -241,8 +241,19 @@ The Python loop performs observation, asks the selected headless provider to mak
 scoped candidate-hook change, validates it on the selected device, and feeds the
 recorded failure into the next attempt. It stops when the success policy passes,
 the provider requests human review, two attempts make no progress, or the iteration limit
-is reached. The provider runs with only the current iteration directory writable; device
-access and validation remain under the deterministic orchestrator.
+is reached. Claude receives only the current iteration directory as its writable root. Codex
+uses the stable `agent/codex-goal/` workspace so later iterations can resume the same thread;
+only its working `candidate.js` is accepted and copied into the append-only iteration record.
+Device access and validation remain under the deterministic orchestrator.
+
+For Codex assessments, the first hook-reasoning turn creates an actual Codex Goal containing
+the recorded outcome, success-policy evidence surface, constraints, iteration policy, and
+blocked stop condition. Its thread ID and lifecycle mirror are persisted in
+`assessment-goal.json`; subsequent iterations, max-iteration resumes, and recoverable retries
+use `codex exec resume` on that thread instead of starting with an empty conversation. The
+Goal never runs ADB or Frida and cannot declare success: Mob-AI updates its recorded status only
+from deterministic pipeline outcomes. Goal state is visible in Assessment runs and downloadable
+from the Artifact browser. Native target triage remains a separate read-only provider call.
 
 Before the first hook decision, static preparation records a complete bounded inventory of
 APK native libraries, including ABI, hash, size, and decompiled `loadLibrary` references,

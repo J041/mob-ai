@@ -147,6 +147,7 @@ class ProviderRequest:
     writable: bool = False
     mcp_config: Path | None = None
     extra_args: tuple[str, ...] = ()
+    session_id: str = ""
 
 
 class ProviderAdapter:
@@ -174,19 +175,27 @@ class CodexAdapter(ProviderAdapter):
         return shutil.which("codex") or "codex"
 
     def prepare(self, request: ProviderRequest) -> tuple[list[str], str]:
-        command = [
-            self.executable(), "exec", "--sandbox", "workspace-write" if request.writable else "read-only",
-            "--skip-git-repo-check",
+        common = [
             "--enable" if request.reasoning_mode == "parallel" else "--disable", "multi_agent",
-            "--json", "--color", "never", "--config", 'approval_policy="never"',
+            "--json", "--config", 'approval_policy="never"',
         ]
+        if request.session_id:
+            command = [self.executable(), "exec", "resume", *common]
+        else:
+            command = [
+                self.executable(), "exec", "--sandbox", "workspace-write" if request.writable else "read-only",
+                "--skip-git-repo-check", "--color", "never", *common,
+            ]
         if request.reasoning_effort:
             command.extend(["--config", f"model_reasoning_effort={json.dumps(request.reasoning_effort)}"])
         command.extend(request.extra_args)
         command.extend(["--output-schema", str(request.schema_path), "--output-last-message", str(request.output_path)])
         if request.model:
             command.extend(["--model", request.model])
-        command.append("-")
+        if request.session_id:
+            command.extend([request.session_id, "-"])
+        else:
+            command.append("-")
         return command, request.prompt
 
 
