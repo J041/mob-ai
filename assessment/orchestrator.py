@@ -12,6 +12,7 @@ from pipeline.diagnostic_recipes import (
     DIAGNOSTIC_ACTIONS, DIAGNOSTIC_MAX_ACTIONS_PER_PASS, DIAGNOSTIC_MAX_ROUNDS,
     diagnostic_recipe_prompt,
 )
+from assessment.control_points import control_point_prompt, validate_control_point_decision
 from assessment.diagnostics import run_adaptive_diagnostics
 from assessment.native import NativeAnalysisMixin
 from assessment.outcomes import terminal_outcome
@@ -418,6 +419,15 @@ class LoopRunner(RecoveryMixin, NativeAnalysisMixin):
                 write_summary(run_dir, "codex_boundary_error", records, f"Codex wrote outside candidate.js in iteration {iteration}.")
                 return "codex_boundary_error"
             decision = read_json(decision_path)
+            coverage_errors = validate_control_point_decision(decision)
+            if coverage_errors:
+                write_summary(
+                    run_dir, "provider_error", records,
+                    f"{adapter.label} returned incomplete control-point coverage in iteration {iteration}: "
+                    + "; ".join(coverage_errors),
+                    reason="control_point_coverage_invalid",
+                )
+                return "provider_error"
             if decision.get("decision") != "diagnostics" and decision.get("diagnostic_actions"):
                 write_summary(
                     run_dir, "provider_error", records,
@@ -655,6 +665,7 @@ With only two useful scopes, do not create an unnecessary third specialist. Suba
         else:
             delegation = "Single-agent mode is enabled. Do not spawn subagents; inspect and decide within this root session."
         recipe_guidance = diagnostic_recipe_prompt()
+        control_point_guidance = control_point_prompt()
         return f"""You are the reasoning step in an explicitly authorized Android application assessment loop.
 
 Iteration: {iteration} (this invocation covers {start_iteration} through {end_iteration})
@@ -669,6 +680,8 @@ Native target selection: {container_path(selection_path)}
 {native_guidance}
 
 Goal: make the smallest evidence-based change to the candidate Frida hook that can satisfy the success policy. Inspect report.json, observations.json, adaptive-plan.json, JADX output, and prior Frida/logcat/validation records. If native evidence is relevant, use read-only Ghidra MCP tools for native libraries from this run.
+
+{control_point_guidance}
 
 Adaptive evidence escalation:
 - When existing evidence is insufficient for a narrow candidate but a bounded runtime diagnostic could resolve the uncertainty, return decision `diagnostics` instead of `human_review`.

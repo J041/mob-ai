@@ -25,6 +25,7 @@ from assessment.orchestrator import (
     frida_recovery_available, pause_recovery_available, terminal_outcome, usage_limit_recovery_available,
     validate_decision_schema_registry,
 )
+from assessment.control_points import CONTROL_POINT_STAGES, validate_control_point_decision
 from assessment.runtime import JobControl, JobPaused, install_job_control
 from backend.providers import (
     ProviderRequest, detect_usage_limit, provider_adapter, provider_token_usage,
@@ -249,6 +250,15 @@ class WebAppTests(unittest.TestCase):
             "decision": "diagnostics", "rationale": "Need the unpacked JNI target.",
             "changes_made": [], "evidence_used": ["observations.json"],
             "remaining_risks": ["Runtime code is not yet attributed."],
+            "hook_layer": "none",
+            "control_point_coverage": [
+                {
+                    "stage": stage, "status": "unexplored",
+                    "evidence": "The current evidence has not resolved this stage.",
+                    "next_step": "Collect the requested bounded runtime evidence.",
+                }
+                for stage in CONTROL_POINT_STAGES
+            ],
         }
         with tempfile.TemporaryDirectory() as temp:
             output = Path(temp) / "decision.json"
@@ -266,6 +276,44 @@ class WebAppTests(unittest.TestCase):
                 **base, "decision": "human_review", "diagnostic_actions": [],
             }), encoding="utf-8")
             self.assertTrue(validate_provider_output(output, schema))
+
+    def test_control_point_coverage_blocks_premature_native_escalation_and_review(self) -> None:
+        coverage = [
+            {
+                "stage": stage, "status": "unexplored",
+                "evidence": "No app-owned control point has been assessed yet.",
+                "next_step": "Inspect the decompiled call chain.",
+            }
+            for stage in CONTROL_POINT_STAGES
+        ]
+        native = {
+            "decision": "updated", "hook_layer": "native",
+            "control_point_coverage": coverage,
+        }
+        errors = validate_control_point_decision(native)
+        self.assertTrue(any("native escalation" in error for error in errors))
+        self.assertTrue(any("candidate control point" in error for error in errors))
+
+        review = {
+            "decision": "human_review", "hook_layer": "none",
+            "control_point_coverage": coverage,
+        }
+        self.assertTrue(any("cannot leave control points unfinished" in error for error in validate_control_point_decision(review)))
+
+    def test_control_point_coverage_accepts_narrow_sink_candidate(self) -> None:
+        coverage = []
+        for stage in CONTROL_POINT_STAGES:
+            status = "candidate" if stage == "enforcement_sinks" else "tested"
+            coverage.append({
+                "stage": stage, "status": status,
+                "evidence": f"JADX and validation evidence for {stage}.",
+                "next_step": "Validate the exact app-owned sink hook twice." if status == "candidate" else "",
+            })
+        decision = {
+            "decision": "updated", "hook_layer": "java",
+            "control_point_coverage": coverage,
+        }
+        self.assertEqual(validate_control_point_decision(decision), [])
 
     def test_retry_archives_provider_iteration_without_record(self) -> None:
         with tempfile.TemporaryDirectory(dir=WORKSPACE) as temp:

@@ -42,6 +42,38 @@
           "extract_embedded_payload"
         ]
       }
+    },
+    "hook_layer": {
+      "type": "string",
+      "enum": ["none", "java", "native", "mixed"]
+    },
+    "control_point_coverage": {
+      "type": "array",
+      "minItems": 5,
+      "maxItems": 5,
+      "items": {
+        "type": "object",
+        "properties": {
+          "stage": {
+            "type": "string",
+            "enum": [
+              "detector_inputs",
+              "detector_methods",
+              "decision_points",
+              "enforcement_sinks",
+              "termination_paths"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": ["unexplored", "candidate", "tested", "blocked", "not_applicable"]
+          },
+          "evidence": { "type": "string" },
+          "next_step": { "type": "string" }
+        },
+        "required": ["stage", "status", "evidence", "next_step"],
+        "additionalProperties": false
+      }
     }
   },
   "required": [
@@ -50,7 +82,9 @@
     "changes_made",
     "evidence_used",
     "remaining_risks",
-    "diagnostic_actions"
+    "diagnostic_actions",
+    "hook_layer",
+    "control_point_coverage"
   ],
   "additionalProperties": false
 }

@@ -16,6 +16,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
+from assessment.control_points import CONTROL_POINT_STAGES, CONTROL_POINT_STATUSES, HOOK_LAYERS
+
 from pipeline.diagnostic_recipes import DIAGNOSTIC_ACTIONS
 
 
@@ -207,6 +209,23 @@ def validate_decision_schema_registry(path: Path = DECISION_SCHEMA) -> None:
         raise LoopError("The provider decision schema has no diagnostic recipe enum.") from error
     if set(values) != set(DIAGNOSTIC_ACTIONS) or len(values) != len(DIAGNOSTIC_ACTIONS):
         raise LoopError("The provider decision schema diagnostic recipes do not match the shared registry.")
+    try:
+        properties = schema["properties"]
+        hook_layers = properties["hook_layer"]["enum"]
+        coverage = properties["control_point_coverage"]
+        item_properties = coverage["items"]["properties"]
+        stages = item_properties["stage"]["enum"]
+        statuses = item_properties["status"]["enum"]
+    except (KeyError, TypeError) as error:
+        raise LoopError("The provider decision schema has no control-point registry.") from error
+    if (
+        tuple(stages) != CONTROL_POINT_STAGES
+        or set(statuses) != set(CONTROL_POINT_STATUSES)
+        or set(hook_layers) != set(HOOK_LAYERS)
+        or coverage.get("minItems") != len(CONTROL_POINT_STAGES)
+        or coverage.get("maxItems") != len(CONTROL_POINT_STAGES)
+    ):
+        raise LoopError("The provider decision schema control-point values do not match the shared registry.")
 
 
 def ghidra_request(method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:

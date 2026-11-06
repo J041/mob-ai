@@ -56,6 +56,10 @@ class AssessmentTests(unittest.TestCase):
         self.assertIn("decision `diagnostics`", prompt)
         self.assertIn("dump_runtime_payloads", prompt)
         self.assertIn("At most 2 diagnostic rounds", prompt)
+        self.assertIn("detector_inputs", prompt)
+        self.assertIn("enforcement_sinks", prompt)
+        self.assertIn("Failure or missing telemetry from one Java hook", prompt)
+        self.assertIn("Before returning human_review", prompt)
 
     @patch("assessment.orchestrator.run_logged")
     def test_adaptive_diagnostic_worker_uses_allowlisted_pipeline_action(self, run_logged) -> None:

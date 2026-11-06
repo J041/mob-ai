@@ -60,6 +60,11 @@ class PipelineTests(unittest.TestCase):
         values = schema["properties"]["diagnostic_actions"]["items"]["enum"]
         self.assertEqual(set(values), set(DIAGNOSTIC_ACTIONS))
         self.assertEqual(len(values), len(DIAGNOSTIC_ACTIONS))
+        coverage = schema["properties"]["control_point_coverage"]
+        stages = coverage["items"]["properties"]["stage"]["enum"]
+        self.assertEqual(coverage["minItems"], len(stages))
+        self.assertEqual(coverage["maxItems"], len(stages))
+        self.assertEqual(len(stages), len(set(stages)))
 
     def test_process_mapping_parser_preserves_executable_memfd(self):
         mappings = pipeline.parse_process_mappings(

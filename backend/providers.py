@@ -273,28 +273,30 @@ def validate_provider_output(path: Path, schema_path: Path) -> bool:
         schema = json.loads(schema_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return False
-    if not isinstance(value, dict):
-        return False
-    required = set(schema.get("required") or [])
-    properties = schema.get("properties") or {}
-    if not required.issubset(value) or (schema.get("additionalProperties") is False and set(value) - set(properties)):
-        return False
-    for key, rule in properties.items():
-        if key not in value:
-            continue
-        item = value[key]
+    def matches_type(item: object, expected: object) -> bool:
+        if isinstance(expected, list):
+            return any(matches_type(item, choice) for choice in expected)
+        return {
+            "string": lambda: isinstance(item, str),
+            "array": lambda: isinstance(item, list),
+            "object": lambda: isinstance(item, dict),
+            "integer": lambda: isinstance(item, int) and not isinstance(item, bool),
+            "boolean": lambda: isinstance(item, bool),
+            "null": lambda: item is None,
+        }.get(str(expected), lambda: True)()
+
+    def validates(item: object, rule: dict[str, object]) -> bool:
         expected = rule.get("type")
-        if expected == "string" and not isinstance(item, str):
-            return False
-        if expected == "array" and not isinstance(item, list):
-            return False
-        if expected == "object" and not isinstance(item, dict):
-            return False
-        if expected == "integer" and (not isinstance(item, int) or isinstance(item, bool)):
+        if expected is not None and not matches_type(item, expected):
             return False
         if rule.get("enum") and item not in rule["enum"]:
             return False
-        if expected == "array":
+        if isinstance(item, int) and not isinstance(item, bool):
+            if "minimum" in rule and item < int(rule["minimum"]):
+                return False
+            if "maximum" in rule and item > int(rule["maximum"]):
+                return False
+        if isinstance(item, list):
             if "minItems" in rule and len(item) < int(rule["minItems"]):
                 return False
             if "maxItems" in rule and len(item) > int(rule["maxItems"]):
@@ -302,8 +304,24 @@ def validate_provider_output(path: Path, schema_path: Path) -> bool:
             if rule.get("uniqueItems") and len({json.dumps(entry, sort_keys=True) for entry in item}) != len(item):
                 return False
             item_rule = rule.get("items") or {}
-            if item_rule.get("enum") and any(entry not in item_rule["enum"] for entry in item):
+            if isinstance(item_rule, dict) and any(not validates(entry, item_rule) for entry in item):
                 return False
+        if isinstance(item, dict):
+            required = set(rule.get("required") or [])
+            properties = rule.get("properties") or {}
+            if not required.issubset(item):
+                return False
+            if rule.get("additionalProperties") is False and set(item) - set(properties):
+                return False
+            if any(
+                key in item and isinstance(child_rule, dict) and not validates(item[key], child_rule)
+                for key, child_rule in properties.items()
+            ):
+                return False
+        return True
+
+    if not validates(value, schema):
+        return False
     for conditional in schema.get("allOf") or []:
         condition = conditional.get("if") or {}
         matches = all(
