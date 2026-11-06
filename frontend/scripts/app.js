@@ -215,7 +215,7 @@ function renderJobs(jobs) {
         </button>`).join('');
       return `<details class="job-group attempt-group ${selectedHere ? 'active' : ''}" data-run-group="${escapeText(key)}" ${state.expandedRuns.has(key) ? 'open' : ''}>
         <summary class="job-group-summary">
-          <span class="job-summary-copy"><strong>${escapeText(title)}</strong><small>${escapeText(latest.run_id)} &middot; ${attempts.length} attempts</small></span>
+          <span class="job-summary-copy"><strong>${escapeText(title)}</strong><small>${escapeText(latest.run_id)} &middot; ${attempts.length} attempts &middot; ${escapeText(tokenLabel(run?.token_usage))}</small></span>
           <span class="job-summary-meta"><b class="job-status ${statusClass(latest.status)}">${escapeText(status)}</b>${!latest.running && terminal.label ? `<small class="job-terminal-reason">${escapeText(terminal.label)}</small>` : ''}<em class="history-cta"><span class="history-show">View ${attempts.length} attempts</span><span class="history-hide">Hide attempts</span><i aria-hidden="true">&#8250;</i></em></span>
         </summary>
         <div class="attempt-list">${history}</div>
