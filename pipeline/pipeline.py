@@ -50,6 +50,32 @@ MODULE_MIN_LEVEL = {
 DIAGNOSTIC_MAX_DUMPS = BOUNDED_CAPTURE.max_artifacts
 DIAGNOSTIC_MAX_DUMP_BYTES = BOUNDED_CAPTURE.max_artifact_bytes
 DIAGNOSTIC_MAX_TOTAL_BYTES = BOUNDED_CAPTURE.max_total_bytes
+ADB_COMMAND_TIMEOUT_SECONDS = max(5, int(os.environ.get("MOB_AI_ADB_TIMEOUT_SECONDS", "30")))
+ADB_INSTALL_TIMEOUT_SECONDS = max(ADB_COMMAND_TIMEOUT_SECONDS, 180)
+ADB_TRANSPORT_MARKER = "MOB_AI_ADB_TRANSPORT_ERROR "
+ADB_TRANSPORT_PATTERN = re.compile(
+    r"device\s+offline|device\s+unauthorized|no devices?/emulators? found|"
+    r"device ['\"]?.+?['\"]? not found|cannot connect|connection refused|"
+    r"connection (?:closed|reset)|transport error|protocol fault|closed$",
+    re.I | re.M,
+)
+
+
+class AdbTransportError(RuntimeError):
+    def __init__(self, device: str, command: list[str], reason: str, *, timeout: int | None = None):
+        self.device = device
+        self.command = command
+        self.reason = reason
+        self.timeout = timeout
+        super().__init__(f"ADB transport for {device or 'unknown device'} {reason}")
+
+    def public_dict(self) -> dict[str, object]:
+        return {
+            "device": self.device,
+            "reason": self.reason,
+            "timeout_seconds": self.timeout,
+            "command": " ".join(self.command[2:] if len(self.command) > 2 else self.command),
+        }
 
 
 def run(
@@ -68,6 +94,31 @@ def run(
     if result.stdout:
         print(result.stdout, end="")
     if check and result.returncode:
+        raise RuntimeError(f"Command failed ({result.returncode}): {shown}")
+    return result
+
+
+def run_adb_command(
+    command: list[str], *, device: str, check: bool = True,
+    timeout: int | None = None, display: str | None = None, input_text: str | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Run one bounded ADB command and distinguish transport loss from command failure."""
+    deadline = timeout or ADB_COMMAND_TIMEOUT_SECONDS
+    try:
+        result = run(
+            command, check=False, timeout=deadline, display=display, input_text=input_text,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise AdbTransportError(
+            device, command, f"timed out after {deadline} seconds", timeout=deadline,
+        ) from error
+    output = result.stdout or ""
+    state = output.strip().lower() if command[-1:] == ["get-state"] else ""
+    if ADB_TRANSPORT_PATTERN.search(output) or state in {"offline", "unauthorized", "unknown"}:
+        detail = next((line.strip() for line in output.splitlines() if line.strip()), "became unavailable")
+        raise AdbTransportError(device, command, detail, timeout=deadline)
+    if check and result.returncode:
+        shown = display or " ".join(command)
         raise RuntimeError(f"Command failed ({result.returncode}): {shown}")
     return result
 
@@ -725,7 +776,11 @@ def run_adaptive_diagnostics(
 
 
 def adb(args: argparse.Namespace, *extra: str, check: bool = True) -> subprocess.CompletedProcess[str]:
-    return run(["adb", "-s", args.device, *extra], check=check)
+    timeout = ADB_INSTALL_TIMEOUT_SECONDS if extra[:2] == ("install", "-r") else ADB_COMMAND_TIMEOUT_SECONDS
+    return run_adb_command(
+        ["adb", "-s", args.device, *extra], device=str(args.device or ""),
+        check=check, timeout=timeout,
+    )
 
 
 def device_abi(args: argparse.Namespace) -> str:
@@ -751,21 +806,29 @@ def setup_wireless(args: argparse.Namespace) -> None:
             pairing_code = getpass.getpass("Wireless debugging pairing code: ")
         if not pairing_code or not re.fullmatch(r"[0-9]{6}", pairing_code):
             raise RuntimeError("A six-digit pairing code is required via prompt, --wireless-pair-code, or MOB_AI_ADB_PAIRING_CODE")
-        pair_result = run(
+        pair_result = run_adb_command(
             ["adb", "pair", pair_endpoint],
+            device=pair_endpoint,
             check=False,
+            timeout=ADB_COMMAND_TIMEOUT_SECONDS,
             display=f"adb pair {pair_endpoint} (pairing code supplied securely)",
             input_text=pairing_code + "\n",
         )
         if pair_result.returncode or "successfully paired" not in pair_result.stdout.lower():
             raise RuntimeError(f"Wireless ADB pairing failed for {pair_endpoint}")
-    connect_result = run(["adb", "connect", connect_endpoint], check=False)
+    connect_result = run_adb_command(
+        ["adb", "connect", connect_endpoint], device=connect_endpoint,
+        check=False, timeout=ADB_COMMAND_TIMEOUT_SECONDS,
+    )
     if connect_result.returncode or not re.search(r"(?:connected to|already connected to)", connect_result.stdout, re.I):
         raise RuntimeError(f"Wireless ADB connection failed for {connect_endpoint}")
     if args.device and args.device != connect_endpoint:
         raise RuntimeError("--device must match --wireless-connect when both are supplied")
     args.device = connect_endpoint
-    state = run(["adb", "-s", args.device, "get-state"], check=False)
+    state = run_adb_command(
+        ["adb", "-s", args.device, "get-state"], device=args.device,
+        check=False, timeout=ADB_COMMAND_TIMEOUT_SECONDS,
+    )
     if state.returncode or state.stdout.strip() != "device":
         raise RuntimeError(f"Wireless device {args.device} is not in the adb 'device' state")
     print(f"Wireless ADB device selected: {args.device}")
@@ -1171,6 +1234,10 @@ def main() -> int:
 if __name__ == "__main__":
     try:
         raise SystemExit(main())
+    except AdbTransportError as error:
+        print(ADB_TRANSPORT_MARKER + json.dumps(error.public_dict(), separators=(",", ":")), file=sys.stderr)
+        print(f"error: {error}", file=sys.stderr)
+        raise SystemExit(3)
     except (RuntimeError, subprocess.TimeoutExpired) as error:
         print(f"error: {error}", file=sys.stderr)
         raise SystemExit(1)

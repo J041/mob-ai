@@ -10,7 +10,7 @@ import shutil
 from typing import Any
 
 from assessment.runtime import (
-    WORKSPACE, LoopError, ProviderUsageLimit, attempt_fingerprint, container_path,
+    WORKSPACE, LoopError, ProviderUsageLimit, adb_transport_detail, attempt_fingerprint, container_path,
     pipeline_args, read_json, run_logged, sha256, target_args,
     workspace_relative, write_json,
 )
@@ -18,6 +18,65 @@ from assessment.state import write_summary
 
 
 class RecoveryMixin:
+    def _recover_adaptive_diagnostics(
+        self, run_dir: Path, config: dict[str, Any], records: list[Any], checkpoint: dict[str, Any], *,
+        additional: int, provider: str, model: str, reasoning_effort: str,
+        reasoning_mode: str, specialist_count: int,
+    ) -> tuple[str, Path]:
+        """Repeat one interrupted, already-approved diagnostic request after readiness is restored."""
+        iteration = int(checkpoint.get("iteration") or 0)
+        actions = [str(value) for value in (checkpoint.get("actions") or []) if value]
+        candidate_value = str(checkpoint.get("candidate") or "")
+        candidate = (WORKSPACE / candidate_value).resolve()
+        try:
+            candidate.relative_to(run_dir)
+        except ValueError as error:
+            raise LoopError("The adaptive-diagnostics checkpoint candidate escaped the run directory.") from error
+        iteration_dir = run_dir / "agent" / f"iteration-{iteration}"
+        decision_path = iteration_dir / "decision.json"
+        if not iteration or not actions or not candidate.is_file() or not decision_path.is_file():
+            raise LoopError("The adaptive-diagnostics checkpoint is incomplete.")
+        recovery_number = 1
+        while (run_dir / "agent" / f"diagnostic-checkpoint-recovery-{recovery_number}").exists():
+            recovery_number += 1
+        recovery_dir = run_dir / "agent" / f"diagnostic-checkpoint-recovery-{recovery_number}"
+        recovery_dir.mkdir(parents=True)
+        try:
+            diagnostic = self._run_adaptive_diagnostics(
+                run_dir, config, recovery_dir, iteration, actions,
+            )
+        except (EnvironmentFailure, OSError, json.JSONDecodeError) as error:
+            write_summary(
+                run_dir, "environment_error", records, str(error),
+                checkpoint=checkpoint, reason="adaptive_diagnostics_recovery_failure",
+            )
+            return "environment_error", run_dir
+        decision = read_json(decision_path)
+        record = {
+            "iteration": iteration, "candidate": workspace_relative(candidate),
+            "candidate_sha256": sha256(candidate), "codex": decision,
+            "diagnostics": diagnostic, "validation": None,
+            "recovered_by": workspace_relative(recovery_dir),
+        }
+        records.append(record)
+        write_json(iteration_dir / "record.json", record)
+        resumed_config = dict(config)
+        for field, value in (
+            ("provider", provider), ("model", model),
+            ("reasoning_effort", reasoning_effort), ("reasoning_mode", reasoning_mode),
+        ):
+            if value:
+                resumed_config[field] = value
+        if reasoning_mode:
+            resumed_config["specialist_count"] = specialist_count
+        write_json(run_dir / "codex-loop-config.json", resumed_config)
+        status = self._iterations(
+            run_dir, resumed_config, records, start_iteration=iteration + 1,
+            additional=additional, previous_candidate=candidate,
+            previous_fingerprint=None, restart_frida=False,
+        )
+        return status, run_dir
+
     def _recover_usage_limit(
         self, run_dir: Path, config: dict[str, Any], summary: dict[str, Any],
         records: list[Any], request: dict[str, Any],
@@ -135,15 +194,19 @@ class RecoveryMixin:
             command.extend(["--start-frida-server", frida_server])
         if config.get("package"):
             command.extend(["--package", config["package"]])
-        exit_code, _ = run_logged(command, self.log, artifact=retry_dir / "pipeline.log")
+        exit_code, pipeline_output = run_logged(command, self.log, artifact=retry_dir / "pipeline.log")
         if exit_code not in {0, 1} or not result_path.is_file():
             previous_result = before_dir / "result.json"
             if previous_result.is_file():
                 shutil.copy2(previous_result, result_path)
-            detail = "Diagnostic retry failed operationally; verify device and Frida readiness, then retry again."
+            detail, transport_reason = adb_transport_detail(
+                pipeline_output,
+                "Diagnostic retry failed operationally; verify device and Frida readiness, then retry again.",
+            )
             write_summary(
                 run_dir, "environment_error", records, detail,
-                checkpoint={"stage": "observation"}, reason="diagnostic_retry_failure",
+                checkpoint={"stage": "observation"},
+                reason=transport_reason or "diagnostic_retry_failure",
             )
             return "environment_error", run_dir
 
@@ -246,15 +309,19 @@ class RecoveryMixin:
             command.extend(["--start-frida-server", frida_server])
         if config.get("package"):
             command.extend(["--package", config["package"]])
-        exit_code, _ = run_logged(command, self.log, artifact=recovery_dir / "pipeline.log")
+        exit_code, pipeline_output = run_logged(command, self.log, artifact=recovery_dir / "pipeline.log")
         if exit_code not in {0, 1} or not result_path.is_file():
             archived_result = recovery_dir / "before" / "result.json"
             if archived_result.is_file():
                 shutil.copy2(archived_result, result_path)
-            detail = "Observation checkpoint recovery failed; verify ADB and Frida readiness, then retry this checkpoint."
+            detail, transport_reason = adb_transport_detail(
+                pipeline_output,
+                "Observation checkpoint recovery failed; verify ADB and Frida readiness, then retry this checkpoint.",
+            )
             write_summary(
                 run_dir, "environment_error", records, detail,
-                checkpoint={"stage": "observation"}, reason="observation_recovery_failure",
+                checkpoint={"stage": "observation"},
+                reason=transport_reason or "observation_recovery_failure",
             )
             return "environment_error", run_dir
         recovered = read_json(result_path)
@@ -334,16 +401,20 @@ class RecoveryMixin:
         if config.get("start_frida_server"):
             command.extend(["--start-frida-server", config["start_frida_server"]])
         result_path.unlink(missing_ok=True)
-        exit_code, _ = run_logged(command, self.log, artifact=recovery_dir / "pipeline.log")
+        exit_code, pipeline_output = run_logged(command, self.log, artifact=recovery_dir / "pipeline.log")
         if exit_code not in {0, 1} or not result_path.is_file():
+            detail, transport_reason = adb_transport_detail(
+                pipeline_output,
+                f"Validation checkpoint recovery failed operationally in iteration {iteration}.",
+            )
             write_summary(
                 run_dir, "environment_error", records,
-                f"Validation checkpoint recovery failed operationally in iteration {iteration}.",
+                detail,
                 checkpoint={
                     "stage": "validation", "iteration": iteration,
                     "candidate": workspace_relative(candidate),
                 },
-                reason="validation_recovery_failure",
+                reason=transport_reason or "validation_recovery_failure",
             )
             return "environment_error", run_dir
         validation = read_json(result_path)

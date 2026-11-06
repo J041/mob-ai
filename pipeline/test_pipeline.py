@@ -392,6 +392,21 @@ class PipelineTests(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     pipeline.validate_adb_endpoint(invalid)
 
+    def test_adb_commands_have_a_bounded_transport_timeout(self):
+        args = argparse.Namespace(device="192.168.1.20:38888")
+        timeout = subprocess.TimeoutExpired(["adb"], 30)
+        with mock.patch.object(pipeline, "run", side_effect=timeout) as runner:
+            with self.assertRaisesRegex(pipeline.AdbTransportError, "timed out"):
+                pipeline.adb(args, "logcat", "-c", check=False)
+        self.assertEqual(runner.call_args.kwargs["timeout"], pipeline.ADB_COMMAND_TIMEOUT_SECONDS)
+
+    def test_adb_offline_is_transport_failure_even_for_cleanup(self):
+        args = argparse.Namespace(device="192.168.1.20:38888")
+        response = subprocess.CompletedProcess([], 1, "adb: device offline\n")
+        with mock.patch.object(pipeline, "run", return_value=response):
+            with self.assertRaisesRegex(pipeline.AdbTransportError, "device offline"):
+                pipeline.adb(args, "shell", "am", "force-stop", "com.example", check=False)
+
     def test_wireless_pair_connect_and_select(self):
         args = argparse.Namespace(
             wireless_connect="192.168.1.20:38888",

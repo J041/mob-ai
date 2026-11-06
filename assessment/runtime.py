@@ -35,6 +35,7 @@ GHIDRA_BRIDGE_URL = os.environ.get(
     "MOB_AI_GHIDRA_BRIDGE_URL",
     f"http://127.0.0.1:{os.environ.get('MOB_AI_GHIDRA_PROXY_PORT', '18089')}",
 )
+ADB_TRANSPORT_MARKER = "MOB_AI_ADB_TRANSPORT_ERROR "
 NATIVE_BATCH_SIZE = 5
 NATIVE_TOTAL_LIMIT = 15
 GHIDRA_PREP_TIMEOUT_SECONDS = int(os.environ.get("MOB_AI_GHIDRA_PREP_TIMEOUT", "600"))
@@ -172,6 +173,34 @@ def normalize_android_abi(value: str) -> str:
 
 def read_json(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8-sig"))
+
+
+def adb_transport_failure(output: str) -> dict[str, Any] | None:
+    """Extract the pipeline's safe, structured ADB disconnect marker."""
+    for line in reversed(output.splitlines()):
+        if not line.startswith(ADB_TRANSPORT_MARKER):
+            continue
+        try:
+            value = json.loads(line.removeprefix(ADB_TRANSPORT_MARKER))
+        except json.JSONDecodeError:
+            return {"reason": "ADB transport became unavailable."}
+        if isinstance(value, dict):
+            return value
+    return None
+
+
+def adb_transport_detail(output: str, fallback: str) -> tuple[str, str]:
+    failure = adb_transport_failure(output)
+    if not failure:
+        return fallback, ""
+    device = str(failure.get("device") or "the selected device")
+    reason = str(failure.get("reason") or "became unavailable")
+    command = str(failure.get("command") or "ADB command")
+    return (
+        f"Wireless/ADB target {device} disconnected during `{command}`: {reason}. "
+        "Reconnect the exact device, run readiness, then recover this checkpoint.",
+        "device_transport_failure",
+    )
 
 
 def write_json(path: Path, value: Any) -> None:

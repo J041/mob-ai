@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Callable, TextIO
 
 from assessment.runtime import (
-    EnvironmentFailure, container_path, pipeline_args, read_json, run_logged,
+    EnvironmentFailure, adb_transport_detail, container_path, pipeline_args, read_json, run_logged,
     target_args, workspace_relative,
 )
 
@@ -31,7 +31,7 @@ def run_adaptive_diagnostics(
         command.extend(["--package", config["package"]])
     if config.get("start_frida_server"):
         command.extend(["--start-frida-server", config["start_frida_server"]])
-    exit_code, _ = command_runner(command, log, artifact=iteration_dir / "diagnostics.log")
+    exit_code, output = command_runner(command, log, artifact=iteration_dir / "diagnostics.log")
     manifests = sorted(
         (
             path for path in diagnostics_root.glob("pass-*/manifest.json")
@@ -40,9 +40,10 @@ def run_adaptive_diagnostics(
         key=lambda path: path.stat().st_mtime,
     ) if diagnostics_root.is_dir() else []
     if exit_code != 0 or not manifests:
-        raise EnvironmentFailure(
-            f"Adaptive diagnostics failed operationally in iteration {iteration}."
+        detail, _reason = adb_transport_detail(
+            output, f"Adaptive diagnostics failed operationally in iteration {iteration}.",
         )
+        raise EnvironmentFailure(detail)
     manifest = manifests[-1]
     value = read_json(manifest)
     return {

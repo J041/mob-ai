@@ -25,6 +25,7 @@ from assessment.orchestrator import (
     frida_recovery_available, terminal_outcome, usage_limit_recovery_available,
     validate_decision_schema_registry,
 )
+from assessment.runtime import adb_transport_detail
 from backend.providers import ProviderRequest, detect_usage_limit, provider_adapter, validate_provider_output
 
 
@@ -43,6 +44,17 @@ class AssessmentTests(unittest.TestCase):
     def test_codex_multi_agent_feature_is_explicit_per_mode(self) -> None:
         self.assertEqual(codex_multi_agent_args({"reasoning_mode": "parallel"}), ["--enable", "multi_agent"])
         self.assertEqual(codex_multi_agent_args({"reasoning_mode": "single"}), ["--disable", "multi_agent"])
+
+    def test_adb_disconnect_marker_becomes_recoverable_detail(self) -> None:
+        output = (
+            'MOB_AI_ADB_TRANSPORT_ERROR '
+            '{"device":"10.0.0.2:37123","reason":"adb: device offline",'
+            '"command":"shell am force-stop com.example"}\n'
+        )
+        detail, reason = adb_transport_detail(output, "fallback")
+        self.assertEqual(reason, "device_transport_failure")
+        self.assertIn("10.0.0.2:37123", detail)
+        self.assertIn("recover this checkpoint", detail)
 
     def test_parallel_prompt_bounds_specialists_and_writes(self) -> None:
         run = WORKSPACE / "runs" / "example"

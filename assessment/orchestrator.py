@@ -23,7 +23,7 @@ from assessment.state import (
 )
 from assessment.runtime import (
     DECISION_SCHEMA, RUNS_ROOT, WORKSPACE, EnvironmentFailure, JobPaused, LoopError, ProviderUsageLimit,
-    attempt_fingerprint, claude_mcp_config, codex_config, codex_config_overrides,
+    adb_transport_detail, attempt_fingerprint, claude_mcp_config, codex_config, codex_config_overrides,
     codex_multi_agent_args, codex_reasoning_args, container_path, control_checkpoint,
     pipeline_args, read_json, run_logged, sha256, target_args,
     set_control_run_dir, validate_decision_schema_registry, workspace_relative, write_json,
@@ -96,10 +96,13 @@ class LoopRunner(RecoveryMixin, NativeAnalysisMixin):
         (run_dir / "agent").mkdir(exist_ok=True)
         result_path = run_dir / "result.json"
         if exit_code not in {0, 1} or not result_path.is_file():
-            detail = f"Device observation failed operationally with exit code {exit_code}."
+            detail, transport_reason = adb_transport_detail(
+                output, f"Device observation failed operationally with exit code {exit_code}.",
+            )
             write_summary(
                 run_dir, "environment_error", [], detail,
-                checkpoint={"stage": "observation"}, reason="observation_operational_failure",
+                checkpoint={"stage": "observation"},
+                reason=transport_reason or "observation_operational_failure",
             )
             return "environment_error", run_dir
         result = read_json(result_path)
@@ -192,6 +195,16 @@ class LoopRunner(RecoveryMixin, NativeAnalysisMixin):
             if checkpoint.get("stage") == "observation":
                 return self._recover_observation(
                     run_dir, config, records, resumed_frida,
+                    additional=int(request["max_iterations"]),
+                    provider=str(request.get("provider") or ""),
+                    model=str(request.get("model") or ""),
+                    reasoning_effort=str(request.get("reasoning_effort") or ""),
+                    reasoning_mode=str(request.get("reasoning_mode") or ""),
+                    specialist_count=int(request.get("specialist_count") or 3),
+                )
+            if checkpoint.get("stage") == "adaptive_diagnostics":
+                return self._recover_adaptive_diagnostics(
+                    run_dir, config, records, checkpoint,
                     additional=int(request["max_iterations"]),
                     provider=str(request.get("provider") or ""),
                     model=str(request.get("model") or ""),
@@ -481,6 +494,10 @@ class LoopRunner(RecoveryMixin, NativeAnalysisMixin):
                 except (EnvironmentFailure, OSError, json.JSONDecodeError) as error:
                     write_summary(
                         run_dir, "environment_error", records, str(error),
+                        checkpoint={
+                            "stage": "adaptive_diagnostics", "iteration": iteration,
+                            "candidate": workspace_relative(candidate), "actions": actions,
+                        },
                         reason="adaptive_diagnostics_failure",
                     )
                     return "environment_error"
@@ -519,19 +536,23 @@ class LoopRunner(RecoveryMixin, NativeAnalysisMixin):
                 command.extend(["--package", config["package"]])
             if restart_frida and iteration == start_iteration:
                 command.extend(["--start-frida-server", config["start_frida_server"]])
-            exit_code, _ = run_logged(
+            exit_code, pipeline_output = run_logged(
                 command, self.log, artifact=iteration_dir / "pipeline.log",
                 stage=f"validation_iteration_{iteration}",
             )
             if exit_code not in {0, 1} or not result_path.is_file():
+                detail, transport_reason = adb_transport_detail(
+                    pipeline_output,
+                    f"Candidate validation failed operationally in iteration {iteration}.",
+                )
                 write_summary(
                     run_dir, "environment_error", records,
-                    f"Candidate validation failed operationally in iteration {iteration}.",
+                    detail,
                     checkpoint={
                         "stage": "validation", "iteration": iteration,
                         "candidate": workspace_relative(candidate),
                     },
-                    reason="validation_operational_failure",
+                    reason=transport_reason or "validation_operational_failure",
                 )
                 return "environment_error"
             validation = read_json(result_path)

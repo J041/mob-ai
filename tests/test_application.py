@@ -649,6 +649,13 @@ class WebAppTests(unittest.TestCase):
             "status": "environment_error", "recoverable": True,
             "checkpoint": {"stage": "validation", "iteration": 2},
         }))
+        self.assertTrue(checkpoint_recovery_available({
+            "status": "environment_error", "recoverable": True,
+            "checkpoint": {
+                "stage": "adaptive_diagnostics", "iteration": 3,
+                "actions": ["trace_termination_calls"],
+            },
+        }))
         self.assertFalse(checkpoint_recovery_available({
             "status": "human_review", "recoverable": False,
             "checkpoint": None,

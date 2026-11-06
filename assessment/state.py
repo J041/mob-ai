@@ -52,7 +52,7 @@ def checkpoint_recovery_available(summary: dict[str, Any]) -> bool:
     return bool(
         summary.get("status") == "environment_error"
         and summary.get("recoverable")
-        and checkpoint.get("stage") in {"observation", "validation"}
+        and checkpoint.get("stage") in {"observation", "validation", "adaptive_diagnostics"}
     )
 
 
