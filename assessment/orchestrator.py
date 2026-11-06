@@ -18,14 +18,14 @@ from assessment.outcomes import terminal_outcome
 from assessment.recovery import RecoveryMixin
 from assessment.state import (
     checkpoint_recovery_available, frida_recovery_available,
-    usage_limit_recovery_available, write_summary,
+    pause_recovery_available, usage_limit_recovery_available, write_summary,
 )
 from assessment.runtime import (
-    DECISION_SCHEMA, RUNS_ROOT, WORKSPACE, EnvironmentFailure, LoopError, ProviderUsageLimit,
+    DECISION_SCHEMA, RUNS_ROOT, WORKSPACE, EnvironmentFailure, JobPaused, LoopError, ProviderUsageLimit,
     attempt_fingerprint, claude_mcp_config, codex_config, codex_config_overrides,
-    codex_multi_agent_args, codex_reasoning_args, container_path,
+    codex_multi_agent_args, codex_reasoning_args, container_path, control_checkpoint,
     pipeline_args, read_json, run_logged, sha256, target_args,
-    validate_decision_schema_registry, workspace_relative, write_json,
+    set_control_run_dir, validate_decision_schema_registry, workspace_relative, write_json,
 )
 from backend.providers import ProviderRequest, detect_usage_limit, provider_adapter, validate_provider_output
 
@@ -80,11 +80,12 @@ class LoopRunner(RecoveryMixin, NativeAnalysisMixin):
             command.extend(["--start-frida-server", config["start_frida_server"]])
         if config["package"]:
             command.extend(["--package", config["package"]])
-        exit_code, output = run_logged(command, self.log)
+        exit_code, output = run_logged(command, self.log, stage="observation")
         match = re.search(r"Run directory:\s+(?P<path>/workspace/\S+)", output)
         if not match:
             raise EnvironmentFailure("The observation phase failed before creating a run checkpoint.")
         run_dir = (WORKSPACE / match.group("path").removeprefix("/workspace/")).resolve()
+        set_control_run_dir(run_dir)
         config["created_utc"] = datetime.now(timezone.utc).isoformat()
         write_json(run_dir / "codex-loop-config.json", config)
         (run_dir / "agent").mkdir(exist_ok=True)
@@ -106,6 +107,7 @@ class LoopRunner(RecoveryMixin, NativeAnalysisMixin):
         if result.get("success"):
             write_summary(run_dir, "success_without_bypass", [], "The observation run already satisfied the success policy.")
             return "success_without_bypass", run_dir
+        self._pause_boundary(run_dir, [], 1, "observation")
         status = self._iterations(
             run_dir, config, [], start_iteration=1,
             additional=int(request["max_iterations"]), previous_candidate=None,
@@ -115,6 +117,7 @@ class LoopRunner(RecoveryMixin, NativeAnalysisMixin):
 
     def _load_existing_run(self, request: dict[str, Any]) -> tuple[Path, dict[str, Any], dict[str, Any], list[Any]]:
         run_dir = Path(request["run"]).resolve()
+        set_control_run_dir(run_dir)
         try:
             run_dir.relative_to(RUNS_ROOT.resolve())
         except ValueError as error:
@@ -202,6 +205,34 @@ class LoopRunner(RecoveryMixin, NativeAnalysisMixin):
             )
         if usage_limit_recovery_available(summary):
             return self._recover_usage_limit(run_dir, config, summary, records, request)
+        if pause_recovery_available(summary):
+            next_iteration = int((summary.get("checkpoint") or {}).get("next_iteration") or 1)
+            resumed_config = dict(config)
+            for field in ("provider", "model", "reasoning_effort", "reasoning_mode"):
+                if request.get(field):
+                    resumed_config[field] = request[field]
+            if request.get("reasoning_mode"):
+                resumed_config["specialist_count"] = int(request.get("specialist_count") or 3)
+            write_json(run_dir / "codex-loop-config.json", resumed_config)
+            previous_candidate = None
+            previous_fingerprint = None
+            if records:
+                last = max(records, key=lambda item: int(item["iteration"]))
+                candidate_value = str(last.get("candidate") or "")
+                if not candidate_value:
+                    raise LoopError("The paused checkpoint has no validated candidate to continue.")
+                previous_candidate = (WORKSPACE / candidate_value).resolve()
+                if not previous_candidate.is_file() or sha256(previous_candidate) != last.get("candidate_sha256"):
+                    raise LoopError("The paused checkpoint candidate is missing or changed.")
+                if last.get("validation") is not None:
+                    previous_fingerprint = attempt_fingerprint(last["candidate_sha256"], last["validation"])
+                next_iteration = max(next_iteration, int(last["iteration"]) + 1)
+            return self._iterations(
+                run_dir, resumed_config, records, start_iteration=next_iteration,
+                additional=int(request["max_iterations"]), previous_candidate=previous_candidate,
+                previous_fingerprint=previous_fingerprint,
+                restart_frida=bool(resumed_config.get("start_frida_server")),
+            ), run_dir
         if summary.get("status") == "human_review" and frida_recovery_available(summary):
             frida_server = str(request.get("frida_server") or "")
             if not frida_server:
@@ -275,6 +306,7 @@ class LoopRunner(RecoveryMixin, NativeAnalysisMixin):
                 reason="native_selection_failure",
             )
             return "provider_error"
+        self._pause_boundary(run_dir, records, start_iteration, "native_selection")
         end_iteration = start_iteration + additional - 1
         for iteration in range(start_iteration, end_iteration + 1):
             iteration_dir = agent_dir / f"iteration-{iteration}"
@@ -342,6 +374,7 @@ class LoopRunner(RecoveryMixin, NativeAnalysisMixin):
             command, provider_prompt = adapter.prepare(provider_request)
             exit_code, output = run_logged(
                 command, self.log, cwd=iteration_dir, input_text=provider_prompt, artifact=provider_log,
+                stage=f"provider_iteration_{iteration}",
             )
             completed = adapter.finalize(provider_request, exit_code, output)
             if not completed or not validate_provider_output(decision_path, DECISION_SCHEMA):
@@ -438,6 +471,7 @@ class LoopRunner(RecoveryMixin, NativeAnalysisMixin):
                 write_json(iteration_dir / "record.json", record)
                 previous_candidate = candidate
                 previous_fingerprint = None
+                self._pause_boundary(run_dir, records, iteration + 1, f"diagnostics_iteration_{iteration}")
                 continue
             if decision.get("decision") == "human_review":
                 record = {"iteration": iteration, "codex": decision, "validation": None}
@@ -459,7 +493,10 @@ class LoopRunner(RecoveryMixin, NativeAnalysisMixin):
                 command.extend(["--package", config["package"]])
             if restart_frida and iteration == start_iteration:
                 command.extend(["--start-frida-server", config["start_frida_server"]])
-            exit_code, _ = run_logged(command, self.log, artifact=iteration_dir / "pipeline.log")
+            exit_code, _ = run_logged(
+                command, self.log, artifact=iteration_dir / "pipeline.log",
+                stage=f"validation_iteration_{iteration}",
+            )
             if exit_code not in {0, 1} or not result_path.is_file():
                 write_summary(
                     run_dir, "environment_error", records,
@@ -521,8 +558,24 @@ class LoopRunner(RecoveryMixin, NativeAnalysisMixin):
                 return "assessment_failed"
             previous_fingerprint = None if advanced_native else fingerprint
             previous_candidate = candidate
+            self._pause_boundary(run_dir, records, iteration + 1, f"iteration_{iteration}")
         write_summary(run_dir, "max_iterations", records, f"The policy did not pass within this invocation's {additional} attempts.")
         return "max_iterations"
+
+    @staticmethod
+    def _pause_boundary(
+        run_dir: Path, records: list[Any], next_iteration: int, completed_stage: str,
+    ) -> None:
+        try:
+            control_checkpoint(completed_stage, run_dir)
+        except JobPaused:
+            write_summary(
+                run_dir, "paused", records,
+                f"Paused by the operator after completing {completed_stage.replace('_', ' ')}.",
+                checkpoint={"stage": "iterations", "next_iteration": next_iteration},
+                reason="operator_pause",
+            )
+            raise
 
     def _run_adaptive_diagnostics(
         self, run_dir: Path, config: dict[str, Any], iteration_dir: Path,

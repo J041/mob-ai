@@ -177,16 +177,19 @@ function renderJobs(jobs) {
     initial: 'Initial assessment', resume: 'Resume iterations',
     frida_recovery: 'Fix Frida', observation_recovery: 'Recover observation',
     validation_recovery: 'Recover validation', checkpoint_recovery: 'Recover checkpoint',
-    usage_limit_resume: 'Resume after usage reset',
+    usage_limit_resume: 'Resume after usage reset', pause_resume: 'Continue after pause',
     diagnostic_retry: 'Rerun / retry',
   })[kind] || String(kind || 'Assessment').replaceAll('_', ' ');
   const statusClass = value => `status-${String(value || 'unknown').toLowerCase().replaceAll('_', '-').replaceAll(' ', '-')}`;
+  const displayStatus = job => String(
+    job.status || `exit ${job.exit_code ?? '?'}`
+  ).replaceAll('_', ' ').toUpperCase();
   strip.innerHTML = [...groups.entries()].slice(0, 6).map(([key, attempts]) => {
     const latest = attempts[0];
     const run = state.overview?.runs.find(item => item.id === latest.run_id);
     const terminal = run?.terminal || {};
     const selectedHere = attempts.some(job => job.id === state.selectedJob);
-    const status = latest.running ? 'RUNNING' : String(latest.status || `exit ${latest.exit_code ?? '?'}`).replaceAll('_', ' ').toUpperCase();
+    const status = displayStatus(latest);
     const title = run?.package || latest.run_id || latest.label;
     const subtitle = latest.run_id ? `${latest.run_id} · ${attempts.length} attempt${attempts.length === 1 ? '' : 's'}` : 'Preparing run checkpoint';
     if (attempts.length > 1) {
@@ -200,12 +203,12 @@ function renderJobs(jobs) {
       const history = attempts.map(job => `
         <button class="attempt-chip ${job.id === state.selectedJob ? 'active' : ''}" data-job="${job.id}">
           <span><strong>Attempt ${job.attempt_number || 1}</strong><small>${escapeText(attemptName(job.attempt_kind))}</small></span>
-          <b class="job-status ${statusClass(job.running ? 'running' : job.status)}">${job.running ? 'RUNNING' : escapeText(String(job.status || 'unknown').replaceAll('_', ' ').toUpperCase())}</b>
+          <b class="job-status ${statusClass(job.status)}">${escapeText(displayStatus(job))}</b>
         </button>`).join('');
       return `<details class="job-group attempt-group ${selectedHere ? 'active' : ''}" data-run-group="${escapeText(key)}" ${state.expandedRuns.has(key) ? 'open' : ''}>
         <summary class="job-group-summary">
           <span class="job-summary-copy"><strong>${escapeText(title)}</strong><small>${escapeText(latest.run_id)} &middot; ${attempts.length} attempts</small></span>
-          <span class="job-summary-meta"><b class="job-status ${statusClass(latest.running ? 'running' : latest.status)}">${escapeText(status)}</b>${!latest.running && terminal.label ? `<small class="job-terminal-reason">${escapeText(terminal.label)}</small>` : ''}<em class="history-cta"><span class="history-show">View ${attempts.length} attempts</span><span class="history-hide">Hide attempts</span><i aria-hidden="true">&#8250;</i></em></span>
+          <span class="job-summary-meta"><b class="job-status ${statusClass(latest.status)}">${escapeText(status)}</b>${!latest.running && terminal.label ? `<small class="job-terminal-reason">${escapeText(terminal.label)}</small>` : ''}<em class="history-cta"><span class="history-show">View ${attempts.length} attempts</span><span class="history-hide">Hide attempts</span><i aria-hidden="true">&#8250;</i></em></span>
         </summary>
         <div class="attempt-list">${history}</div>
       </details>`;
@@ -239,8 +242,10 @@ async function refreshSelectedJob() {
     $('#consoleOutput').scrollTop = $('#consoleOutput').scrollHeight;
     const attempt = String(job.attempt_kind || job.kind || 'assessment').replaceAll('_', ' ');
     $('#jobLabel').textContent = `${attempt} · ${job.run_id || job.label} · attempt ${job.attempt_number || 1}`;
-    $('#livePill').textContent = job.running ? 'RUNNING' : String(job.status || `exit ${job.exit_code ?? '?'}`).replaceAll('_', ' ').toUpperCase();
-    $('#livePill').classList.toggle('running', job.running);
+    $('#livePill').textContent = String(job.status || `exit ${job.exit_code ?? '?'}`).replaceAll('_', ' ').toUpperCase();
+    $('#livePill').className = `live-pill${job.status === 'running' ? ' running' : ''}${job.status === 'pausing' || job.status === 'cancelling' ? ` ${job.status}` : ''}`;
+    $('#pauseJob').disabled = !job.running || job.status !== 'running' || Boolean(job.pause_requested);
+    $('#cancelJob').disabled = !job.running && job.status !== 'queued';
     if (job.auto_resume_job_id) {
       state.selectedJob = job.auto_resume_job_id;
       if (state.eventsConnected) refreshSelectedJob();
@@ -250,6 +255,26 @@ async function refreshSelectedJob() {
     if (!state.eventsConnected && (job.running || job.status === 'queued')) schedulePoll();
     else if (!state.eventsConnected && job.status === 'usage_limited' && job.auto_resume && job.resume_after_utc) schedulePoll(15000);
   } catch (error) { toast(error.message, true); }
+}
+
+async function controlSelectedJob(action) {
+  if (!state.selectedJob) return;
+  if (action === 'cancel' && !window.confirm(
+    'Cancel this assessment? The active provider or device process will stop and completed evidence will be preserved.'
+  )) return;
+  const button = action === 'pause' ? $('#pauseJob') : $('#cancelJob');
+  button.disabled = true;
+  try {
+    const job = await api(`/api/jobs/${state.selectedJob}/${action}`, { method: 'POST' });
+    toast(action === 'pause'
+      ? 'Pause requested; waiting for the current stage to finish.'
+      : 'Cancellation requested.');
+    $('#livePill').textContent = String(job.status || action).replaceAll('_', ' ').toUpperCase();
+    renderOverview(await api('/api/overview'));
+  } catch (error) {
+    toast(error.message, true);
+    await refreshSelectedJob();
+  }
 }
 
 function schedulePoll(delay = 2200) {
@@ -383,6 +408,8 @@ $('#reassessSelected').addEventListener('click', () => {
 });
 $('#newForm [name="policy_repeat"]').addEventListener('change', updatePolicyBuilder);
 $('#refreshAll').addEventListener('click', () => refreshOverview(true));
+$('#pauseJob').addEventListener('click', () => controlSelectedJob('pause'));
+$('#cancelJob').addEventListener('click', () => controlSelectedJob('cancel'));
 $('#copyLog').addEventListener('click', async () => {
   try { await navigator.clipboard.writeText($('#consoleOutput').textContent); toast('Console copied.'); }
   catch (_) { toast('Clipboard access was unavailable.', true); }

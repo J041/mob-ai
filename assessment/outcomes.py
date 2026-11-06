@@ -20,7 +20,7 @@ def terminal_outcome(summary: dict[str, Any] | None) -> dict[str, Any]:
     if status not in {
         "human_review", "assessment_failed", "environment_error", "provider_error",
         "codex_error", "codex_boundary_error", "pipeline_error", "worker_error",
-        "usage_limited", "max_iterations", "needs_input", "error", "failed",
+        "usage_limited", "paused", "cancelled", "max_iterations", "needs_input", "error", "failed",
     }:
         return {}
 
@@ -62,6 +62,18 @@ def terminal_outcome(summary: dict[str, Any] | None) -> dict[str, Any]:
             "provider_usage_limited", "Provider usage limit reached", detail,
             "Wait for the recorded account reset, or select another authenticated provider, then resume from the saved checkpoint.",
             "resume_after_reset", severity="warning",
+        )
+    if status == "paused":
+        return outcome(
+            "operator_paused", "Paused by operator", detail,
+            "Continue from the saved safe-stage checkpoint when the device and provider are ready.",
+            "continue_checkpoint", severity="warning",
+        )
+    if status == "cancelled":
+        return outcome(
+            "operator_cancelled", "Cancelled by operator", detail,
+            "Review the preserved evidence. Start a new attempt only if further assessment is required.",
+            "review_evidence", severity="warning",
         )
     if status in {"provider_error", "codex_error"}:
         return outcome(

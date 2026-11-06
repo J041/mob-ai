@@ -9,7 +9,8 @@ import re
 from assessment.outcomes import terminal_outcome
 from assessment.runtime import RUNS_ROOT, WORKSPACE, sha256, workspace_relative
 from assessment.state import (
-    checkpoint_recovery_available, frida_recovery_available, usage_limit_recovery_available,
+    checkpoint_recovery_available, frida_recovery_available, pause_recovery_available,
+    usage_limit_recovery_available,
 )
 from backend.common import json_file
 
@@ -91,6 +92,7 @@ def runs() -> list[dict]:
         frida_recoverable = bool(loop and config and frida_recovery_available(loop))
         checkpoint_recoverable = bool(loop and config and checkpoint_recovery_available(loop))
         usage_recoverable = bool(loop and config and usage_limit_recovery_available(loop))
+        pause_recoverable = bool(loop and config and pause_recovery_available(loop))
         usage = (loop.get("usage") or {}) if loop else {}
         terminal = terminal_outcome(loop)
         resumable = bool(loop and loop.get("status") == "max_iterations" and config)
@@ -121,7 +123,11 @@ def runs() -> list[dict]:
             "frida_recoverable": frida_recoverable,
             "checkpoint_recoverable": checkpoint_recoverable,
             "usage_recoverable": usage_recoverable,
-            "continuable": bool(resumable or frida_recoverable or checkpoint_recoverable or usage_recoverable),
+            "pause_recoverable": pause_recoverable,
+            "continuable": bool(
+                resumable or frida_recoverable or checkpoint_recoverable
+                or usage_recoverable or pause_recoverable
+            ),
             "retryable": retryable,
             "recovery_stage": str(((loop.get("checkpoint") or {}).get("stage") if loop else "") or ""),
             "reason": str((loop.get("reason") if loop else "") or ""),

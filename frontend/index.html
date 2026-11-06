@@ -159,7 +159,14 @@
           <div class="panel-heading compact"><div><p class="kicker">LIVE ACTIVITY</p><h2>Agent console</h2></div><span class="live-pill" id="livePill">IDLE</span></div>
           <div class="job-strip" id="jobStrip"><p>No jobs started from this dashboard.</p></div>
           <pre class="console" id="consoleOutput" tabindex="0"><code><span class="console-muted">Waiting for an assessment…</span></code></pre>
-          <div class="console-footer"><span id="jobLabel">No active process</span><button class="text-button" type="button" id="copyLog">Copy log</button></div>
+          <div class="console-footer">
+            <span id="jobLabel">No active process</span>
+            <div class="console-actions">
+              <button class="text-button" type="button" id="pauseJob" disabled>Pause after stage</button>
+              <button class="text-button danger" type="button" id="cancelJob" disabled>Cancel run</button>
+              <button class="text-button" type="button" id="copyLog">Copy log</button>
+            </div>
+          </div>
         </article>
       </section>
 

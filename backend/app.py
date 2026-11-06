@@ -48,7 +48,7 @@ from backend.requests import ContinuationRequest, DeviceReadinessRequest, StartA
 from backend.events import overview_event_stream
 from backend.run_catalog import recorded_success_policy, runs
 from backend.jobs import (
-    infer_attempt_kind, infer_job_run_id, job_state, jobs, start_job,
+    infer_attempt_kind, infer_job_run_id, job_state, jobs, request_job_control, start_job,
 )
 from backend.routes import (
     create_auth_blueprint, create_devices_blueprint, create_jobs_blueprint,
@@ -823,6 +823,20 @@ def get_job(job_id: str):
         return jsonify(error=str(error)), 404
 
 
+def cancel_job(job_id: str):
+    try:
+        return jsonify(request_job_control(job_id, "cancel")), 202
+    except FileNotFoundError as error:
+        return jsonify(error=str(error)), 404
+
+
+def pause_job(job_id: str):
+    try:
+        return jsonify(request_job_control(job_id, "pause")), 202
+    except FileNotFoundError as error:
+        return jsonify(error=str(error)), 404
+
+
 def start():
     label, payload = parse_start(request.get_json(force=True, silent=False) or {})
     return jsonify(start_job("start", label, payload)), 202
@@ -846,7 +860,7 @@ _handlers = SimpleNamespace(**{
         "connect_wireless_device", "device_readiness", "pair_wireless_device",
         "list_runs", "list_run_artifacts", "preview_run_artifact",
         "download_run_artifact", "get_run_assistant", "ask_run_assistant",
-        "get_run_assistant_request", "list_jobs", "get_job", "start",
+        "get_run_assistant_request", "list_jobs", "get_job", "cancel_job", "pause_job", "start",
         "resume", "retry",
     )
 })

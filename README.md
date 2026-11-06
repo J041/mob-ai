@@ -47,6 +47,7 @@ The dashboard provides:
 - observation, runtime, Frida Server, and iteration controls;
 - provider, model, and thinking-level selection for connected Codex and Claude accounts;
 - durable queued start, resume, and diagnostic-retry jobs with live output;
+- cooperative **Pause after stage** and **Cancel run** controls that preserve completed evidence;
 - a run ledger showing findings, observations, status and resumability;
 - a per-run artifact browser for findings, hooks, comparisons, crash logs, Codex decisions, saved Ghidra results, and success-policy checks;
 - authorization confirmation before every start or resume operation.
@@ -59,6 +60,11 @@ job requests and state under the ignored `worker/.state/` directory using atomic
 The dedicated worker claims queued jobs on disk, so restarting the web UI does not
 interrupt an assessment. If the worker itself stops during device interaction, the
 attempt is preserved as `interrupted` instead of silently repeating side effects.
+Queued jobs can be cancelled before they are claimed. Cancelling a running job
+terminates its active provider/device subprocess group and records `cancelled` without
+deleting artifacts. Pausing is cooperative: the current safe orchestration stage
+finishes, then the worker writes a `paused` continuation checkpoint before starting
+another stage. A paused assessment appears in **Continue / retry**.
 The dashboard receives run, attempt, and live-output changes through the
 `/api/events` server-sent event stream. The server watches bounded control files under
 `worker/.state/` and top-level run results, emitting a snapshot only when their

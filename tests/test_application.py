@@ -22,9 +22,10 @@ from backend.app import (
 from assessment.orchestrator import (
     WORKSPACE, LoopError, LoopRunner, attempt_fingerprint, codex_config_overrides,
     codex_multi_agent_args, codex_reasoning_args, checkpoint_recovery_available,
-    frida_recovery_available, terminal_outcome, usage_limit_recovery_available,
+    frida_recovery_available, pause_recovery_available, terminal_outcome, usage_limit_recovery_available,
     validate_decision_schema_registry,
 )
+from assessment.runtime import JobControl, JobPaused, install_job_control
 from backend.providers import ProviderRequest, detect_usage_limit, provider_adapter, validate_provider_output
 from backend.events import activity_revision
 
@@ -58,6 +59,32 @@ class WebAppTests(unittest.TestCase):
             "status": "provider_error", "recoverable": False,
             "checkpoint": {"stage": "provider", "iteration": 2},
         }))
+
+    def test_operator_pause_checkpoint_is_resumable(self) -> None:
+        self.assertTrue(pause_recovery_available({
+            "status": "paused", "recoverable": True,
+            "checkpoint": {"stage": "iterations", "next_iteration": 4},
+        }))
+        self.assertFalse(pause_recovery_available({
+            "status": "paused", "recoverable": True,
+            "checkpoint": {"stage": "provider", "next_iteration": 4},
+        }))
+
+    def test_safe_boundary_pause_writes_a_continuation_checkpoint(self) -> None:
+        control = JobControl()
+        control.request_pause()
+        install_job_control(control)
+        try:
+            with tempfile.TemporaryDirectory(dir=WORKSPACE) as temp:
+                run = Path(temp)
+                with self.assertRaises(JobPaused):
+                    LoopRunner._pause_boundary(run, [], 3, "native_selection")
+                summary = json.loads((run / "codex-loop-result.json").read_text(encoding="utf-8"))
+        finally:
+            install_job_control(None)
+        self.assertEqual(summary["status"], "paused")
+        self.assertEqual(summary["checkpoint"]["next_iteration"], 3)
+        self.assertTrue(summary["recoverable"])
 
     def test_usage_limit_recovery_restarts_interrupted_iteration_from_snapshot(self) -> None:
         with tempfile.TemporaryDirectory(dir=WORKSPACE) as temp:

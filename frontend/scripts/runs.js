@@ -44,6 +44,8 @@ export function createRunController({ renderModelOptions, renderReasoningOptions
       ? (run.usage_reset_utc
         ? `Provider usage was exhausted. Resume after ${new Date(run.usage_reset_utc).toLocaleString()}${run.usage_auto_resume ? '; automatic resume is enabled.' : '.'}`
         : 'Provider usage was exhausted without a reported reset time. Resume manually after checking account Usage settings.')
+      : run.pause_recoverable
+      ? 'The assessment was paused at a safe stage. Continue from its saved candidate and iteration history.'
       : 'Ready for additional iterations.';
     const diagnosticAction = 'Existing evidence will be archived. Observation will rerun with Android crash-buffer, process-exit and available tombstone diagnostics before the reasoning provider continues.';
     const action = state.continuationMode === 'retry' ? diagnosticAction : continuationAction;

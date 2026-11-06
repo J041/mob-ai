@@ -20,7 +20,7 @@ def write_summary(
         "status": status,
         "detail": detail,
         "reason": reason,
-        "recoverable": status in {"environment_error", "usage_limited"} and bool(checkpoint),
+        "recoverable": status in {"environment_error", "usage_limited", "paused"} and bool(checkpoint),
         "checkpoint": checkpoint,
         "usage": usage,
         "run_directory": workspace_relative(run_dir),
@@ -62,5 +62,19 @@ def usage_limit_recovery_available(summary: dict[str, Any]) -> bool:
         summary.get("status") == "usage_limited"
         and summary.get("recoverable")
         and checkpoint.get("stage") in {"native_selection", "provider", "native_replenishment"}
+    )
+
+
+def pause_recovery_available(summary: dict[str, Any]) -> bool:
+    checkpoint = summary.get("checkpoint") or {}
+    try:
+        next_iteration = int(checkpoint.get("next_iteration") or 0)
+    except (TypeError, ValueError):
+        return False
+    return bool(
+        summary.get("status") == "paused"
+        and summary.get("recoverable")
+        and checkpoint.get("stage") == "iterations"
+        and next_iteration >= 1
     )
 

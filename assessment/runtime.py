@@ -8,7 +8,9 @@ import os
 from pathlib import Path
 import re
 import shutil
+import signal
 import subprocess
+import threading
 from typing import Any, TextIO
 import urllib.error
 import urllib.parse
@@ -51,6 +53,94 @@ class ProviderUsageLimit(LoopError):
         super().__init__(usage.get("detail") or f"{provider} usage allowance exhausted.")
         self.provider = provider
         self.usage = usage
+
+
+class JobCancelled(RuntimeError):
+    """The operator cancelled the active durable job."""
+
+
+class JobPaused(RuntimeError):
+    """The operator requested a pause at a safe orchestration boundary."""
+
+
+class JobControl:
+    """Process-local control for the single job owned by a durable worker."""
+
+    def __init__(self) -> None:
+        self.cancel_requested = threading.Event()
+        self.pause_requested = threading.Event()
+        self._lock = threading.Lock()
+        self._process: subprocess.Popen | None = None
+        self.stage = "starting"
+        self.run_dir: Path | None = None
+
+    def request_cancel(self) -> None:
+        self.cancel_requested.set()
+        with self._lock:
+            process = self._process
+        if process is not None:
+            self._terminate(process)
+
+    def request_pause(self) -> None:
+        self.pause_requested.set()
+
+    def register(self, process: subprocess.Popen) -> None:
+        with self._lock:
+            self._process = process
+        if self.cancel_requested.is_set():
+            self._terminate(process)
+
+    def unregister(self, process: subprocess.Popen) -> None:
+        with self._lock:
+            if self._process is process:
+                self._process = None
+
+    @staticmethod
+    def _terminate(process: subprocess.Popen) -> None:
+        if process.poll() is not None:
+            return
+        try:
+            if hasattr(os, "killpg"):
+                os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+            else:
+                process.terminate()
+            process.wait(timeout=5)
+        except (OSError, subprocess.TimeoutExpired):
+            try:
+                if hasattr(os, "killpg"):
+                    os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+                else:
+                    process.kill()
+            except OSError:
+                pass
+
+
+_job_control: JobControl | None = None
+_job_control_lock = threading.Lock()
+
+
+def install_job_control(control: JobControl | None) -> None:
+    global _job_control
+    with _job_control_lock:
+        _job_control = control
+
+
+def set_control_run_dir(run_dir: Path) -> None:
+    if _job_control is not None:
+        _job_control.run_dir = run_dir
+
+
+def control_checkpoint(stage: str, run_dir: Path | None = None, *, allow_pause: bool = True) -> None:
+    control = _job_control
+    if control is None:
+        return
+    control.stage = stage
+    if run_dir is not None:
+        control.run_dir = run_dir
+    if control.cancel_requested.is_set():
+        raise JobCancelled("The assessment was cancelled by the operator.")
+    if allow_pause and control.pause_requested.is_set():
+        raise JobPaused("The assessment paused after completing its current stage.")
 
 
 def sha256(path: Path) -> str:
@@ -153,8 +243,9 @@ def attempt_fingerprint(candidate_hash: str, validation: Any) -> str:
 
 def run_logged(
     command: list[str], log: TextIO, *, cwd: Path = WORKSPACE,
-    input_text: str | None = None, artifact: Path | None = None,
+    input_text: str | None = None, artifact: Path | None = None, stage: str = "command",
 ) -> tuple[int, str]:
+    control_checkpoint(stage, allow_pause=False)
     log.write(f"+ {' '.join(command)}\n")
     log.flush()
     artifact_stream = artifact.open("w", encoding="utf-8") if artifact else None
@@ -162,7 +253,10 @@ def run_logged(
         process = subprocess.Popen(
             command, cwd=cwd, text=True, stdin=subprocess.PIPE if input_text is not None else None,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=1,
+            start_new_session=True,
         )
+        if _job_control is not None:
+            _job_control.register(process)
         if input_text is not None and process.stdin:
             process.stdin.write(input_text)
             process.stdin.close()
@@ -175,8 +269,16 @@ def run_logged(
             if artifact_stream:
                 artifact_stream.write(line)
                 artifact_stream.flush()
-        return process.wait(), "".join(chunks)
+        exit_code = process.wait()
+        control_checkpoint(stage, allow_pause=False)
+        return exit_code, "".join(chunks)
     finally:
+        if 'process' in locals() and _job_control is not None:
+            _job_control.unregister(process)
+        if 'process' in locals() and process.stdout:
+            process.stdout.close()
+        if 'process' in locals() and process.stdin and not process.stdin.closed:
+            process.stdin.close()
         if artifact_stream:
             artifact_stream.close()
 

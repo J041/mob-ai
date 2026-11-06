@@ -5,10 +5,12 @@ from __future__ import annotations
 from pathlib import Path
 import re
 import threading
+import time
 import uuid
 
 from assessment.state import (
-    checkpoint_recovery_available, frida_recovery_available, usage_limit_recovery_available,
+    checkpoint_recovery_available, frida_recovery_available, pause_recovery_available,
+    usage_limit_recovery_available,
 )
 from backend.auth import provider_authenticated
 from backend.common import json_file, utc_now
@@ -16,22 +18,80 @@ from backend.providers import PROVIDER_IDS
 from worker.queue import STATE_ROOT, atomic_write_json
 
 _lock = threading.RLock()
+_log_cache: dict[tuple[str, str], str] = {}
+_log_cache_lock = threading.Lock()
+
+
+def _read_job_log(log_path: Path, limit: int, mode: str) -> str:
+    """Read a live bind-mounted log without surfacing transient Docker I/O races."""
+    cache_key = (str(log_path), mode)
+    if not log_path.is_file():
+        return ""
+    for attempt in range(4):
+        try:
+            with log_path.open("rb") as stream:
+                if mode == "tail":
+                    stream.seek(max(0, log_path.stat().st_size - limit))
+                value = stream.read(limit if mode == "head" else -1).decode("utf-8", errors="replace")
+            with _log_cache_lock:
+                _log_cache[cache_key] = value
+            return value
+        except OSError:
+            if attempt < 3:
+                time.sleep(0.025 * (2 ** attempt))
+    with _log_cache_lock:
+        return _log_cache.get(cache_key, "")
 
 def job_log_tail(job_id: str, limit: int = 120_000) -> str:
     log_path = STATE_ROOT / job_id / "output.log"
-    if not log_path.is_file():
-        return ""
-    with log_path.open("rb") as stream:
-        stream.seek(max(0, log_path.stat().st_size - limit))
-        return stream.read().decode("utf-8", errors="replace")
+    return _read_job_log(log_path, limit, "tail")
 
 
 def job_log_head(job_id: str, limit: int = 8_000) -> str:
     log_path = STATE_ROOT / job_id / "output.log"
-    if not log_path.is_file():
-        return ""
-    with log_path.open("rb") as stream:
-        return stream.read(limit).decode("utf-8", errors="replace")
+    return _read_job_log(log_path, limit, "head")
+
+
+def request_job_control(job_id: str, action: str) -> dict:
+    """Durably request queued/running cancellation or a safe-boundary pause."""
+    if not re.fullmatch(r"[a-f0-9]{32}", job_id):
+        raise ValueError("Invalid job identifier.")
+    if action not in {"cancel", "pause"}:
+        raise ValueError("Unsupported job control action.")
+    directory = STATE_ROOT / job_id
+    state_path = directory / "job.json"
+    with _lock:
+        state = json_file(state_path)
+        if not state:
+            raise FileNotFoundError("Job not found.")
+        status = str(state.get("status") or "")
+        if action == "cancel":
+            if status == "queued" and not state.get("running"):
+                state.update({
+                    "status": "cancelled", "running": False, "exit_code": None,
+                    "cancel_requested": True, "cancel_requested_utc": utc_now(),
+                    "completed_utc": utc_now(),
+                    "detail": "Cancelled before the durable worker started this job.",
+                })
+                (directory / "claim.lock").unlink(missing_ok=True)
+            elif state.get("running") or status in {"running", "pausing", "cancelling"}:
+                state.update({
+                    "status": "cancelling", "cancel_requested": True,
+                    "cancel_requested_utc": utc_now(),
+                    "detail": "Cancellation requested; stopping the active assessment process.",
+                })
+            else:
+                raise ValueError(f"Job cannot be cancelled from status {status!r}.")
+        else:
+            if not state.get("running") or status not in {"running", "pausing"}:
+                raise ValueError("Only a running job can pause after its current stage.")
+            state.update({
+                "status": "pausing", "pause_requested": True,
+                "pause_requested_utc": utc_now(),
+                "detail": "Pause requested; the current safe stage will finish before checkpointing.",
+            })
+        atomic_write_json(state_path, state)
+    return job_state(job_id)
 
 
 def infer_job_run_id(state: dict, log_text: str) -> str:
@@ -99,6 +159,8 @@ def resume_attempt_kind(run_dir: Path) -> str:
     summary = json_file(run_dir / "codex-loop-result.json") or {}
     if usage_limit_recovery_available(summary):
         return "usage_limit_resume"
+    if pause_recovery_available(summary):
+        return "pause_resume"
     if frida_recovery_available(summary):
         return "frida_recovery"
     if checkpoint_recovery_available(summary):

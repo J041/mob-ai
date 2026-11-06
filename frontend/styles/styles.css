@@ -185,6 +185,9 @@ input::placeholder { color: #465358; }
 .activity-panel { display: flex; height: auto; min-height: 0; flex-direction: column; contain: size; }
 .live-pill { color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 5px 8px; font: 9px var(--mono); letter-spacing: .08em; }
 .live-pill.running { color: var(--green); border-color: #405632; background: rgba(185,247,99,.05); }
+.live-pill.pausing, .live-pill.cancelling { color: var(--amber); border-color: #66572f; background: rgba(246,196,91,.06); }
+.job-status.status-pausing, .job-status.status-cancelling,
+.job-status.status-paused, .job-status.status-cancelled { color: var(--amber); }
 .job-strip { flex: 0 0 clamp(220px, 30dvh, 300px); height: clamp(220px, 30dvh, 300px); min-height: 0; max-height: none; overflow-x: hidden; overflow-y: scroll; overscroll-behavior: contain; scrollbar-gutter: stable; scrollbar-width: thin; scrollbar-color: #405056 #0b1012; touch-action: pan-y; padding: 10px 14px; border-bottom: 1px solid var(--line-soft); display: flex; flex-direction: column; align-items: stretch; gap: 7px; }
 .job-strip > p { margin: auto; color: #58666a; font-size: 10px; }
 .job-group { flex: 0 0 auto; min-width: 0; overflow: hidden; border: 1px solid transparent; border-radius: 9px; }
@@ -250,7 +253,10 @@ input::placeholder { color: #465358; }
 .console { flex: 1 1 auto; width: 100%; min-width: 0; min-height: 0; max-height: none; overflow: auto; margin: 0; padding: 16px; background: #080c0e; color: #b9c6c5; font: 10.5px/1.62 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word; }
 .console-muted { color: #465358; }
 .console-footer { min-height: 40px; padding: 0 14px; display: flex; justify-content: space-between; align-items: center; color: var(--muted); font-size: 9px; border-top: 1px solid var(--line-soft); }
+.console-actions { flex: 0 0 auto; display: flex; align-items: center; gap: 12px; }
 .text-button { border: 0; padding: 0; background: transparent; color: var(--green); cursor: pointer; font-size: 9px; }
+.text-button.danger { color: var(--red); }
+.text-button:disabled { color: #465358; cursor: default; }
 
 .runs-panel { min-height: 280px; }
 .muted { color: var(--muted); font-size: 10px; }
@@ -271,7 +277,7 @@ input::placeholder { color: #465358; }
 .badge { justify-self: start; padding: 5px 7px; border-radius: 999px; background: #1b272a; color: #a5b4b5; font: 8px var(--mono); text-transform: uppercase; letter-spacing: .06em; }
 .badge.success, .badge.success_without_bypass { color: var(--green); background: rgba(185,247,99,.08); }
 .badge.max_iterations { color: var(--amber); background: rgba(246,196,91,.08); }
-.badge.usage_limited { color: var(--amber); background: rgba(246,196,91,.08); }
+.badge.usage_limited, .badge.paused, .badge.cancelled { color: var(--amber); background: rgba(246,196,91,.08); }
 .badge.human_review, .badge.pipeline_error, .badge.provider_error, .badge.codex_error,
 .badge.codex_boundary_error, .badge.environment_error, .badge.assessment_failed,
 .badge.worker_error, .badge.needs_input, .badge.error, .badge.failed {

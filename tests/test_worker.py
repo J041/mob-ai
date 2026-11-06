@@ -2,19 +2,81 @@ from __future__ import annotations
 
 import http.server
 from datetime import datetime, timedelta, timezone
+from io import StringIO
 import tempfile
 from pathlib import Path
 import threading
+import time
 import unittest
 import urllib.request
 from unittest import mock
 
+from assessment.runtime import JobCancelled, JobControl, JobPaused, install_job_control, run_logged
+from backend import jobs as job_service
 from worker import main as worker
 from worker import queue as job_queue
 from worker.ghidra_proxy import GhidraLoopbackProxy
 
 
 class DurableWorkerTests(unittest.TestCase):
+    def test_cancellation_terminates_the_active_subprocess_group(self) -> None:
+        control = JobControl()
+        install_job_control(control)
+        canceller = threading.Thread(target=lambda: (time.sleep(0.15), control.request_cancel()))
+        canceller.start()
+        started = time.monotonic()
+        try:
+            with self.assertRaises(JobCancelled):
+                run_logged(
+                    ["python3", "-c", "import time; time.sleep(30)"],
+                    StringIO(), stage="provider_test",
+                )
+        finally:
+            install_job_control(None)
+            canceller.join(timeout=2)
+        self.assertLess(time.monotonic() - started, 3)
+
+    def test_live_log_read_returns_cached_text_after_transient_io_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            directory = root / ("e" * 32)
+            directory.mkdir()
+            log_path = directory / "output.log"
+            log_path.write_text("stable output\n", encoding="utf-8")
+            with mock.patch.object(job_service, "STATE_ROOT", root):
+                self.assertEqual(job_service.job_log_tail("e" * 32), "stable output\n")
+                with mock.patch.object(Path, "open", side_effect=OSError(61, "No data available")):
+                    cached = job_service.job_log_tail("e" * 32)
+            self.assertEqual(cached, "stable output\n")
+
+    def test_queued_job_can_be_cancelled_before_claim(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            directory = root / ("f" * 32)
+            directory.mkdir()
+            job_queue.atomic_write_json(directory / "job.json", {
+                "id": "f" * 32, "kind": "start", "status": "queued", "running": False,
+            })
+            with mock.patch.object(job_service, "STATE_ROOT", root), mock.patch.object(job_queue, "STATE_ROOT", root):
+                cancelled = job_service.request_job_control("f" * 32, "cancel")
+                claimed = job_queue.claim_next_job("worker-test")
+            self.assertEqual(cancelled["status"], "cancelled")
+            self.assertFalse(cancelled["running"])
+            self.assertIsNone(claimed)
+
+    def test_running_job_accepts_cooperative_pause_request(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            directory = root / ("9" * 32)
+            directory.mkdir()
+            job_queue.atomic_write_json(directory / "job.json", {
+                "id": "9" * 32, "kind": "start", "status": "running", "running": True,
+            })
+            with mock.patch.object(job_service, "STATE_ROOT", root):
+                pausing = job_service.request_job_control("9" * 32, "pause")
+            self.assertEqual(pausing["status"], "pausing")
+            self.assertTrue(pausing["pause_requested"])
+
     def test_due_usage_limit_job_is_requeued_once(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -104,6 +166,24 @@ class DurableWorkerTests(unittest.TestCase):
             self.assertEqual(stored["status"], "success")
             self.assertEqual(stored["run_id"], "run-123")
             self.assertEqual(stored["exit_code"], 0)
+
+    def test_worker_records_cancelled_and_paused_terminal_states(self) -> None:
+        for exception, expected in ((JobCancelled("stop"), "cancelled"), (JobPaused("wait"), "paused")):
+            with self.subTest(expected=expected), tempfile.TemporaryDirectory() as temp:
+                directory = Path(temp)
+                state = {
+                    "id": "8" * 32, "kind": "start", "running": True,
+                    "status": "running", "started_utc": "now",
+                }
+                job_queue.atomic_write_json(directory / "job.json", state)
+                runner = mock.Mock()
+                runner.new.side_effect = exception
+                with mock.patch.object(worker, "LoopRunner", return_value=runner):
+                    worker.execute(directory, state, {"kind": "start", "payload": {}})
+                stored = job_queue.read_json(directory / "job.json")
+                self.assertEqual(stored["status"], expected)
+                self.assertFalse(stored["running"])
+                self.assertIn("checkpoint", stored)
 
     def test_abandoned_running_job_is_preserved_as_interrupted(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

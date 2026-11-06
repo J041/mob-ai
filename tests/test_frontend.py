@@ -97,6 +97,18 @@ class FrontendTests(unittest.TestCase):
         self.assertIn("Recommended:", run_script)
         self.assertIn("job-terminal-reason", script)
 
+    def test_agent_console_exposes_pause_and_cancel_controls(self) -> None:
+        response = self.client.get("/")
+        page = response.get_data(as_text=True)
+        response.close()
+        response = self.client.get("/scripts/app.js")
+        script = response.get_data(as_text=True)
+        response.close()
+        self.assertIn('id="pauseJob"', page)
+        self.assertIn('id="cancelJob"', page)
+        self.assertIn("controlSelectedJob('pause')", script)
+        self.assertIn("controlSelectedJob('cancel')", script)
+
     def test_assessment_rows_share_grid_columns(self) -> None:
         response = self.client.get("/styles/styles.css")
         styles = response.get_data(as_text=True)

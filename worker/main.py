@@ -13,7 +13,10 @@ from worker.queue import (
 )
 from worker.ghidra_proxy import GhidraLoopbackProxy
 from assessment.orchestrator import LoopRunner
-from assessment.runtime import EnvironmentFailure, LoopError
+from assessment.runtime import (
+    EnvironmentFailure, JobCancelled, JobControl, JobPaused, LoopError,
+    install_job_control,
+)
 
 
 POLL_SECONDS = float(os.environ.get("MOB_AI_WORKER_POLL_SECONDS", "1"))
@@ -25,6 +28,20 @@ def execute(directory, state: dict, request: dict) -> None:
     exit_code = 1
     status = "error"
     run_dir = None
+    control = JobControl()
+    monitoring = threading.Event()
+
+    def monitor_control() -> None:
+        while not monitoring.wait(0.2):
+            current = read_json(directory / "job.json")
+            if current.get("cancel_requested"):
+                control.request_cancel()
+            if current.get("pause_requested"):
+                control.request_pause()
+
+    install_job_control(control)
+    monitor = threading.Thread(target=monitor_control, name=f"job-control-{state['id'][:8]}", daemon=True)
+    monitor.start()
     with (directory / "output.log").open("a", encoding="utf-8", buffering=1) as log:
         log.write(f"\nDurable worker claimed job {state['id']} at {state['started_utc']}.\n")
         try:
@@ -46,6 +63,16 @@ def execute(directory, state: dict, request: dict) -> None:
                 })
             log.write(f"\nLoop finished: {status}\nRun directory: {run_dir}\n")
             exit_code = 0 if status in {"success", "success_without_bypass"} else 1
+        except JobCancelled as error:
+            log.write(f"\ncancelled: {error}\n")
+            status = "cancelled"
+            exit_code = None
+            run_dir = control.run_dir
+        except JobPaused as error:
+            log.write(f"\npaused: {error}\n")
+            status = "paused"
+            exit_code = None
+            run_dir = control.run_dir
         except EnvironmentFailure as error:
             log.write(f"\nerror: {error}\n")
             status = "environment_error"
@@ -63,6 +90,21 @@ def execute(directory, state: dict, request: dict) -> None:
             status = "worker_error"
             exit_code = 2
         finally:
+            monitoring.set()
+            monitor.join(timeout=1)
+            install_job_control(None)
+            latest = read_json(directory / "job.json")
+            state.update({
+                key: value for key, value in latest.items()
+                if key in {"cancel_requested", "cancel_requested_utc", "pause_requested", "pause_requested_utc"}
+            })
+            if run_dir is not None and not state.get("run_id"):
+                state.update({
+                    "run_id": run_dir.name,
+                    "attempt_number": int(state.get("attempt_number") or 1),
+                    "attempt_kind": str(state.get("attempt_kind") or "initial"),
+                    "parent_job_id": str(state.get("parent_job_id") or ""),
+                })
             if status == "usage_limited" and run_dir is not None:
                 summary = read_json(run_dir / "codex-loop-result.json")
                 usage = summary.get("usage") or {}
@@ -78,6 +120,18 @@ def execute(directory, state: dict, request: dict) -> None:
                 "status": status,
                 "completed_utc": utc_now(),
             })
+            if status in {"cancelled", "paused"}:
+                state.update({
+                    "detail": (
+                        "Cancelled by the operator; completed evidence was preserved."
+                        if status == "cancelled"
+                        else "Paused after a safe stage; continue the assessment from its saved checkpoint."
+                    ),
+                    "checkpoint": {
+                        "stage": control.stage,
+                        "run_id": run_dir.name if run_dir is not None else "",
+                    },
+                })
             atomic_write_json(directory / "job.json", state)
 
 
