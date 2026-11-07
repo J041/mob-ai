@@ -94,6 +94,7 @@
                 <span class="readiness-state" id="readinessState">NOT CHECKED</span>
               </div>
               <div class="readiness-controls">
+                <label class="field"><span>Frida client version</span><select name="frida_version" class="frida-version"><option value="">No installed runtimes</option></select><small>The device server must report this exact version.</small></label>
                 <label class="field"><span>Frida Server path <em>device path</em></span><input name="frida_server" value="/data/local/tmp/frida-server"></label>
                 <label class="field upload-field"><span>Frida Server binary <em>optional deploy</em></span><input name="frida_binary" type="file"><small>Choose a trusted binary matching the device ABI and Frida client version.</small></label>
                 <label class="switch-field readiness-start"><input name="start_frida" type="checkbox" checked><span class="switch"></span><span>Start and verify Frida</span></label>
@@ -134,6 +135,7 @@
                 <span class="readiness-state" id="resumeReadinessState">RECORDED</span>
               </div>
               <div class="readiness-controls">
+                <label class="field"><span>Frida client version</span><select name="frida_version" class="frida-version"><option value="">No installed runtimes</option></select><small>Selecting another version requires readiness.</small></label>
                 <label class="field"><span>Frida Server path <em>device path</em></span><input name="frida_server" id="resumeFridaServer" placeholder="/data/local/tmp/frida-server"></label>
                 <label class="field upload-field"><span>Frida Server binary <em>optional deploy</em></span><input name="frida_binary" type="file"><small>Choose a trusted binary matching the selected device ABI.</small></label>
                 <label class="switch-field readiness-start"><input name="start_frida" type="checkbox" checked><span class="switch"></span><span>Start and verify Frida</span></label>

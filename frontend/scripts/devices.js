@@ -120,6 +120,7 @@ export function createDeviceController() {
     body.append('transport', form.elements.transport.value);
     body.append('target', target);
     body.append('frida_server', form.elements.frida_server.value.trim());
+    body.append('frida_version', form.elements.frida_version.value);
     body.append('start_frida', String(form.elements.start_frida.checked));
     body.append('authorized', String(authorized));
     const binary = form.elements.frida_binary.files[0];

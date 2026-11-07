@@ -66,6 +66,7 @@ export function createRunController({ renderModelOptions, renderReasoningOptions
     form.elements.transport.value = run.transport === 'wireless' ? 'wireless' : 'adb';
     form.elements.target.value = run.target || '';
     form.elements.frida_server.value = run.frida_server || '/data/local/tmp/frida-server';
+    form.elements.frida_version.value = run.frida_version || form.elements.frida_version.value;
     form.elements.readiness_token.value = '';
     $('#resumeReadinessState').textContent = 'RECORDED';
     $('#resumeReadinessState').className = 'readiness-state';

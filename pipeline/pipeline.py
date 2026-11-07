@@ -23,11 +23,13 @@ try:
         BOUNDED_CAPTURE, DIAGNOSTIC_ACTIONS, DIAGNOSTIC_MAX_ACTIONS_PER_PASS,
         DIAGNOSTIC_RECIPES,
     )
+    from pipeline.frida_runtimes import activate_frida_runtime
 except ModuleNotFoundError:  # Direct execution from /workspace/pipeline.
     from diagnostic_recipes import (  # type: ignore
         BOUNDED_CAPTURE, DIAGNOSTIC_ACTIONS, DIAGNOSTIC_MAX_ACTIONS_PER_PASS,
         DIAGNOSTIC_RECIPES,
     )
+    from frida_runtimes import activate_frida_runtime  # type: ignore
 
 PATTERNS = {
     "root_framework": re.compile(r"RootBeer|Magisk|SuperSU|rooted|isRooted", re.I),
@@ -1094,6 +1096,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--candidate-script", type=Path, help="execute one reviewed .js candidate inside the resumed run")
     parser.add_argument("--frida-endpoint", default="127.0.0.1:27042", help="frida-server host:port")
+    parser.add_argument("--frida-version", default="", help="installed isolated Frida client version")
     parser.add_argument("--start-frida-server", help="device path to an already-installed frida-server (requires su)")
     parser.add_argument("--patch-script", help="reviewed Python patch receiving the apktool directory")
     parser.add_argument("--resume", type=Path, help="resume an existing run directory")
@@ -1104,6 +1107,7 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
+    activate_frida_runtime(args.frida_version)
     if not args.authorized:
         print("Refusing to run without --authorized (ownership or explicit testing permission).", file=sys.stderr)
         return 2
@@ -1193,6 +1197,7 @@ def main() -> int:
             success, checks = bool(baseline["passed"]), list(baseline["checks"])
         summary = {
             "strategy": "observation", "device": args.device,
+            "frida_version": args.frida_version,
             "device_abi": runtime_abi,
             "transport": "wireless" if args.wireless_connect else "adb",
             "package": package, "observation_events": len(events),
@@ -1206,6 +1211,7 @@ def main() -> int:
     if baseline and baseline["passed"] and success_spec.get("baseline_required"):
         summary = {
             "strategy": "observation", "device": args.device,
+            "frida_version": args.frida_version,
             "device_abi": runtime_abi,
             "transport": "wireless" if args.wireless_connect else "adb",
             "package": package, "observation_events": len(events),
@@ -1219,6 +1225,7 @@ def main() -> int:
     success, attempts = run_frida(args, run_dir, str(package), scripts, success_spec)
     summary = {
         "strategy": "frida", "device": args.device,
+        "frida_version": args.frida_version,
         "device_abi": runtime_abi,
         "transport": "wireless" if args.wireless_connect else "adb",
         "package": package, "observation_events": len(events),

@@ -57,6 +57,7 @@ class LoopRunner(RecoveryMixin, NativeAnalysisMixin):
             "observation_seconds": int(request["observation_seconds"]),
             "run_seconds": int(request["run_seconds"]),
             "start_frida_server": request.get("frida_server") or "",
+            "frida_version": request.get("frida_version") or "",
             "model": request.get("model") or "",
             "provider": request.get("provider") or "codex",
             "reasoning_effort": request.get("reasoning_effort") or "",
@@ -155,21 +156,25 @@ class LoopRunner(RecoveryMixin, NativeAnalysisMixin):
         requested_target = str(request.get("target") or config.get("target") or "")
         requested_transport = str(request.get("transport") or config.get("transport") or "adb")
         requested_frida = str(request.get("frida_server") or config.get("start_frida_server") or "")
+        requested_frida_version = str(request.get("frida_version") or config.get("frida_version") or "")
         settings_changed = any((
             requested_target != str(config.get("target") or ""),
             requested_transport != str(config.get("transport") or "adb"),
             requested_frida != str(config.get("start_frida_server") or ""),
+            requested_frida_version != str(config.get("frida_version") or ""),
         ))
         if settings_changed:
             history = list(config.get("target_history") or [])
             history.append({
                 "target": config.get("target") or "", "transport": config.get("transport") or "adb",
                 "frida_server": config.get("start_frida_server") or "",
+                "frida_version": config.get("frida_version") or "",
                 "replaced_utc": datetime.now(timezone.utc).isoformat(),
             })
             config.update({
                 "target": requested_target, "transport": requested_transport,
-                "start_frida_server": requested_frida, "target_history": history,
+                "start_frida_server": requested_frida, "frida_version": requested_frida_version,
+                "target_history": history,
                 "_target_settings_changed": True,
             })
         records = list(summary.get("iterations") or [])

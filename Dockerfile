@@ -6,6 +6,9 @@ ARG GHIDRA_MCP_VERSION=7.0.0
 ARG GHIDRA_MCP_SHA256=d133c4c869a0d9f605c1c9426bf5d9064772a6947ccecde0f42fbbffecf1d812
 ARG GHIDRA_MCP_BRIDGE_SHA256=a75050061d0d1514d4b11e6288ea7575c09ab6125a1394c33fe349fb7658bbae
 ARG FRIDA_TOOLS_VERSION=14.11.0
+ARG FRIDA_VERSION=17.25.0
+ARG FRIDA_COMPAT_VERSION=16.7.19
+ARG FRIDA_COMPAT_TOOLS_VERSION=13.5.0
 ARG APKTOOL_VERSION=3.0.3
 ARG UBER_APK_SIGNER_VERSION=1.3.0
 ARG CODEX_CLI_VERSION=0.162.1
@@ -18,6 +21,9 @@ ARG ANDROID_PLATFORM_TOOLS_URL=https://dl.google.com/android/repository/platform
 FROM ubuntu:${UBUNTU_VERSION} AS provider-runtime
 
 ARG FRIDA_TOOLS_VERSION
+ARG FRIDA_VERSION
+ARG FRIDA_COMPAT_VERSION
+ARG FRIDA_COMPAT_TOOLS_VERSION
 ARG CODEX_CLI_VERSION
 ARG CLAUDE_CODE_VERSION
 ARG NODE_VERSION
@@ -45,10 +51,25 @@ RUN set -eux; \
     grep "  ${node_archive}$" /tmp/node-shasums.txt > /tmp/node-sha256.txt; \
     (cd /tmp && sha256sum -c node-sha256.txt); \
     tar -xJf "/tmp/${node_archive}" -C /usr/local --strip-components=1; \
-    rm "/tmp/${node_archive}" /tmp/node-shasums.txt /tmp/node-sha256.txt; \
+    rm "/tmp/${node_archive}" /tmp/node-shasums.txt /tmp/node-sha256.txt
+
+RUN set -eux; \
     python3 -m pip install --no-cache-dir --break-system-packages \
-      "frida-tools==${FRIDA_TOOLS_VERSION}" "Flask==3.1.2" "gunicorn==23.0.0"; \
-    npm install --global "@openai/codex@${CODEX_CLI_VERSION}" "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"; \
+      "frida==${FRIDA_VERSION}" "frida-tools==${FRIDA_TOOLS_VERSION}" "Flask==3.1.2" "gunicorn==23.0.0"; \
+    python3 -m venv "/opt/frida-runtimes/${FRIDA_COMPAT_VERSION}"; \
+    "/opt/frida-runtimes/${FRIDA_COMPAT_VERSION}/bin/pip" install --no-cache-dir \
+      "frida==${FRIDA_COMPAT_VERSION}" "frida-tools==${FRIDA_COMPAT_TOOLS_VERSION}"
+
+RUN set -eux; \
+    case "$(dpkg --print-architecture)" in \
+      amd64) codex_arch=x64 ;; \
+      arm64) codex_arch=arm64 ;; \
+      *) echo "Unsupported Codex architecture" >&2; exit 1 ;; \
+    esac; \
+    npm install --global \
+      "@openai/codex@${CODEX_CLI_VERSION}" \
+      "@openai/codex-linux-${codex_arch}@npm:@openai/codex@${CODEX_CLI_VERSION}-linux-${codex_arch}" \
+      "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"; \
     node --version; \
     codex --version; \
     claude --version

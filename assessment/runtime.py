@@ -336,9 +336,10 @@ def pipeline_args(*values: str) -> list[str]:
 
 
 def target_args(config: dict[str, Any]) -> list[str]:
+    frida = ["--frida-version", str(config["frida_version"])] if config.get("frida_version") else []
     if config["transport"] == "wireless":
-        return ["--wireless-connect", config["target"]]
-    return ["--device", config["target"]]
+        return ["--wireless-connect", config["target"], *frida]
+    return ["--device", config["target"], *frida]
 
 
 def codex_config() -> str:

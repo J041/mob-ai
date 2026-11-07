@@ -48,6 +48,7 @@ class DeviceReadinessRequest:
     transport: str
     target: str
     frida_server: str
+    frida_version: str
     start_frida: bool
     authorized: bool
 

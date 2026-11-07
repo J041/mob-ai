@@ -38,6 +38,19 @@ function renderOverview(data) {
     auth.className = `auth-pill ${ready ? 'ready' : 'missing'}`;
   });
   renderModelOptions();
+  $$('.frida-version').forEach(select => {
+    const previous = select.value;
+    select.replaceChildren();
+    (data.frida_runtimes || []).forEach(runtime => option(
+      select, runtime.version,
+      `${runtime.version}${runtime.default ? ' (container default)' : ' (isolated)'}`,
+    ));
+    if ([...select.options].some(item => item.value === previous)) select.value = previous;
+    else {
+      const preferred = (data.frida_runtimes || []).find(runtime => runtime.default) || (data.frida_runtimes || [])[0];
+      select.value = preferred?.version || '';
+    }
+  });
 
   const specOptions = $('#specOptions');
   specOptions.replaceChildren();
@@ -152,6 +165,7 @@ function beginReassessment(runId) {
   form.elements.observation_seconds.value = run.observation_seconds || 15;
   form.elements.run_seconds.value = run.run_seconds || 20;
   form.elements.frida_server.value = run.frida_server || '/data/local/tmp/frida-server';
+  form.elements.frida_version.value = run.frida_version || form.elements.frida_version.value;
   form.elements.provider.value = run.provider || 'codex';
   renderModelOptions();
   form.elements.model.value = run.model || '';
@@ -388,10 +402,10 @@ $('#discoverDevices').addEventListener('click', () => discoverDevices(true));
 $('#runReadiness').addEventListener('click', runReadiness);
 $('#runResumeReadiness').addEventListener('click', runResumeReadiness);
 $$('#newForm [name="transport"]').forEach(input => input.addEventListener('change', updateTransport));
-['target', 'frida_server'].forEach(name => $('#newForm').elements[name].addEventListener('input', resetReadiness));
+['target', 'frida_server', 'frida_version'].forEach(name => $('#newForm').elements[name].addEventListener('input', resetReadiness));
 $('#newForm [name="frida_binary"]').addEventListener('change', resetReadiness);
 $('#newForm [name="start_frida"]').addEventListener('change', resetReadiness);
-['target', 'frida_server', 'transport'].forEach(name => $('#resumeForm').elements[name].addEventListener('input', resetResumeReadiness));
+['target', 'frida_server', 'frida_version', 'transport'].forEach(name => $('#resumeForm').elements[name].addEventListener('input', resetResumeReadiness));
 $('#resumeForm [name="frida_binary"]').addEventListener('change', resetResumeReadiness);
 $('#resumeForm [name="start_frida"]').addEventListener('change', resetResumeReadiness);
 $$('.model-select').forEach(select => select.addEventListener('change', () => {

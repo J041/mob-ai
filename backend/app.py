@@ -17,6 +17,7 @@ from werkzeug.exceptions import RequestEntityTooLarge
 from werkzeug.utils import secure_filename
 
 from pipeline.diagnostic_recipes import diagnostic_recipe_catalog
+from pipeline.frida_runtimes import frida_command, installed_frida_runtimes, validate_frida_version
 from assessment.runtime import (
     LoopError, RUNS_ROOT, WORKSPACE, read_json, sha256, workspace_relative, write_json,
 )
@@ -229,6 +230,7 @@ def parse_start(body: dict) -> tuple[str, dict]:
     frida_server = str(body.get("frida_server") or "")
     if frida_server:
         token(frida_server, "Frida Server path", r"/[A-Za-z0-9_./-]+")
+    frida_version = validate_frida_version(str(body.get("frida_version") or ""))
     readiness_token = str(body.get("readiness_token") or "")
     with _lock:
         readiness = _readiness.get(readiness_token)
@@ -238,6 +240,7 @@ def parse_start(body: dict) -> tuple[str, dict]:
         readiness["target"] != target,
         readiness["transport"] != transport,
         readiness["frida_server"] != frida_server,
+        "frida_version" in readiness and readiness["frida_version"] != frida_version,
     )):
         raise ValueError("Device settings changed after readiness passed; run the check again.")
     package = str(body.get("package") or "")
@@ -262,7 +265,8 @@ def parse_start(body: dict) -> tuple[str, dict]:
     return label, {
         "apk": str(apk), "success_spec": str(spec), "transport": transport, "target": target,
         "max_iterations": maximum, "observation_seconds": observation, "run_seconds": run_seconds,
-        "install": bool(body.get("install")), "frida_server": frida_server, "package": package,
+        "install": bool(body.get("install")), "frida_server": frida_server,
+        "frida_version": frida_version, "package": package,
         "provider": provider, "model": model, "reasoning_effort": reasoning_effort, "readiness_token": readiness_token,
         "reasoning_mode": reasoning_mode, "specialist_count": specialist_count,
         "auto_resume_usage_limit": bool(body.get("auto_resume_usage_limit")),
@@ -284,6 +288,7 @@ def parse_resume(body: dict) -> tuple[str, dict]:
     recorded_target = str(config.get("target") or "")
     recorded_transport = str(config.get("transport") or "adb")
     recorded_frida = str(config.get("start_frida_server") or "")
+    recorded_frida_version = str(config.get("frida_version") or "")
     target_value = str(body.get("target") or recorded_target)
     target = token(target_value, "device target", r"[A-Za-z0-9._:\-\[\]]+") if target_value else ""
     transport = str(body.get("transport") or recorded_transport)
@@ -310,10 +315,12 @@ def parse_resume(body: dict) -> tuple[str, dict]:
     frida_server = str(body.get("frida_server") or recorded_frida)
     if frida_server:
         token(frida_server, "Frida Server path", r"/[A-Za-z0-9_./-]+")
+    frida_version = validate_frida_version(str(body.get("frida_version") or recorded_frida_version))
     settings_changed = bool(recorded_target and any((
         target != recorded_target,
         transport != recorded_transport,
         frida_server != recorded_frida,
+        frida_version != recorded_frida_version,
     )))
     readiness_token = str(body.get("readiness_token") or "")
     if settings_changed:
@@ -325,6 +332,7 @@ def parse_resume(body: dict) -> tuple[str, dict]:
             readiness["target"] != target,
             readiness["transport"] != transport,
             readiness["frida_server"] != frida_server,
+            "frida_version" in readiness and readiness["frida_version"] != frida_version,
         )):
             raise ValueError("Continuation device settings changed after readiness passed; run the check again.")
     policy_hash = str(body.get("success_spec_sha256") or "")
@@ -336,6 +344,7 @@ def parse_resume(body: dict) -> tuple[str, dict]:
     return run_dir.name, {
         "run": str(run_dir), "max_iterations": maximum, "provider": provider, "model": model,
         "reasoning_effort": reasoning_effort, "frida_server": frida_server,
+        "frida_version": frida_version,
         "reasoning_mode": reasoning_mode, "specialist_count": specialist_count,
         "auto_resume_usage_limit": bool(body.get("auto_resume_usage_limit")),
         "success_spec_sha256": policy_hash,
@@ -403,6 +412,7 @@ def overview_payload() -> dict:
         "codex": codex_state, "models": codex_models,
         "providers": {"codex": codex_state, "claude": claude_state},
         "model_catalogs": {"codex": codex_models, "claude": claude_models},
+        "frida_runtimes": list(installed_frida_runtimes()),
     }
 
 
@@ -602,6 +612,7 @@ def device_readiness():
         transport=str(request.form.get("transport") or ""),
         target=str(request.form.get("target") or ""),
         frida_server=str(request.form.get("frida_server") or ""),
+        frida_version=str(request.form.get("frida_version") or ""),
         start_frida=truthy(request.form.get("start_frida")),
         authorized=truthy(request.form.get("authorized")),
     )
@@ -610,6 +621,7 @@ def device_readiness():
         raise ValueError("Invalid transport.")
     target = token(readiness_request.target, "device target", r"[A-Za-z0-9._:\-\[\]]+")
     frida_server = readiness_request.frida_server
+    frida_version = validate_frida_version(readiness_request.frida_version)
     if frida_server:
         token(frida_server, "Frida Server path", r"/[A-Za-z0-9_./-]+")
     uploaded = request.files.get("frida_binary")
@@ -666,7 +678,8 @@ def device_readiness():
                 checks.append(readiness_check("Frida executable", chmod.returncode == 0, chmod.stdout or chmod.stderr or frida_server))
 
         host_version = subprocess.run(
-            ["frida", "--version"], text=True, capture_output=True, timeout=15,
+            [*frida_command(frida_version, "frida"), "--version"],
+            text=True, capture_output=True, timeout=15,
         )
         checks.append(readiness_check("Frida client", host_version.returncode == 0, host_version.stdout or host_version.stderr))
         if frida_server:
@@ -691,7 +704,7 @@ def device_readiness():
         forwarded = adb_result(target, "forward", "tcp:27042", "tcp:27042")
         checks.append(readiness_check("Frida port forwarding", forwarded.returncode == 0, forwarded.stdout or forwarded.stderr))
         frida_probe = subprocess.run(
-            ["frida-ps", "-H", "127.0.0.1:27042"], text=True,
+            [*frida_command(frida_version, "frida-ps"), "-H", "127.0.0.1:27042"], text=True,
             capture_output=True, timeout=20,
         )
         checks.append(readiness_check("Frida connection", frida_probe.returncode == 0, frida_probe.stdout or frida_probe.stderr))
@@ -708,11 +721,13 @@ def device_readiness():
             _readiness.clear()
             _readiness[readiness_token] = {
                 "target": target, "transport": transport, "frida_server": frida_server,
+                "frida_version": frida_version,
                 "created": now, "expires": now + 600,
             }
     return jsonify(
         ready=ready, target=target, transport=transport, abi=abi.stdout.strip(),
-        sdk=sdk.stdout.strip(), checks=checks, token=readiness_token,
+        sdk=sdk.stdout.strip(), frida_version=frida_version,
+        checks=checks, token=readiness_token,
     )
 
 

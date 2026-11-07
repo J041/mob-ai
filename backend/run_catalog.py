@@ -138,6 +138,7 @@ def runs() -> list[dict]:
             "usage_reset_utc": str(usage.get("reset_utc") or ""),
             "usage_auto_resume": bool(usage.get("auto_resume")),
             "frida_server": str(config.get("start_frida_server") if config else ""),
+            "frida_version": str(config.get("frida_version") if config else ""),
             "reasoning_mode": str((config.get("reasoning_mode") if config else "single") or "single"),
             "provider": str((config.get("provider") if config else "codex") or "codex"),
             "model": actual_model,
