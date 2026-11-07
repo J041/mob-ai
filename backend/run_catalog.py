@@ -16,6 +16,34 @@ from assessment.state import (
 )
 from backend.common import json_file
 
+
+def successful_candidate_path(directory: Path, loop: dict | None) -> str:
+    """Return the validated candidate for a successful run, bounded to its iteration directory."""
+    if not loop or loop.get("status") != "success":
+        return ""
+    for iteration in reversed(loop.get("iterations") or []):
+        if not isinstance(iteration, dict) or not (iteration.get("validation") or {}).get("success"):
+            continue
+        candidate = str(iteration.get("candidate") or "").replace("\\", "/")
+        marker = f"/runs/{directory.name}/"
+        if marker in f"/{candidate.lstrip('/')}" :
+            relative = f"/{candidate.lstrip('/')}".split(marker, 1)[1]
+        else:
+            relative = candidate.lstrip("/")
+        path = (directory / relative).resolve()
+        try:
+            bounded = path.relative_to(directory.resolve())
+        except ValueError:
+            continue
+        parts = bounded.parts
+        if (
+            len(parts) == 3 and parts[0] == "agent"
+            and parts[1].startswith("iteration-") and parts[2] == "candidate.js"
+            and path.is_file()
+        ):
+            return bounded.as_posix()
+    return ""
+
 def recorded_success_policy(config: dict | None) -> dict:
     """Return safe display metadata for the immutable policy bound to a run."""
     config = config or {}
@@ -98,6 +126,7 @@ def runs() -> list[dict]:
         usage = (loop.get("usage") or {}) if loop else {}
         terminal = terminal_outcome(loop)
         token_usage = assessment_token_usage(directory)
+        successful_script = successful_candidate_path(directory, loop)
         resumable = bool(loop and loop.get("status") == "max_iterations" and config)
         retryable = bool(loop and config and (directory / "original.apk").is_file())
         actual_model = str(config.get("model") or "") if config else ""
@@ -133,6 +162,7 @@ def runs() -> list[dict]:
                 or usage_recoverable or pause_recoverable
             ),
             "retryable": retryable,
+            "successful_script": successful_script,
             "recovery_stage": str(((loop.get("checkpoint") or {}).get("stage") if loop else "") or ""),
             "reason": str((loop.get("reason") if loop else "") or ""),
             "usage_reset_utc": str(usage.get("reset_utc") or ""),

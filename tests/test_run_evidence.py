@@ -26,6 +26,7 @@ from assessment.orchestrator import (
     validate_decision_schema_registry,
 )
 from backend.providers import ProviderRequest, detect_usage_limit, provider_adapter, validate_provider_output
+from backend.run_catalog import successful_candidate_path
 
 
 class RunEvidenceTests(unittest.TestCase):
@@ -127,6 +128,27 @@ class RunEvidenceTests(unittest.TestCase):
             self.assertIn("attachment", download.headers["Content-Disposition"])
             download.close()
             self.assertEqual(traversal.status_code, 404)
+
+    def test_successful_candidate_requires_deterministic_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            run = Path(temp) / "run-123"
+            candidate = run / "agent" / "iteration-2" / "candidate.js"
+            candidate.parent.mkdir(parents=True)
+            candidate.write_text("Java.perform(() => {});", encoding="utf-8")
+            successful = {
+                "status": "success",
+                "iterations": [{
+                    "candidate": "runs/run-123/agent/iteration-2/candidate.js",
+                    "validation": {"success": True},
+                }],
+            }
+            without_bypass = {**successful, "status": "success_without_bypass"}
+
+            self.assertEqual(
+                successful_candidate_path(run, successful),
+                "agent/iteration-2/candidate.js",
+            )
+            self.assertEqual(successful_candidate_path(run, without_bypass), "")
 
 
 

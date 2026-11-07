@@ -294,6 +294,8 @@ input::placeholder { color: #465358; }
 .resume-button.diagnostic:hover { border-color: var(--green); background: rgba(185,247,99,.09); }
 .resume-button.artifacts { color: #bcd9d6; white-space: nowrap; }
 .resume-button.artifacts:hover { border-color: var(--cyan); color: var(--cyan); }
+.resume-button.download-script { color: var(--green); text-decoration: none; white-space: nowrap; }
+.resume-button.download-script:hover { border-color: var(--green); background: rgba(185,247,99,.09); }
 .empty { padding: 55px 20px; color: #58666a; font-size: 11px; text-align: center; }
 
 .toast { position: fixed; right: 22px; bottom: 22px; max-width: 390px; padding: 12px 14px; border: 1px solid #41504a; border-radius: 9px; background: #18211e; box-shadow: 0 14px 40px #0008; color: var(--text); font-size: 11px; transform: translateY(20px); opacity: 0; pointer-events: none; transition: .2s ease; z-index: 10; }

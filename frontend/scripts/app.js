@@ -97,6 +97,7 @@ function renderRuns(runs) {
       <div class="run-actions">
         <button class="resume-button assistant" data-assistant="${escapeText(run.id)}">Ask assistant</button>
         <button class="resume-button artifacts" data-artifacts="${escapeText(run.id)}">Artifacts</button>
+        ${run.successful_script ? `<a class="resume-button download-script" href="/api/runs/${encodeURIComponent(run.id)}/artifacts/download?path=${encodeURIComponent(run.successful_script)}" download>Download script</a>` : ''}
         ${run.continuable ? `<button class="resume-button" data-resume="${escapeText(run.path)}">${run.usage_recoverable ? 'Resume after reset' : run.frida_recoverable ? 'Fix Frida' : run.checkpoint_recoverable ? 'Recover' : 'Resume'}</button>` : ''}
         <button class="resume-button diagnostic" data-retry="${escapeText(run.path)}" ${run.retryable ? '' : 'disabled'}>Rerun / retry</button>
       </div>

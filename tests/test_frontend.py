@@ -97,6 +97,14 @@ class FrontendTests(unittest.TestCase):
         self.assertIn("Recommended:", run_script)
         self.assertIn("job-terminal-reason", script)
 
+    def test_successful_run_script_download_is_conditional(self) -> None:
+        response = self.client.get("/scripts/app.js")
+        script = response.get_data(as_text=True)
+        response.close()
+        self.assertIn("run.successful_script ?", script)
+        self.assertIn("download-script", script)
+        self.assertIn("/artifacts/download?path=", script)
+
     def test_resume_recommendation_does_not_inherit_icon_typography(self) -> None:
         response = self.client.get("/styles/styles.css")
         styles = response.get_data(as_text=True)
