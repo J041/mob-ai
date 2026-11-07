@@ -637,14 +637,40 @@ def replace_frida_server(target: str, server_path: str) -> tuple[list[dict], set
         killed = adb_result(target, "shell", "su", "-c", f"kill {pid}")
         if killed.returncode == 0:
             stopped.append(pid)
-    _, remaining = frida_server_processes(target, server_path)
-    stale = set(existing).intersection(remaining)
+
+    stale = set(existing)
+    for _ in range(6):
+        time.sleep(0.25)
+        _, remaining = frida_server_processes(target, server_path)
+        stale = set(existing).intersection(remaining)
+        if not stale:
+            break
+
+    force_stopped: list[int] = []
+    if stale:
+        # Escalate only the exact PIDs that were previously recognized as
+        # Frida servers and are still present after the graceful shutdown.
+        for pid in sorted(stale):
+            killed = adb_result(target, "shell", "su", "-c", f"kill -9 {pid}")
+            if killed.returncode == 0:
+                force_stopped.append(pid)
+        for _ in range(6):
+            time.sleep(0.25)
+            _, remaining = frida_server_processes(target, server_path)
+            stale = set(existing).intersection(remaining)
+            if not stale:
+                break
+
+    stopped_detail = []
+    if stopped:
+        stopped_detail.append(f"Stopped recognized Frida PID(s): {', '.join(map(str, stopped))}.")
+    if force_stopped:
+        stopped_detail.append(f"Force-stopped PID(s) after SIGTERM timeout: {', '.join(map(str, force_stopped))}.")
     checks.append(readiness_check(
         "Previous Frida servers stopped", not stale,
-        (
-            f"Stopped recognized Frida PID(s): {', '.join(map(str, stopped))}."
-            if stopped else "No existing Frida server process was running."
-        ) if not stale else f"Frida PID(s) still running after termination: {', '.join(map(str, sorted(stale)))}.",
+        " ".join(stopped_detail) if not stale and stopped_detail
+        else "No existing Frida server process was running." if not stale
+        else f"Frida PID(s) still running after SIGKILL: {', '.join(map(str, sorted(stale)))}.",
     ))
     if stale:
         return checks, set()
@@ -752,6 +778,7 @@ def device_readiness():
                 chmod = adb_result(target, "shell", "su", "-c", f"chmod 755 {frida_server}")
                 checks.append(readiness_check("Frida executable", chmod.returncode == 0, chmod.stdout or chmod.stderr or frida_server))
 
+        frida_start_ready = not start_frida
         host_version = subprocess.run(
             [*frida_command(frida_version, "frida"), "--version"],
             text=True, capture_output=True, timeout=15,
@@ -773,18 +800,25 @@ def device_readiness():
             if start_frida and executable.returncode == 0 and versions_match:
                 process_checks, _active_pids = replace_frida_server(target, frida_server)
                 checks.extend(process_checks)
-        forwarded = adb_result(target, "forward", "tcp:27042", "tcp:27042")
-        checks.append(readiness_check("Frida port forwarding", forwarded.returncode == 0, forwarded.stdout or forwarded.stderr))
-        frida_probe = subprocess.CompletedProcess([], 1, "", "Frida connection was not attempted.")
-        for _ in range(4):
-            frida_probe = subprocess.run(
-                [*frida_command(frida_version, "frida-ps"), "-H", "127.0.0.1:27042"], text=True,
-                capture_output=True, timeout=20,
-            )
-            if frida_probe.returncode == 0:
-                break
-            time.sleep(0.5)
-        checks.append(readiness_check("Frida connection", frida_probe.returncode == 0, frida_probe.stdout or frida_probe.stderr))
+                frida_start_ready = all(check["passed"] for check in process_checks if check["required"])
+        if frida_start_ready:
+            forwarded = adb_result(target, "forward", "tcp:27042", "tcp:27042")
+            checks.append(readiness_check("Frida port forwarding", forwarded.returncode == 0, forwarded.stdout or forwarded.stderr))
+            frida_probe = subprocess.CompletedProcess([], 1, "", "Frida connection was not attempted.")
+            for _ in range(4):
+                frida_probe = subprocess.run(
+                    [*frida_command(frida_version, "frida-ps"), "-H", "127.0.0.1:27042"], text=True,
+                    capture_output=True, timeout=20,
+                )
+                if frida_probe.returncode == 0:
+                    break
+                time.sleep(0.5)
+            checks.append(readiness_check("Frida connection", frida_probe.returncode == 0, frida_probe.stdout or frida_probe.stderr))
+        else:
+            checks.append(readiness_check(
+                "Frida connection", False,
+                "Skipped because the selected Frida Server was not replaced successfully.",
+            ))
     finally:
         if temporary_path:
             temporary_path.unlink(missing_ok=True)

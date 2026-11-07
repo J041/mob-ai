@@ -153,6 +153,30 @@ class DeviceApiTests(unittest.TestCase):
         self.assertTrue(any(command.endswith("kill 22") for command in commands))
         self.assertFalse(any(command.endswith("kill 44") for command in commands))
 
+    @patch("backend.app.time.sleep")
+    @patch("backend.app.adb_result")
+    def test_replace_frida_server_escalates_stale_pid_to_sigkill(self, adb, _sleep) -> None:
+        running = subprocess.CompletedProcess(
+            [], 0, "PID ARGS\n22 /data/local/tmp/frida-server -D\n", "",
+        )
+        adb.side_effect = [
+            running,
+            subprocess.CompletedProcess([], 0, "", ""),
+            *[running for _ in range(6)],
+            subprocess.CompletedProcess([], 0, "", ""),
+            subprocess.CompletedProcess([], 0, "PID ARGS\n", ""),
+            subprocess.CompletedProcess([], 0, "", ""),
+            subprocess.CompletedProcess([], 0, "PID ARGS\n33 /data/local/tmp/frida-server -D\n", ""),
+        ]
+
+        checks, pids = replace_frida_server("emulator-5554", "/data/local/tmp/frida-server")
+
+        commands = [" ".join(map(str, call.args)) for call in adb.call_args_list]
+        self.assertEqual(pids, {33})
+        self.assertTrue(all(check["passed"] for check in checks))
+        self.assertTrue(any(command.endswith("kill -9 22") for command in commands))
+        self.assertIn("Force-stopped PID(s)", checks[0]["detail"])
+
     @patch("backend.app.subprocess.run")
     def test_device_readiness_returns_bound_token(self, run) -> None:
         def result(command, **_kwargs):
