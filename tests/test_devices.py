@@ -17,7 +17,7 @@ from backend.app import (
     assistant_evidence_snapshot, assistant_history, recorded_success_policy, run_assistant_turn,
     record_wireless_device, start_job, strip_terminal_controls, success_policy,
     subprocess_capture_text,
-    wireless_device_view,
+    wireless_device_view, parse_frida_server_processes, replace_frida_server,
 )
 from assessment.orchestrator import (
     WORKSPACE, LoopError, LoopRunner, attempt_fingerprint, codex_config_overrides,
@@ -127,6 +127,31 @@ class DeviceApiTests(unittest.TestCase):
             json={"endpoint": "192.168.1.20:37001", "code": "1234"},
         )
         self.assertEqual(response.status_code, 400)
+
+    def test_frida_process_parser_ignores_unrelated_processes(self) -> None:
+        processes = parse_frida_server_processes(
+            "PID ARGS\n22 /data/local/tmp/frida-server -D\n"
+            "44 com.example.frida-client\n55 re.frida.server\n66 system_server\n",
+            "/data/local/tmp/frida-server",
+        )
+        self.assertEqual(set(processes), {22, 55})
+
+    @patch("backend.app.time.sleep")
+    @patch("backend.app.adb_result")
+    def test_replace_frida_server_stops_only_recognized_processes(self, adb, _sleep) -> None:
+        adb.side_effect = [
+            subprocess.CompletedProcess([], 0, "PID ARGS\n22 /data/local/tmp/frida-server -D\n44 com.example.app\n", ""),
+            subprocess.CompletedProcess([], 0, "", ""),
+            subprocess.CompletedProcess([], 0, "PID ARGS\n44 com.example.app\n", ""),
+            subprocess.CompletedProcess([], 0, "", ""),
+            subprocess.CompletedProcess([], 0, "PID ARGS\n33 /data/local/tmp/frida-server -D\n44 com.example.app\n", ""),
+        ]
+        checks, pids = replace_frida_server("emulator-5554", "/data/local/tmp/frida-server")
+        commands = [" ".join(map(str, call.args)) for call in adb.call_args_list]
+        self.assertEqual(pids, {33})
+        self.assertTrue(all(check["passed"] for check in checks))
+        self.assertTrue(any(command.endswith("kill 22") for command in commands))
+        self.assertFalse(any(command.endswith("kill 44") for command in commands))
 
     @patch("backend.app.subprocess.run")
     def test_device_readiness_returns_bound_token(self, run) -> None:
