@@ -254,10 +254,16 @@ class PipelineTests(unittest.TestCase):
                 return subprocess.CompletedProcess(command, 0, " ".join(command), "")
 
             with mock.patch.object(pipeline, "install_observer", return_value=observer), \
-                    mock.patch.object(pipeline, "run", side_effect=fake_run), \
+                    mock.patch.object(pipeline, "run", side_effect=fake_run) as run, \
                     mock.patch.object(pipeline, "adb", side_effect=fake_adb):
                 result = pipeline.run_observation(args, run_dir, "com.example")
 
+            frida_command = run.call_args.args[0]
+            self.assertEqual(frida_command[-5:], [str(observer), "-q", "-t", "1", "--exit-on-error"])
+            self.assertEqual(
+                run.call_args.kwargs["timeout"],
+                args.observation_seconds + pipeline.FRIDA_SHUTDOWN_GRACE_SECONDS,
+            )
             self.assertEqual(set(result["diagnostics"]), {"crash_buffer", "exit_info", "native_crashes", "tombstone_access"})
             self.assertTrue((run_dir / "logs" / "diagnostic-crash-buffer.log").is_file())
             observations = json.loads((run_dir / "observations.json").read_text(encoding="utf-8"))
@@ -361,6 +367,11 @@ class PipelineTests(unittest.TestCase):
                 passed, attempts = pipeline.run_frida(args, run_dir, "com.example", [script], spec)
         self.assertTrue(passed)
         self.assertEqual(run.call_count, 2)
+        for call in run.call_args_list:
+            self.assertEqual(call.args[0][-4:], ["-q", "-t", "1", "--exit-on-error"])
+            self.assertEqual(
+                call.kwargs["timeout"], args.run_seconds + pipeline.FRIDA_SHUTDOWN_GRACE_SECONDS,
+            )
         self.assertEqual(attempts[0]["pass_count"], 2)
         self.assertEqual(len(attempts[0]["repetitions"]), 2)
 

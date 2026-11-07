@@ -38,6 +38,7 @@ PATTERNS = {
     "hook_framework": re.compile(r"frida|xposed|substrate|gum-js-loop|linjector", re.I),
     "debugger": re.compile(r"isDebuggerConnected|TracerPid|ptrace", re.I),
 }
+FRIDA_SHUTDOWN_GRACE_SECONDS = 10
 
 DEFAULT_MODULES = {
     "java-files", "debugger", "properties", "rootbeer", "packages", "commands",
@@ -393,14 +394,27 @@ def infer_modules(metadata: dict[str, object], events: list[dict[str, object]]) 
     return modules
 
 
+def quiet_frida_command(
+    args: argparse.Namespace, package: str, script: Path, duration_seconds: int,
+) -> list[str]:
+    """Keep a non-interactive Frida session attached for the full evidence window."""
+    return [
+        "frida", "-H", args.frida_endpoint, "-f", package, "-l", str(script),
+        "-q", "-t", str(duration_seconds), "--exit-on-error",
+    ]
+
+
 def run_observation(args: argparse.Namespace, run_dir: Path, package: str) -> dict[str, object]:
     script = install_observer(run_dir)
     adb(args, "logcat", "-c", check=False)
     log = run_dir / "logs" / "observation-frida.log"
-    cmd = ["frida", "-H", args.frida_endpoint, "-f", package, "-l", str(script), "-q"]
+    cmd = quiet_frida_command(args, package, script, args.observation_seconds)
     print(f"Observation pass: {args.observation_seconds}s (no return values are modified)")
     try:
-        result = run(cmd, log=log, check=False, timeout=args.observation_seconds)
+        result = run(
+            cmd, log=log, check=False,
+            timeout=args.observation_seconds + FRIDA_SHUTDOWN_GRACE_SECONDS,
+        )
         frida_output = result.stdout
     except subprocess.TimeoutExpired as exc:
         frida_output = timeout_output(exc)
@@ -986,7 +1000,6 @@ def run_frida(
     args: argparse.Namespace, run_dir: Path, package: str, scripts: list[Path],
     success_spec: dict[str, object] | None,
 ) -> tuple[bool, list[dict[str, object]]]:
-    endpoint_args = ["-H", args.frida_endpoint]
     success = False
     attempts: list[dict[str, object]] = []
     repeat = int(success_spec.get("repeat", 1)) if success_spec else 1
@@ -999,7 +1012,7 @@ def run_frida(
             # process from the baseline or prior repeat cannot create a false pass.
             adb(args, "shell", "am", "force-stop", package, check=False)
             adb(args, "logcat", "-c", check=False)
-            cmd = ["frida", *endpoint_args, "-f", package, "-l", str(script), "-q"]
+            cmd = quiet_frida_command(args, package, script, args.run_seconds)
             suffix = "" if repetition == 1 else f"-repeat-{repetition}"
             log = run_dir / "logs" / f"frida-{index}{suffix}.log"
             print(
@@ -1007,7 +1020,10 @@ def run_frida(
                 f"{script.name} ({args.run_seconds}s observation window)"
             )
             try:
-                result = run(cmd, log=log, check=False, timeout=args.run_seconds)
+                result = run(
+                    cmd, log=log, check=False,
+                    timeout=args.run_seconds + FRIDA_SHUTDOWN_GRACE_SECONDS,
+                )
             except subprocess.TimeoutExpired as exc:
                 output = timeout_output(exc)
                 log.write_text(output, encoding="utf-8", errors="replace")
