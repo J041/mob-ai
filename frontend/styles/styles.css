@@ -139,8 +139,9 @@ input::placeholder { color: #465358; }
 .readiness-state.ready { color: var(--green); background: rgba(185,247,99,.08); }
 .readiness-state.blocked { color: var(--red); background: rgba(255,124,124,.08); }
 .readiness-controls { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; align-items: start; }
-.readiness-start { align-self: end; white-space: nowrap; }
-.readiness-controls #runReadiness { align-self: end; justify-self: end; }
+.readiness-actions { min-width: 0; min-height: 64px; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding-top: 17px; }
+.readiness-start { align-self: auto; padding-bottom: 0; white-space: nowrap; }
+.readiness-actions .button { flex: 0 0 auto; }
 .readiness-results { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 7px; margin-top: 12px; }
 .readiness-results > p { grid-column: 1 / -1; margin: 0; color: var(--muted); font-size: 9px; }
 .readiness-check { min-width: 0; display: flex; gap: 8px; padding: 8px 9px; border: 1px solid var(--line-soft); border-radius: 7px; background: var(--surface); }
@@ -450,6 +451,8 @@ input::placeholder { color: #465358; }
   .segmented { width: 100%; }
   .segment { flex: 1; }
   .pairing-heading { flex-direction: column; }
+  .readiness-actions { min-height: 0; align-items: stretch; flex-direction: column; padding-top: 0; }
+  .readiness-actions .button { justify-content: center; }
   .wireless-device { grid-template-columns: auto minmax(0, 1fr) auto; }
   .wireless-device > b { grid-column: 2; }
   .wireless-device .wireless-action, .wireless-address-needed { grid-column: 3; grid-row: 1 / 3; }
