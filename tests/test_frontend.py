@@ -72,6 +72,15 @@ class FrontendTests(unittest.TestCase):
         self.assertIn(".job-strip { flex: 0 0 clamp", styles)
         self.assertIn("display: flex; flex-direction: column", styles)
 
+    def test_agent_console_loads_older_activity_without_six_group_cutoff(self) -> None:
+        response = self.client.get("/scripts/app.js")
+        script = response.get_data(as_text=True)
+        response.close()
+        self.assertNotIn("[...groups.entries()].slice(0, 6)", script)
+        self.assertIn("state.jobGroupLimit", script)
+        self.assertIn("/api/jobs?limit=20&offset=", script)
+        self.assertIn("Load older activity", script)
+
     def test_all_terminal_error_statuses_are_red(self) -> None:
         response = self.client.get("/styles/styles.css")
         styles = response.get_data(as_text=True)

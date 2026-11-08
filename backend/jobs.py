@@ -161,10 +161,24 @@ def job_state(job_id: str, *, include_output: bool = True) -> dict:
     return state
 
 
-def jobs() -> list[dict]:
-    directories = sorted((path for path in STATE_ROOT.iterdir() if path.is_dir()), key=lambda path: path.stat().st_mtime, reverse=True)
+def job_directories() -> list[Path]:
+    if not STATE_ROOT.is_dir():
+        return []
+    return sorted(
+        (path for path in STATE_ROOT.iterdir() if path.is_dir() and re.fullmatch(r"[a-f0-9]{32}", path.name)),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+
+
+def job_count() -> int:
+    return len(job_directories())
+
+
+def jobs(*, limit: int = 20, offset: int = 0) -> list[dict]:
+    directories = job_directories()
     result = []
-    for directory in directories[:20]:
+    for directory in directories[max(0, offset):max(0, offset) + max(1, limit)]:
         try:
             result.append(job_state(directory.name, include_output=False))
         except (ValueError, FileNotFoundError):

@@ -19,6 +19,30 @@ from worker.ghidra_proxy import GhidraLoopbackProxy
 
 
 class DurableWorkerTests(unittest.TestCase):
+    def test_job_history_supports_bounded_offset_pages(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            for index in range(5):
+                identifier = f"{index + 1:032x}"
+                directory = root / identifier
+                directory.mkdir()
+                job_queue.atomic_write_json(directory / "job.json", {
+                    "id": identifier,
+                    "kind": "start",
+                    "status": "success",
+                    "running": False,
+                    "queued_utc": f"2026-11-08T00:00:0{index}+00:00",
+                })
+                time.sleep(0.01)
+            with mock.patch.object(job_service, "STATE_ROOT", root):
+                first = job_service.jobs(limit=2, offset=0)
+                second = job_service.jobs(limit=2, offset=2)
+                total = job_service.job_count()
+            self.assertEqual(len(first), 2)
+            self.assertEqual(len(second), 2)
+            self.assertEqual(total, 5)
+            self.assertTrue(set(item["id"] for item in first).isdisjoint(item["id"] for item in second))
+
     def test_cancellation_terminates_the_active_subprocess_group(self) -> None:
         control = JobControl()
         install_job_control(control)

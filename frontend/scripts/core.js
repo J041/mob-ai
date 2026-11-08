@@ -2,6 +2,7 @@ export const state = {
   overview: null, devices: [], selectedJob: null, poll: null, authPoll: null,
   authProvider: 'codex', readiness: null, continuationMode: 'resume',
   expandedRuns: new Set(), knownAttemptRuns: new Set(), jobStripScroll: 0,
+  jobGroupLimit: 6, activityJobs: [], activityHasMore: false, activityHistoryLoaded: false,
   artifactRun: null, artifactManifest: null, artifactCategory: null,
   artifactPath: null, artifactPreviewCache: new Map(), assistantRun: null,
   assistantTurns: [], assistantFailures: [],

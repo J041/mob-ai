@@ -233,6 +233,9 @@ input::placeholder { color: #465358; }
 .job-strip::-webkit-scrollbar-track { background: #0b1012; }
 .job-strip::-webkit-scrollbar-thumb { border: 2px solid #0b1012; border-radius: 999px; background: #405056; }
 .job-strip::-webkit-scrollbar-thumb:hover { background: #607278; }
+.load-older-jobs { flex: 0 0 auto; width: 100%; min-height: 38px; border: 1px dashed #405632; border-radius: 7px; color: var(--green); background: rgba(185,247,99,.035); font: 8px var(--mono); text-transform: uppercase; letter-spacing: .05em; cursor: pointer; }
+.load-older-jobs:hover { border-style: solid; background: rgba(185,247,99,.08); }
+.load-older-jobs:disabled { color: var(--muted); cursor: wait; }
 .attempt-chip { display: flex; justify-content: space-between; align-items: center; gap: 9px; width: 100%; min-height: 48px; border: 1px solid transparent; border-radius: 6px; padding: 8px 9px; color: var(--muted); background: transparent; cursor: pointer; text-align: left; font-size: 8px; }
 .attempt-chip > span { min-width: 0; display: grid; gap: 2px; }
 .attempt-chip strong { color: var(--text); font: 9px var(--mono); }

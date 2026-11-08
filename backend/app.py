@@ -49,7 +49,7 @@ from backend.requests import ContinuationRequest, DeviceReadinessRequest, StartA
 from backend.events import overview_event_stream
 from backend.run_catalog import recorded_success_policy, runs
 from backend.jobs import (
-    infer_attempt_kind, infer_job_run_id, job_state, jobs, request_job_control, start_job,
+    infer_attempt_kind, infer_job_run_id, job_count, job_state, jobs, request_job_control, start_job,
 )
 from backend.routes import (
     create_auth_blueprint, create_devices_blueprint, create_jobs_blueprint,
@@ -406,8 +406,10 @@ def overview_payload() -> dict:
     claude_state = provider_auth_state("claude")
     codex_models = provider_model_catalog("codex")
     claude_models = provider_model_catalog("claude")
+    job_items = jobs()
     return {
-        "apks": apks, "success_specs": specs, "runs": runs(), "jobs": jobs(),
+        "apks": apks, "success_specs": specs, "runs": runs(), "jobs": job_items,
+        "jobs_has_more": job_count() > len(job_items),
         "diagnostic_recipes": diagnostic_recipe_catalog(),
         "codex": codex_state, "models": codex_models,
         "providers": {"codex": codex_state, "claude": claude_state},
@@ -939,7 +941,15 @@ def get_run_assistant_request(run_id: str, request_id: str):
 
 
 def list_jobs():
-    return jsonify(jobs=jobs())
+    limit = min(50, max(1, int(request.args.get("limit") or 20)))
+    offset = max(0, int(request.args.get("offset") or 0))
+    items = jobs(limit=limit, offset=offset)
+    total = job_count()
+    next_offset = offset + len(items)
+    return jsonify(
+        jobs=items, has_more=next_offset < total,
+        next_offset=next_offset, total=total,
+    )
 
 
 def get_job(job_id: str):

@@ -26,6 +26,17 @@ function setTab(name) {
 }
 
 function renderOverview(data) {
+  if (state.activityHistoryLoaded) {
+    const merged = new Map([
+      ...(data.jobs || []).map(job => [job.id, job]),
+      ...state.activityJobs.map(job => [job.id, job]),
+    ]);
+    state.activityJobs = [...merged.values()];
+  } else {
+    state.activityJobs = [...(data.jobs || [])];
+    state.activityHasMore = Boolean(data.jobs_has_more);
+  }
+  data.jobs = state.activityJobs;
   state.overview = data;
   $('#apkCount').textContent = data.apks.length;
   $('#runCount').textContent = data.runs.length;
@@ -206,7 +217,9 @@ function renderJobs(jobs) {
   const displayStatus = job => String(
     job.status || `exit ${job.exit_code ?? '?'}`
   ).replaceAll('_', ' ').toUpperCase();
-  strip.innerHTML = [...groups.entries()].slice(0, 6).map(([key, attempts]) => {
+  const groupEntries = [...groups.entries()];
+  const visibleGroups = groupEntries.slice(0, state.jobGroupLimit);
+  strip.innerHTML = visibleGroups.map(([key, attempts]) => {
     const latest = attempts[0];
     const run = state.overview?.runs.find(item => item.id === latest.run_id);
     const terminal = run?.terminal || {};
@@ -240,7 +253,11 @@ function renderJobs(jobs) {
     return `<div class="job-group ${selectedHere ? 'active' : ''}">
       <button class="job-chip job-group-head active" data-job="${latest.id}"><span><strong>${escapeText(title)}</strong><small>${escapeText(subtitle)}</small></span><b>${escapeText(status)}</b></button>
     </div>`;
-  }).join('');
+  }).join('') + (
+    groupEntries.length > state.jobGroupLimit || state.activityHasMore
+      ? '<button class="load-older-jobs" id="loadOlderJobs" type="button">Load older activity</button>'
+      : ''
+  );
   $$('[data-run-group]').forEach(group => group.addEventListener('toggle', () => {
     if (group.open) {
       state.expandedRuns.clear();
@@ -254,6 +271,29 @@ function renderJobs(jobs) {
   }));
   strip.scrollTop = state.jobStripScroll;
   $$('[data-job]').forEach(button => button.addEventListener('click', () => { state.selectedJob = button.dataset.job; renderJobs(jobs); }));
+  $('#loadOlderJobs')?.addEventListener('click', async event => {
+    const button = event.currentTarget;
+    button.disabled = true;
+    button.textContent = 'Loading older activityâ€¦';
+    state.jobGroupLimit += 6;
+    if (state.jobGroupLimit > groupEntries.length && state.activityHasMore) {
+      try {
+        const page = await api(`/api/jobs?limit=20&offset=${state.activityJobs.length}`);
+        const merged = new Map(state.activityJobs.map(job => [job.id, job]));
+        (page.jobs || []).forEach(job => merged.set(job.id, job));
+        state.activityJobs = [...merged.values()];
+        state.activityHasMore = Boolean(page.has_more);
+        state.activityHistoryLoaded = true;
+        state.overview.jobs = state.activityJobs;
+      } catch (error) {
+        state.jobGroupLimit -= 6;
+        toast(error.message, true);
+      }
+    } else {
+      state.activityHistoryLoaded = true;
+    }
+    renderJobs(state.activityJobs);
+  });
   refreshSelectedJob();
 }
 
