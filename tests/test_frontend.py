@@ -141,7 +141,7 @@ class FrontendTests(unittest.TestCase):
         self.assertIn("function tokenLabel", script)
         self.assertIn("run.token_usage", script)
         self.assertIn("job.token_usage", script)
-        self.assertIn("attempts &middot; ${escapeText(tokenLabel(run?.token_usage))}", script)
+        self.assertIn("${escapeText(activityCount)} &middot; ${escapeText(tokenLabel(run?.token_usage))}", script)
 
     def test_assessment_rows_share_grid_columns(self) -> None:
         response = self.client.get("/styles/styles.css")

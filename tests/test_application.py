@@ -12,7 +12,8 @@ from unittest.mock import patch
 import zipfile
 
 from backend.app import (
-    _readiness, app, artifact_manifest, codex_model_catalog, parse_resume, parse_retry, parse_start,
+    _readiness, app, artifact_manifest, codex_model_catalog, parse_deep_investigation,
+    parse_resume, parse_retry, parse_start,
     infer_attempt_kind, infer_job_run_id, resolve_workspace_item, sign_out_codex,
     assistant_evidence_snapshot, assistant_history, recorded_success_policy, run_assistant_turn,
     record_wireless_device, start_job, strip_terminal_controls, success_policy,
@@ -33,9 +34,8 @@ from backend.providers import (
 )
 from backend.events import activity_revision
 from assessment.usage import assessment_token_usage, record_provider_usage, token_usage_delta
-from assessment.goals import (
-    ensure_assessment_goal, goal_instruction, record_goal_turn, update_goal_for_pipeline_status,
-)
+from assessment.deep_goal import deep_goal_eligibility
+from assessment.goals import codex_thread_id, goal_tool_observed
 
 
 class WebAppTests(unittest.TestCase):
@@ -244,47 +244,57 @@ class WebAppTests(unittest.TestCase):
         self.assertIn("--json", command)
         self.assertIn("--output-last-message", command)
 
-    def test_codex_adapter_resumes_persistent_goal_thread(self) -> None:
+    def test_codex_adapter_supports_isolated_unstructured_goal(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            schema = root / "schema.json"
-            schema.write_text('{}', encoding="utf-8")
             request = ProviderRequest(
-                provider="codex", prompt="Continue the Goal", cwd=root,
-                schema_path=schema, output_path=root / "answer.json",
-                session_id="019a-test-thread",
+                provider="codex", prompt="Create the Goal", cwd=root,
+                schema_path=None, output_path=root / "handoff.md", writable=False,
             )
             command, _prompt = provider_adapter("codex").prepare(request)
         self.assertEqual(Path(command[0]).name, "codex")
-        self.assertEqual(command[1:3], ["exec", "resume"])
-        self.assertIn("019a-test-thread", command)
-        self.assertNotIn("--sandbox", command)
+        self.assertEqual(command[1], "exec")
+        self.assertIn("read-only", command)
+        self.assertNotIn("--output-schema", command)
+        self.assertIn("--output-last-message", command)
         self.assertEqual(command[-1], "-")
 
-    def test_assessment_goal_persists_thread_and_deterministic_status(self) -> None:
+    def test_goal_events_are_detected_only_for_optional_investigation(self) -> None:
+        output = "\n".join((
+            '{"type":"thread.started","thread_id":"thread-123"}',
+            '{"type":"item.completed","item":{"type":"tool_call","name":"create_goal"}}',
+        ))
+        self.assertEqual(codex_thread_id(output), "thread-123")
+        self.assertTrue(goal_tool_observed(output, "create_goal"))
+
+    def test_deep_goal_is_reserved_for_reasoning_dead_ends(self) -> None:
         with tempfile.TemporaryDirectory(dir=WORKSPACE) as temp:
             run = Path(temp)
-            policy = run / "policy.json"
-            policy.write_text(json.dumps({
-                "name": "Warning removed", "checks": [{"type": "process_alive"}],
-            }), encoding="utf-8")
-            goal = ensure_assessment_goal(run, {
-                "package": "com.example", "success_spec": str(policy.relative_to(WORKSPACE)),
-                "success_spec_sha256": hashlib.sha256(policy.read_bytes()).hexdigest(),
+            (run / "report.json").write_text('{"package":"com.example"}', encoding="utf-8")
+            (run / "codex-loop-config.json").write_text('{}', encoding="utf-8")
+            (run / "codex-loop-result.json").write_text('{"status":"human_review"}', encoding="utf-8")
+            self.assertTrue(deep_goal_eligibility(run)[0])
+            (run / "codex-loop-result.json").write_text('{"status":"provider_error"}', encoding="utf-8")
+            self.assertFalse(deep_goal_eligibility(run)[0])
+
+    def test_deep_investigation_request_is_explicit_and_bounded(self) -> None:
+        runs_root = WORKSPACE / "runs"
+        runs_root.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=runs_root) as temp:
+            run = Path(temp)
+            (run / "report.json").write_text('{"package":"com.example"}', encoding="utf-8")
+            (run / "codex-loop-config.json").write_text(
+                '{"model":"gpt-test","reasoning_effort":"medium"}', encoding="utf-8",
+            )
+            (run / "codex-loop-result.json").write_text('{"status":"human_review"}', encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "Confirm"):
+                parse_deep_investigation(run.name, {})
+            label, payload = parse_deep_investigation(run.name, {
+                "confirmed": True, "token_budget": 50_000,
             })
-            instruction = goal_instruction(goal, first_turn=True)
-            output = "\n".join((
-                '{"type":"thread.started","thread_id":"thread-123"}',
-                '{"type":"item.completed","item":{"type":"tool_call","name":"create_goal"}}',
-            ))
-            active = record_goal_turn(run, output, iteration=1, resumed=False)
-            update_goal_for_pipeline_status(run, "success", "All checks passed.")
-            completed = json.loads((run / "assessment-goal.json").read_text(encoding="utf-8"))
-        self.assertIn("call the Codex `create_goal` tool", instruction)
-        self.assertEqual(active["thread_id"], "thread-123")
-        self.assertTrue(active["activation_verified"])
-        self.assertEqual(completed["status"], "complete")
-        self.assertEqual(completed["pipeline_status"], "success")
+        self.assertEqual(label, "com.example deep investigation")
+        self.assertEqual(payload["provider"], "codex")
+        self.assertEqual(payload["token_budget"], 50_000)
 
     def test_diagnostic_decision_requires_allowlisted_actions(self) -> None:
         schema = WORKSPACE / "pipeline" / "codex-decision.schema.json"

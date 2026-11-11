@@ -191,6 +191,26 @@ class DurableWorkerTests(unittest.TestCase):
             self.assertEqual(stored["run_id"], "run-123")
             self.assertEqual(stored["exit_code"], 0)
 
+    def test_deep_goal_job_completes_without_changing_assessment_status(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            run_dir = directory / "runs" / "run-123"
+            run_dir.mkdir(parents=True)
+            state = {
+                "id": "6" * 32, "kind": "deep_goal", "running": True,
+                "status": "running", "started_utc": "now", "run_id": "run-123",
+                "attempt_kind": "deep_investigation",
+            }
+            request = {"kind": "deep_goal", "payload": {"run": str(run_dir)}}
+            with mock.patch.object(
+                worker, "run_deep_goal", return_value=("investigation_complete", run_dir),
+            ):
+                worker.execute(directory, state, request)
+            stored = job_queue.read_json(directory / "job.json")
+            self.assertEqual(stored["status"], "investigation_complete")
+            self.assertEqual(stored["exit_code"], 0)
+            self.assertFalse((run_dir / "codex-loop-result.json").exists())
+
     def test_worker_records_cancelled_and_paused_terminal_states(self) -> None:
         for exception, expected in ((JobCancelled("stop"), "cancelled"), (JobPaused("wait"), "paused")):
             with self.subTest(expected=expected), tempfile.TemporaryDirectory() as temp:

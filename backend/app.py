@@ -25,6 +25,10 @@ from assessment.state import (
     checkpoint_recovery_available, frida_recovery_available,
     usage_limit_recovery_available,
 )
+from assessment.deep_goal import (
+    DEEP_GOAL_DEFAULT_TOKENS, DEEP_GOAL_MAX_TOKENS, DEEP_GOAL_MIN_TOKENS,
+    deep_goal_eligibility,
+)
 from worker.queue import HEARTBEAT_PATH, atomic_write_json
 from backend.providers import PROVIDER_IDS
 from backend.artifacts import (
@@ -361,6 +365,33 @@ def parse_retry(body: dict) -> tuple[str, dict]:
     return label, payload
 
 
+def parse_deep_investigation(run_id: str, body: dict) -> tuple[str, dict]:
+    if not body.get("confirmed"):
+        raise ValueError("Confirm the optional deep investigation before starting it.")
+    run_dir = resolve_run_directory(run_id)
+    eligible, reason = deep_goal_eligibility(run_dir)
+    if not eligible:
+        raise ValueError(reason)
+    config = json_file(run_dir / "codex-loop-config.json") or {}
+    model = str(body.get("model") or config.get("model") or "")
+    if model:
+        token(model, "model", r"[A-Za-z0-9._:\-]+")
+    reasoning_effort = str(body.get("reasoning_effort") or config.get("reasoning_effort") or "")
+    if reasoning_effort and reasoning_effort not in REASONING_EFFORTS:
+        raise ValueError("Invalid thinking level.")
+    token_budget = int(body.get("token_budget") or DEEP_GOAL_DEFAULT_TOKENS)
+    if not DEEP_GOAL_MIN_TOKENS <= token_budget <= DEEP_GOAL_MAX_TOKENS:
+        raise ValueError(
+            f"Deep-investigation token budget must be between {DEEP_GOAL_MIN_TOKENS} and {DEEP_GOAL_MAX_TOKENS}."
+        )
+    report = json_file(run_dir / "report.json") or {}
+    label = f"{report.get('package') or run_id} deep investigation"
+    return label, {
+        "run": str(run_dir), "provider": "codex", "model": model,
+        "reasoning_effort": reasoning_effort, "token_budget": token_budget,
+    }
+
+
 @app.after_request
 def security_headers(response):
     response.headers["X-Content-Type-Options"] = "nosniff"
@@ -411,6 +442,11 @@ def overview_payload() -> dict:
         "apks": apks, "success_specs": specs, "runs": runs(), "jobs": job_items,
         "jobs_has_more": job_count() > len(job_items),
         "diagnostic_recipes": diagnostic_recipe_catalog(),
+        "deep_goal": {
+            "default_token_budget": DEEP_GOAL_DEFAULT_TOKENS,
+            "minimum_token_budget": DEEP_GOAL_MIN_TOKENS,
+            "maximum_token_budget": DEEP_GOAL_MAX_TOKENS,
+        },
         "codex": codex_state, "models": codex_models,
         "providers": {"codex": codex_state, "claude": claude_state},
         "model_catalogs": {"codex": codex_models, "claude": claude_models},
@@ -988,6 +1024,13 @@ def retry():
     return jsonify(start_job("retry", label, payload)), 202
 
 
+def start_deep_investigation(run_id: str):
+    label, payload = parse_deep_investigation(
+        run_id, request.get_json(force=True, silent=False) or {},
+    )
+    return jsonify(start_job("deep_goal", label, payload)), 202
+
+
 _handlers = SimpleNamespace(**{
     name: globals()[name] for name in (
         "health", "overview", "events", "models", "providers", "upload_apk",
@@ -996,7 +1039,7 @@ _handlers = SimpleNamespace(**{
         "connect_wireless_device", "device_readiness", "pair_wireless_device",
         "list_runs", "list_run_artifacts", "preview_run_artifact",
         "download_run_artifact", "get_run_assistant", "ask_run_assistant",
-        "get_run_assistant_request", "list_jobs", "get_job", "cancel_job", "pause_job", "start",
+        "get_run_assistant_request", "start_deep_investigation", "list_jobs", "get_job", "cancel_job", "pause_job", "start",
         "resume", "retry",
     )
 })

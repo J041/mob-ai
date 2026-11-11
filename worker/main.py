@@ -19,6 +19,7 @@ from assessment.runtime import (
     install_job_control,
 )
 from assessment.usage import aggregate_token_usage, assessment_token_usage, token_usage_delta
+from assessment.deep_goal import run_deep_goal
 
 
 POLL_SECONDS = float(os.environ.get("MOB_AI_WORKER_POLL_SECONDS", "1"))
@@ -60,6 +61,8 @@ def execute(directory, state: dict, request: dict) -> None:
                 status, run_dir = runner.retry_with_diagnostics(payload)
             elif kind == "start":
                 status, run_dir = runner.new(payload)
+            elif kind == "deep_goal":
+                status, run_dir = run_deep_goal(payload, log)
             else:
                 raise LoopError(f"Unsupported queued job kind: {kind!r}.")
             if not state.get("run_id"):
@@ -70,7 +73,7 @@ def execute(directory, state: dict, request: dict) -> None:
                     "parent_job_id": "",
                 })
             log.write(f"\nLoop finished: {status}\nRun directory: {run_dir}\n")
-            exit_code = 0 if status in {"success", "success_without_bypass"} else 1
+            exit_code = 0 if status in {"success", "success_without_bypass", "investigation_complete"} else 1
         except JobCancelled as error:
             log.write(f"\ncancelled: {error}\n")
             status = "cancelled"

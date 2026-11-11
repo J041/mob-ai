@@ -139,7 +139,7 @@ class ProviderRequest:
     provider: str
     prompt: str
     cwd: Path
-    schema_path: Path
+    schema_path: Path | None
     output_path: Path
     model: str = ""
     reasoning_effort: str = ""
@@ -189,7 +189,9 @@ class CodexAdapter(ProviderAdapter):
         if request.reasoning_effort:
             command.extend(["--config", f"model_reasoning_effort={json.dumps(request.reasoning_effort)}"])
         command.extend(request.extra_args)
-        command.extend(["--output-schema", str(request.schema_path), "--output-last-message", str(request.output_path)])
+        if request.schema_path is not None:
+            command.extend(["--output-schema", str(request.schema_path)])
+        command.extend(["--output-last-message", str(request.output_path)])
         if request.model:
             command.extend(["--model", request.model])
         if request.session_id:
@@ -207,6 +209,8 @@ class ClaudeAdapter(ProviderAdapter):
         return shutil.which("claude") or "claude"
 
     def prepare(self, request: ProviderRequest) -> tuple[list[str], str]:
+        if request.schema_path is None:
+            raise ValueError("Claude requests require an output schema.")
         schema = json.loads(request.schema_path.read_text(encoding="utf-8"))
         prompt = (
             request.prompt

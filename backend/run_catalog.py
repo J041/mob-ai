@@ -9,7 +9,7 @@ import re
 from assessment.outcomes import terminal_outcome
 from assessment.runtime import RUNS_ROOT, WORKSPACE, sha256, workspace_relative
 from assessment.usage import assessment_token_usage
-from assessment.goals import goal_summary
+from assessment.deep_goal import deep_goal_eligibility
 from assessment.state import (
     checkpoint_recovery_available, frida_recovery_available, pause_recovery_available,
     usage_limit_recovery_available,
@@ -127,6 +127,15 @@ def runs() -> list[dict]:
         terminal = terminal_outcome(loop)
         token_usage = assessment_token_usage(directory)
         successful_script = successful_candidate_path(directory, loop)
+        investigation_dirs = sorted(
+            (directory / "agent").glob("deep-investigation-*") if (directory / "agent").is_dir() else [],
+            key=lambda path: path.stat().st_mtime,
+        )
+        latest_investigation = (
+            json_file(investigation_dirs[-1] / "investigation.json") or {}
+            if investigation_dirs else {}
+        )
+        deep_eligible, deep_reason = deep_goal_eligibility(directory)
         resumable = bool(loop and loop.get("status") == "max_iterations" and config)
         retryable = bool(loop and config and (directory / "original.apk").is_file())
         actual_model = str(config.get("model") or "") if config else ""
@@ -163,6 +172,10 @@ def runs() -> list[dict]:
             ),
             "retryable": retryable,
             "successful_script": successful_script,
+            "deep_investigation_eligible": deep_eligible,
+            "deep_investigation_reason": deep_reason,
+            "deep_investigation_count": len(investigation_dirs),
+            "deep_investigation": latest_investigation,
             "recovery_stage": str(((loop.get("checkpoint") or {}).get("stage") if loop else "") or ""),
             "reason": str((loop.get("reason") if loop else "") or ""),
             "usage_reset_utc": str(usage.get("reset_utc") or ""),
@@ -189,7 +202,6 @@ def runs() -> list[dict]:
                 "total": len(native_libraries),
                 "queued": len(native_queue),
             },
-            "goal": goal_summary(directory),
             "updated_utc": datetime.fromtimestamp(directory.stat().st_mtime, timezone.utc).isoformat(),
         })
     return result
