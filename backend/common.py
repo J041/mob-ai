@@ -32,6 +32,13 @@ def truthy(value: object) -> bool:
     return str(value or "").lower() in {"1", "true", "yes", "on"}
 
 
+def token(value: str, name: str, pattern: str) -> str:
+    """Validate one bounded request token and return it unchanged."""
+    if not re.fullmatch(pattern, value):
+        raise ValueError(f"Invalid {name}.")
+    return value
+
+
 def json_file(path: Path):
     try:
         return json.loads(path.read_text(encoding="utf-8-sig")) if path.is_file() else None

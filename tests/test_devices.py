@@ -33,11 +33,11 @@ class DeviceApiTests(unittest.TestCase):
         app.config.update(TESTING=True)
         self.client = app.test_client()
 
-    @patch("backend.app.subprocess.run")
+    @patch("backend.device_service.subprocess.run")
     def test_wireless_pairing_sends_code_over_stdin(self, run) -> None:
         run.return_value = subprocess.CompletedProcess([], 0, "Successfully paired", "")
         with tempfile.TemporaryDirectory() as temp, patch(
-            "backend.app.WIRELESS_DEVICES_PATH", Path(temp) / "wireless-devices.json",
+            "backend.device_service.WIRELESS_DEVICES_PATH", Path(temp) / "wireless-devices.json",
         ):
             response = self.client.post(
                 "/api/devices/pair",
@@ -52,7 +52,7 @@ class DeviceApiTests(unittest.TestCase):
         self.assertNotIn("123456", stored)
         self.assertIn("192.168.1.20:37001", stored)
 
-    @patch("backend.app.subprocess.run")
+    @patch("backend.device_service.subprocess.run")
     def test_wireless_pairing_removes_contradictory_success_suffix(self, run) -> None:
         run.return_value = subprocess.CompletedProcess(
             [], 1, "", "error: protocol fault (couldn't read status message): Success\n",
@@ -78,7 +78,7 @@ class DeviceApiTests(unittest.TestCase):
                 "connection_endpoint": "192.168.1.20:41993",
                 "last_connected_utc": "2026-10-30T01:00:00+00:00",
             }]}), encoding="utf-8")
-            with patch("backend.app.WIRELESS_DEVICES_PATH", registry):
+            with patch("backend.device_service.WIRELESS_DEVICES_PATH", registry):
                 record_wireless_device(pairing_endpoint="192.168.1.20:39725")
                 stored = json.loads(registry.read_text(encoding="utf-8"))["devices"][0]
         self.assertEqual(stored["pairing_endpoint"], "192.168.1.20:39725")
@@ -95,13 +95,13 @@ class DeviceApiTests(unittest.TestCase):
                 "connection_endpoint": "192.168.1.20:38501",
                 "last_connected_utc": "2026-10-31T15:43:39+00:00",
             }]}), encoding="utf-8")
-            with patch("backend.app.WIRELESS_DEVICES_PATH", registry):
+            with patch("backend.device_service.WIRELESS_DEVICES_PATH", registry):
                 device = wireless_device_view([], [])[0]
         self.assertEqual(device["endpoint"], "")
         self.assertTrue(device["connection_required"])
         self.assertEqual(device["pairing_endpoint"], "192.168.1.20:39725")
 
-    @patch("backend.app.subprocess.run")
+    @patch("backend.device_service.subprocess.run")
     def test_device_discovery_distinguishes_previously_paired_and_discovered(self, run) -> None:
         run.side_effect = [
             subprocess.CompletedProcess([], 0, "List of devices attached\n", ""),
@@ -113,7 +113,7 @@ class DeviceApiTests(unittest.TestCase):
                 "id": "known-phone", "host": "192.168.1.20",
                 "pairing_endpoint": "192.168.1.20:37001", "paired_utc": "2026-10-30T00:00:00+00:00",
             }]}), encoding="utf-8")
-            with patch("backend.app.WIRELESS_DEVICES_PATH", registry):
+            with patch("backend.device_service.WIRELESS_DEVICES_PATH", registry):
                 response = self.client.get("/api/devices")
         payload = response.get_json()
         self.assertEqual(response.status_code, 200)
@@ -136,8 +136,8 @@ class DeviceApiTests(unittest.TestCase):
         )
         self.assertEqual(set(processes), {22, 55})
 
-    @patch("backend.app.time.sleep")
-    @patch("backend.app.adb_result")
+    @patch("backend.device_service.time.sleep")
+    @patch("backend.device_service.adb_result")
     def test_replace_frida_server_stops_only_recognized_processes(self, adb, _sleep) -> None:
         adb.side_effect = [
             subprocess.CompletedProcess([], 0, "PID ARGS\n22 /data/local/tmp/frida-server -D\n44 com.example.app\n", ""),
@@ -153,8 +153,8 @@ class DeviceApiTests(unittest.TestCase):
         self.assertTrue(any(command.endswith("kill 22") for command in commands))
         self.assertFalse(any(command.endswith("kill 44") for command in commands))
 
-    @patch("backend.app.time.sleep")
-    @patch("backend.app.adb_result")
+    @patch("backend.device_service.time.sleep")
+    @patch("backend.device_service.adb_result")
     def test_replace_frida_server_escalates_stale_pid_to_sigkill(self, adb, _sleep) -> None:
         running = subprocess.CompletedProcess(
             [], 0, "PID ARGS\n22 /data/local/tmp/frida-server -D\n", "",
@@ -177,7 +177,7 @@ class DeviceApiTests(unittest.TestCase):
         self.assertTrue(any(command.endswith("kill -9 22") for command in commands))
         self.assertIn("Force-stopped PID(s)", checks[0]["detail"])
 
-    @patch("backend.app.subprocess.run")
+    @patch("backend.device_service.subprocess.run")
     def test_device_readiness_returns_bound_token(self, run) -> None:
         def result(command, **_kwargs):
             rendered = " ".join(command)
