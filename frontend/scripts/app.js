@@ -108,6 +108,7 @@ function renderRuns(runs) {
         <button class="resume-button assistant" data-assistant="${escapeText(run.id)}">Ask assistant</button>
         <button class="resume-button artifacts" data-artifacts="${escapeText(run.id)}">Artifacts</button>
         ${run.successful_script ? `<a class="resume-button download-script" href="/api/runs/${encodeURIComponent(run.id)}/artifacts/download?path=${encodeURIComponent(run.successful_script)}" download>Download script</a>` : ''}
+        ${run.successful_script ? `<button class="resume-button launch-bypass" data-launch-bypass="${escapeText(run.id)}">Run APK + bypass</button>` : ''}
         ${run.continuable ? `<button class="resume-button" data-resume="${escapeText(run.path)}">${run.usage_recoverable ? 'Resume after reset' : run.frida_recoverable ? 'Fix Frida' : run.checkpoint_recoverable ? 'Recover' : 'Resume'}</button>` : ''}
         <button class="resume-button diagnostic" data-retry="${escapeText(run.path)}" ${run.retryable ? '' : 'disabled'}>Rerun / retry</button>
         ${run.deep_investigation_eligible ? `<button class="resume-button deep-goal" data-deep-goal="${escapeText(run.id)}">${run.deep_investigation_count ? 'Investigate again' : 'Deep investigation'}</button>` : ''}
@@ -132,6 +133,27 @@ function renderRuns(runs) {
   }));
   $$('[data-artifacts]').forEach(button => button.addEventListener('click', () => openArtifactBrowser(button.dataset.artifacts)));
   $$('[data-assistant]').forEach(button => button.addEventListener('click', () => openRunAssistant(button.dataset.assistant)));
+  $$('[data-launch-bypass]').forEach(button => button.addEventListener('click', async () => {
+    const run = state.overview?.runs.find(item => item.id === button.dataset.launchBypass);
+    if (!run) return;
+    if (!window.confirm(
+      `Launch ${run.package || run.id} on ${run.target} with its validated Frida bypass? ` +
+      'Confirm that authorization remains valid. The session stays attached until the app exits or you cancel the job.'
+    )) return;
+    button.disabled = true;
+    try {
+      const job = await api(`/api/runs/${encodeURIComponent(run.id)}/launch-bypass`, {
+        method: 'POST', body: JSON.stringify({ confirmed: true, authorized: true }),
+      });
+      state.selectedJob = job.id;
+      toast('Bypass session queued. Use Cancel session in Live activity to stop it.');
+      renderOverview(await api('/api/overview'));
+      $('#activity').scrollIntoView({ behavior: 'smooth', block: 'start' });
+    } catch (error) {
+      toast(error.message, true);
+      button.disabled = false;
+    }
+  }));
   $$('[data-deep-goal]').forEach(button => button.addEventListener('click', async () => {
     const run = state.overview?.runs.find(item => item.id === button.dataset.deepGoal);
     if (!run) return;
@@ -235,6 +257,7 @@ function renderJobs(jobs) {
     usage_limit_resume: 'Resume after usage reset', pause_resume: 'Continue after pause',
     diagnostic_retry: 'Rerun / retry',
     deep_investigation: 'Deep investigation',
+    bypass_session: 'Run APK + bypass',
   })[kind] || String(kind || 'Assessment').replaceAll('_', ' ');
   const statusClass = value => `status-${String(value || 'unknown').toLowerCase().replaceAll('_', '-').replaceAll(' ', '-')}`;
   const displayStatus = job => String(
@@ -244,11 +267,13 @@ function renderJobs(jobs) {
   const visibleGroups = groupEntries.slice(0, state.jobGroupLimit);
   strip.innerHTML = visibleGroups.map(([key, attempts]) => {
     const latest = attempts[0];
-    const assessmentAttempts = attempts.filter(job => job.attempt_kind !== 'deep_investigation');
-    const investigations = attempts.length - assessmentAttempts.length;
+    const assessmentAttempts = attempts.filter(job => !['deep_investigation', 'bypass_session'].includes(job.attempt_kind));
+    const investigations = attempts.filter(job => job.attempt_kind === 'deep_investigation').length;
+    const bypassSessions = attempts.filter(job => job.attempt_kind === 'bypass_session').length;
     const activityCount = [
       assessmentAttempts.length ? `${assessmentAttempts.length} attempt${assessmentAttempts.length === 1 ? '' : 's'}` : '',
       investigations ? `${investigations} investigation${investigations === 1 ? '' : 's'}` : '',
+      bypassSessions ? `${bypassSessions} bypass session${bypassSessions === 1 ? '' : 's'}` : '',
     ].filter(Boolean).join(' · ');
     const run = state.overview?.runs.find(item => item.id === latest.run_id);
     const terminal = run?.terminal || {};
@@ -268,7 +293,7 @@ function renderJobs(jobs) {
       }
       const history = attempts.map((job, index) => `
         <button class="attempt-chip ${job.id === state.selectedJob ? 'active' : ''}" data-job="${job.id}">
-          <span><strong>${job.attempt_kind === 'deep_investigation' ? `Deep investigation ${investigations - attempts.slice(0, index).filter(item => item.attempt_kind === 'deep_investigation').length}` : `Attempt ${job.attempt_number || 1}`}</strong><small>${escapeText(attemptName(job.attempt_kind))} · ${escapeText(tokenLabel(job.token_usage))}</small></span>
+          <span><strong>${job.attempt_kind === 'deep_investigation' ? `Deep investigation ${investigations - attempts.slice(0, index).filter(item => item.attempt_kind === 'deep_investigation').length}` : job.attempt_kind === 'bypass_session' ? `Bypass session ${bypassSessions - attempts.slice(0, index).filter(item => item.attempt_kind === 'bypass_session').length}` : `Attempt ${job.attempt_number || 1}`}</strong><small>${escapeText(attemptName(job.attempt_kind))} · ${escapeText(tokenLabel(job.token_usage))}</small></span>
           <b class="job-status ${statusClass(job.status)}">${escapeText(displayStatus(job))}</b>
         </button>`).join('');
       return `<details class="job-group attempt-group ${selectedHere ? 'active' : ''}" data-run-group="${escapeText(key)}" ${state.expandedRuns.has(key) ? 'open' : ''}>
@@ -337,8 +362,9 @@ async function refreshSelectedJob() {
     $('#jobLabel').textContent = `${attempt} · ${job.run_id || job.label} · attempt ${job.attempt_number || 1}`;
     $('#livePill').textContent = String(job.status || `exit ${job.exit_code ?? '?'}`).replaceAll('_', ' ').toUpperCase();
     $('#livePill').className = `live-pill${job.status === 'running' ? ' running' : ''}${job.status === 'pausing' || job.status === 'cancelling' ? ` ${job.status}` : ''}`;
-    $('#pauseJob').disabled = !job.running || job.status !== 'running' || Boolean(job.pause_requested);
+    $('#pauseJob').disabled = job.attempt_kind === 'bypass_session' || !job.running || job.status !== 'running' || Boolean(job.pause_requested);
     $('#cancelJob').disabled = !job.running && job.status !== 'queued';
+    $('#cancelJob').textContent = job.attempt_kind === 'bypass_session' ? 'Cancel session' : 'Cancel job';
     if (job.auto_resume_job_id) {
       state.selectedJob = job.auto_resume_job_id;
       if (state.eventsConnected) refreshSelectedJob();
@@ -443,14 +469,14 @@ async function submitForm(form, endpoint) {
   finally { button.disabled = false; }
 }
 
-const { populateContinuationValues, updateResumeSummary } = createRunController({
-  renderModelOptions, renderReasoningOptions, updateReasoningMode,
-});
-
 const {
   discoverDevices, pairWirelessDevice, resetReadiness, resetResumeReadiness,
-  runReadiness, runResumeReadiness, updateTransport,
+  runReadiness, runResumeReadiness, updateResumeTransport, updateTransport,
 } = createDeviceController();
+
+const { populateContinuationValues, updateResumeSummary } = createRunController({
+  renderModelOptions, renderReasoningOptions, updateReasoningMode, updateResumeTransport,
+});
 
 const { askRunAssistant, openRunAssistant } = createAssistantController({
   openArtifactBrowser, populateContinuationValues, renderModelOptions,
@@ -466,12 +492,14 @@ $('#resumeRun').addEventListener('change', () => {
   const run = state.overview?.runs.find(item => item.path === $('#resumeRun').value);
   state.continuationMode = run?.continuable ? 'resume' : 'retry';
   populateContinuationValues(run);
+  updateResumeTransport();
   updateResumeSummary();
 });
 $('#discoverDevices').addEventListener('click', () => discoverDevices(true));
 $('#runReadiness').addEventListener('click', runReadiness);
 $('#runResumeReadiness').addEventListener('click', runResumeReadiness);
 $$('#newForm [name="transport"]').forEach(input => input.addEventListener('change', updateTransport));
+$('#resumeTransport').addEventListener('change', updateResumeTransport);
 ['target', 'frida_server', 'frida_version'].forEach(name => $('#newForm').elements[name].addEventListener('input', resetReadiness));
 $('#newForm [name="frida_binary"]').addEventListener('change', resetReadiness);
 $('#newForm [name="start_frida"]').addEventListener('change', resetReadiness);
@@ -492,7 +520,8 @@ $$('.reasoning-mode').forEach(select => {
   select.addEventListener('change', () => updateReasoningMode(select));
   updateReasoningMode(select);
 });
-$('#pairDevice').addEventListener('click', pairWirelessDevice);
+$('#pairDevice').addEventListener('click', () => pairWirelessDevice(false));
+$('#resumePairDevice').addEventListener('click', () => pairWirelessDevice(true));
 $('#policyPreset').addEventListener('change', updatePolicyBuilder);
 $('#clearReassessment').addEventListener('click', clearReassessment);
 $('#reassessSelected').addEventListener('click', () => {
@@ -538,4 +567,5 @@ connectOverviewEvents({
 });
 discoverDevices(false);
 updateTransport();
+updateResumeTransport();
 updatePolicyBuilder();

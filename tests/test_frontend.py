@@ -38,7 +38,7 @@ class FrontendTests(unittest.TestCase):
         page = response.get_data(as_text=True)
         response.close()
         self.assertIn('type="module"', page)
-        self.assertIn('src="/scripts/app.js?v=20261102-packages"', page)
+        self.assertIn('src="/scripts/app.js?v=20261113-bypass-launch"', page)
         for path in (
             "/scripts/app.js", "/scripts/core.js", "/scripts/models.js",
             "/scripts/artifacts.js", "/scripts/assistant.js", "/scripts/auth.js",
@@ -64,6 +64,26 @@ class FrontendTests(unittest.TestCase):
         self.assertIn('id="reassessSelected"', page)
         self.assertIn('id="reassessmentBanner" hidden', page)
         self.assertNotIn("â", page)
+
+    def test_continue_workflow_supports_wireless_pairing(self) -> None:
+        response = self.client.get("/")
+        page = response.get_data(as_text=True)
+        response.close()
+        self.assertIn('id="resumeWirelessPairing" hidden', page)
+        self.assertIn('id="resumePairDevice"', page)
+        self.assertIn('id="resumePairingStatus"', page)
+        self.assertIn('id="resumeWirelessDevices"', page)
+        response = self.client.get("/scripts/devices.js")
+        script = response.get_data(as_text=True)
+        response.close()
+        self.assertIn("function updateResumeTransport()", script)
+        self.assertIn("async function pairWirelessDevice(resume = false)", script)
+        self.assertIn("resetResumeReadiness();", script)
+        self.assertIn("data-wireless-form", script)
+        response = self.client.get("/scripts/runs.js")
+        run_script = response.get_data(as_text=True)
+        response.close()
+        self.assertIn("updateResumeTransport();", run_script)
 
     def test_attempt_history_uses_nonshrinking_scroll_content(self) -> None:
         response = self.client.get("/styles/styles.css")
@@ -113,6 +133,9 @@ class FrontendTests(unittest.TestCase):
         self.assertIn("run.successful_script ?", script)
         self.assertIn("download-script", script)
         self.assertIn("/artifacts/download?path=", script)
+        self.assertIn("data-launch-bypass", script)
+        self.assertIn("/launch-bypass", script)
+        self.assertIn("Run APK + bypass", script)
 
     def test_resume_recommendation_does_not_inherit_icon_typography(self) -> None:
         response = self.client.get("/styles/styles.css")

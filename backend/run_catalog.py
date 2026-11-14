@@ -10,39 +10,13 @@ from assessment.outcomes import terminal_outcome
 from assessment.runtime import RUNS_ROOT, WORKSPACE, sha256, workspace_relative
 from assessment.usage import assessment_token_usage
 from assessment.deep_goal import deep_goal_eligibility
+from assessment.successful_bypass import successful_candidate_path
 from assessment.state import (
     checkpoint_recovery_available, frida_recovery_available, pause_recovery_available,
     usage_limit_recovery_available,
 )
 from backend.common import json_file
 
-
-def successful_candidate_path(directory: Path, loop: dict | None) -> str:
-    """Return the validated candidate for a successful run, bounded to its iteration directory."""
-    if not loop or loop.get("status") != "success":
-        return ""
-    for iteration in reversed(loop.get("iterations") or []):
-        if not isinstance(iteration, dict) or not (iteration.get("validation") or {}).get("success"):
-            continue
-        candidate = str(iteration.get("candidate") or "").replace("\\", "/")
-        marker = f"/runs/{directory.name}/"
-        if marker in f"/{candidate.lstrip('/')}" :
-            relative = f"/{candidate.lstrip('/')}".split(marker, 1)[1]
-        else:
-            relative = candidate.lstrip("/")
-        path = (directory / relative).resolve()
-        try:
-            bounded = path.relative_to(directory.resolve())
-        except ValueError:
-            continue
-        parts = bounded.parts
-        if (
-            len(parts) == 3 and parts[0] == "agent"
-            and parts[1].startswith("iteration-") and parts[2] == "candidate.js"
-            and path.is_file()
-        ):
-            return bounded.as_posix()
-    return ""
 
 def recorded_success_policy(config: dict | None) -> dict:
     """Return safe display metadata for the immutable policy bound to a run."""

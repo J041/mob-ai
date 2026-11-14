@@ -42,8 +42,7 @@ export function createDeviceController() {
     })[status] || String(status || 'Unknown').replaceAll('_', ' ');
   }
   
-  function renderWirelessDevices(devices) {
-    const container = $('#wirelessDevices');
+  function renderWirelessDeviceList(container, devices, formName) {
     if (!devices.length) {
       container.innerHTML = '<p>No paired or discovered wireless devices yet.</p>';
       return;
@@ -55,7 +54,7 @@ export function createDeviceController() {
       const timestampLabel = pairedIsLatest ? 'Paired' : device.last_connected_utc ? 'Last connected' : 'Last known';
       const detail = endpoint || (device.pairing_endpoint ? `${device.pairing_endpoint} · pairing address` : device.host) || 'Connection address not discovered';
       const action = endpoint
-        ? `<button class="text-button wireless-action" type="button" data-wireless-endpoint="${escapeText(endpoint)}" data-wireless-connected="${device.status === 'connected'}">${device.status === 'connected' ? 'Use device' : 'Connect'}</button>`
+        ? `<button class="text-button wireless-action" type="button" data-wireless-form="${formName}" data-wireless-endpoint="${escapeText(endpoint)}" data-wireless-connected="${device.status === 'connected'}">${device.status === 'connected' ? 'Use device' : 'Connect'}</button>`
         : '<small class="wireless-address-needed">Enter its connection address below</small>';
       return `<article class="wireless-device ${escapeText(device.status)}">
         <span class="wireless-dot" aria-hidden="true"></span>
@@ -63,22 +62,35 @@ export function createDeviceController() {
         <b>${escapeText(wirelessStatusLabel(device.status))}</b>${action}
       </article>`;
     }).join('');
+  }
+
+  function renderWirelessDevices(devices) {
+    renderWirelessDeviceList($('#wirelessDevices'), devices, 'new');
+    renderWirelessDeviceList($('#resumeWirelessDevices'), devices, 'resume');
     $$('[data-wireless-endpoint]').forEach(button => button.addEventListener('click', () => useWirelessDevice(button)));
   }
   
   async function useWirelessDevice(button) {
     const endpoint = button.dataset.wirelessEndpoint;
     const connected = button.dataset.wirelessConnected === 'true';
+    const resume = button.dataset.wirelessForm === 'resume';
     button.disabled = true;
     try {
       if (!connected) {
         await api('/api/devices/connect', { method: 'POST', body: JSON.stringify({ endpoint }) });
       }
-      const transport = $('#newForm [name="transport"][value="wireless"]');
-      transport.checked = true;
-      updateTransport();
-      $('#newForm [name="target"]').value = endpoint;
-      resetReadiness();
+      const form = resume ? $('#resumeForm') : $('#newForm');
+      if (resume) {
+        form.elements.transport.value = 'wireless';
+        updateResumeTransport();
+        form.elements.target.value = endpoint;
+        resetResumeReadiness();
+      } else {
+        form.querySelector('[name="transport"][value="wireless"]').checked = true;
+        updateTransport();
+        form.elements.target.value = endpoint;
+        resetReadiness();
+      }
       toast(connected ? 'Wireless device selected.' : 'Wireless device connected and selected.');
       await discoverDevices(false);
     } catch (error) {
@@ -179,13 +191,26 @@ export function createDeviceController() {
       : 'Use the exact serial shown by ADB.';
     if (!wireless) $('#newForm [name="pair_code"]').value = '';
   }
+
+  function updateResumeTransport() {
+    const form = $('#resumeForm');
+    const wireless = form.elements.transport.value === 'wireless';
+    $('#resumeWirelessPairing').hidden = !wireless;
+    $('#resumeTargetLabel').textContent = wireless ? 'Wireless connection address' : 'Device target';
+    form.elements.target.placeholder = wireless ? '192.168.1.20:CONNECTION_PORT' : 'emulator-5554 or ADB serial';
+    $('#resumeTargetHint').textContent = wireless
+      ? 'Use the separate IP:port shown on the main Wireless debugging screen.'
+      : 'Select a discovered device or enter its exact ADB serial.';
+    if (!wireless) form.elements.pair_code.value = '';
+  }
   
-  async function pairWirelessDevice() {
-    const button = $('#pairDevice');
-    const endpoint = $('#newForm [name="pair_endpoint"]').value.trim();
-    const codeInput = $('#newForm [name="pair_code"]');
+  async function pairWirelessDevice(resume = false) {
+    const form = resume ? $('#resumeForm') : $('#newForm');
+    const button = resume ? $('#resumePairDevice') : $('#pairDevice');
+    const endpoint = form.elements.pair_endpoint.value.trim();
+    const codeInput = form.elements.pair_code;
     const code = codeInput.value.trim();
-    const status = $('#pairingStatus');
+    const status = resume ? $('#resumePairingStatus') : $('#pairingStatus');
     button.disabled = true;
     status.className = '';
     status.textContent = 'Pairing with the device…';
@@ -198,8 +223,9 @@ export function createDeviceController() {
         ? `${result.message} The connection address was discovered automatically.`
         : `${result.message} Enter the separate connection address below.`;
       if (result.connection_endpoint) {
-        $('#newForm [name="target"]').value = result.connection_endpoint;
-        resetReadiness();
+        form.elements.target.value = result.connection_endpoint;
+        if (resume) resetResumeReadiness();
+        else resetReadiness();
       }
       toast(result.message);
       await discoverDevices(false);
@@ -216,6 +242,6 @@ export function createDeviceController() {
   
   return {
     discoverDevices, pairWirelessDevice, resetReadiness, resetResumeReadiness,
-    runReadiness, runResumeReadiness, updateTransport,
+    runReadiness, runResumeReadiness, updateResumeTransport, updateTransport,
   };
 }

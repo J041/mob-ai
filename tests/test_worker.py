@@ -12,6 +12,7 @@ import urllib.request
 from unittest import mock
 
 from assessment.runtime import JobCancelled, JobControl, JobPaused, install_job_control, run_logged
+from assessment import bypass_session
 from backend import jobs as job_service
 from worker import main as worker
 from worker import queue as job_queue
@@ -19,6 +20,38 @@ from worker.ghidra_proxy import GhidraLoopbackProxy
 
 
 class DurableWorkerTests(unittest.TestCase):
+    def test_bypass_session_keeps_quiet_frida_attached_until_cancelled(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            run = root / "run-123"
+            candidate = run / "agent" / "iteration-1" / "candidate.js"
+            candidate.parent.mkdir(parents=True)
+            candidate.write_text("send({kind: 'ready'});\n", encoding="utf-8")
+            (run / "report.json").write_text('{"package":"com.example"}', encoding="utf-8")
+            (run / "codex-loop-config.json").write_text(
+                '{"target":"device-123","transport":"adb","frida_version":""}', encoding="utf-8",
+            )
+            (run / "codex-loop-result.json").write_text(
+                '{"status":"success","iterations":[{"candidate":"agent/iteration-1/candidate.js","validation":{"success":true}}]}',
+                encoding="utf-8",
+            )
+            calls = []
+
+            def fake_run_logged(command, _log, **kwargs):
+                calls.append((command, kwargs))
+                return (0, "device\n" if kwargs.get("stage") == "device_state" else "")
+
+            with mock.patch.object(bypass_session, "RUNS_ROOT", root), mock.patch.object(
+                bypass_session, "frida_command", side_effect=lambda _version, tool: [tool],
+            ), mock.patch.object(bypass_session, "run_logged", side_effect=fake_run_logged):
+                status, returned = bypass_session.run_successful_bypass(
+                    {"run": str(run)}, StringIO(),
+                )
+            command = next(command for command, options in calls if options.get("stage") == "bypass_session")
+            self.assertEqual(status, "bypass_session_ended")
+            self.assertEqual(returned, run)
+            self.assertIn(["-q", "-t", "inf", "--exit-on-error"], [command[index:index + 4] for index in range(len(command) - 3)])
+
     def test_job_history_supports_bounded_offset_pages(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -210,6 +243,28 @@ class DurableWorkerTests(unittest.TestCase):
             self.assertEqual(stored["status"], "investigation_complete")
             self.assertEqual(stored["exit_code"], 0)
             self.assertFalse((run_dir / "codex-loop-result.json").exists())
+
+    def test_bypass_launch_job_runs_without_changing_assessment_status(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            run_dir = directory / "runs" / "run-123"
+            run_dir.mkdir(parents=True)
+            summary = run_dir / "codex-loop-result.json"
+            summary.write_text('{"status":"success"}', encoding="utf-8")
+            state = {
+                "id": "7" * 32, "kind": "launch_bypass", "running": True,
+                "status": "running", "started_utc": "now", "run_id": "run-123",
+                "attempt_kind": "bypass_session",
+            }
+            request = {"kind": "launch_bypass", "payload": {"run": str(run_dir)}}
+            with mock.patch.object(
+                worker, "run_successful_bypass", return_value=("bypass_session_ended", run_dir),
+            ):
+                worker.execute(directory, state, request)
+            stored = job_queue.read_json(directory / "job.json")
+            self.assertEqual(stored["status"], "bypass_session_ended")
+            self.assertEqual(stored["exit_code"], 0)
+            self.assertEqual(summary.read_text(encoding="utf-8"), '{"status":"success"}')
 
     def test_worker_records_cancelled_and_paused_terminal_states(self) -> None:
         for exception, expected in ((JobCancelled("stop"), "cancelled"), (JobPaused("wait"), "paused")):

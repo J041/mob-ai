@@ -130,7 +130,20 @@
               <button class="button policy-reassess" id="reassessSelected" type="button" disabled>Reassess with a different policy <span>&rarr;</span></button>
             </section>
             <label class="field"><span>Target transport</span><select name="transport" id="resumeTransport"><option value="adb">ADB serial</option><option value="wireless">Wireless</option></select></label>
-            <label class="field"><span>Device target</span><input name="target" id="resumeTarget" list="deviceOptions" placeholder="emulator-5554 or IP:PORT" required><small>Select a discovered device or enter its exact ADB serial.</small></label>
+            <label class="field"><span id="resumeTargetLabel">Device target</span><input name="target" id="resumeTarget" list="deviceOptions" placeholder="emulator-5554 or IP:PORT" required><small id="resumeTargetHint">Select a discovered device or enter its exact ADB serial.</small></label>
+            <div class="wireless-pairing span-2" id="resumeWirelessPairing" hidden>
+              <div class="pairing-heading"><div><strong>Pair wireless debugging</strong><small>Use the pairing port shown under &ldquo;Pair device with pairing code&rdquo;.</small></div><span>ONE-TIME</span></div>
+              <div class="pairing-fields">
+                <label class="field"><span>Pairing address</span><input name="pair_endpoint" placeholder="192.168.1.20:PAIRING_PORT" autocomplete="off"></label>
+                <label class="field"><span>Six-digit pairing code</span><input name="pair_code" type="password" inputmode="numeric" pattern="[0-9]{6}" minlength="6" maxlength="6" autocomplete="one-time-code" placeholder="&bull;&bull;&bull;&bull;&bull;&bull;"></label>
+                <button class="button pair-button" id="resumePairDevice" type="button">Pair device</button>
+              </div>
+              <p id="resumePairingStatus">The pairing code is submitted once over stdin and is never saved.</p>
+              <div class="wireless-registry">
+                <div class="wireless-registry-heading"><strong>Wireless devices</strong><small>Known to this Mob-AI host</small></div>
+                <div class="wireless-device-list" id="resumeWirelessDevices"><p>No paired or discovered wireless devices yet.</p></div>
+              </div>
+            </div>
             <section class="readiness span-2" id="resumeReadinessPanel">
               <div class="readiness-heading">
                 <div><strong>Device readiness</strong><small>A changed target, transport, or Frida path must pass readiness before continuing.</small></div>
@@ -245,6 +258,6 @@
       </div>
     </div>
   </dialog>
-  <script type="module" src="/scripts/app.js?v=20261102-packages"></script>
+  <script type="module" src="/scripts/app.js?v=20261113-bypass-launch"></script>
 </body>
 </html>

@@ -3,7 +3,9 @@
 import { $, escapeText, option, state } from './core.js';
 import { reasoningLabel } from './models.js';
 
-export function createRunController({ renderModelOptions, renderReasoningOptions, updateReasoningMode }) {
+export function createRunController({
+  renderModelOptions, renderReasoningOptions, updateReasoningMode, updateResumeTransport,
+}) {
   function updateResumeSummary() {
     const run = state.overview?.runs.find(item => item.path === $('#resumeRun').value);
     const summary = $('#resumeSummary');
@@ -89,6 +91,7 @@ export function createRunController({ renderModelOptions, renderReasoningOptions
     form.elements.specialist_count.value = String(run.specialist_count || 3);
     form.elements.auto_resume_usage_limit.checked = Boolean(run.usage_auto_resume);
     updateReasoningMode(mode);
+    updateResumeTransport();
   }
   
   

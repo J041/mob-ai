@@ -191,7 +191,7 @@ def jobs(*, limit: int = 20, offset: int = 0) -> list[dict]:
             state.setdefault("attempt_number", 1)
             state.setdefault("parent_job_id", "")
             continue
-        if state.get("attempt_kind") == "deep_investigation":
+        if state.get("attempt_kind") in {"deep_investigation", "bypass_session"}:
             state["attempt_number"] = 0
             state["parent_job_id"] = str(state.get("parent_job_id") or previous_by_run.get(run_id) or "")
             continue
@@ -217,24 +217,29 @@ def resume_attempt_kind(run_dir: Path) -> str:
 
 
 def start_job(kind: str, label: str, payload: dict) -> dict:
-    provider = str(payload.get("provider") or "codex")
-    if provider not in PROVIDER_IDS:
-        raise ValueError("Unsupported reasoning provider.")
-    if not provider_authenticated(provider):
-        account = "ChatGPT" if provider == "codex" else "Claude"
-        raise ValueError(f"{account} is not connected. Connect it from the dashboard first.")
-    run_id = Path(payload["run"]).name if kind in {"resume", "retry", "deep_goal"} else ""
+    if kind != "launch_bypass":
+        provider = str(payload.get("provider") or "codex")
+        if provider not in PROVIDER_IDS:
+            raise ValueError("Unsupported reasoning provider.")
+        if not provider_authenticated(provider):
+            account = "ChatGPT" if provider == "codex" else "Claude"
+            raise ValueError(f"{account} is not connected. Connect it from the dashboard first.")
+    run_id = Path(payload["run"]).name if kind in {"resume", "retry", "deep_goal", "launch_bypass"} else ""
     existing = jobs() if run_id else []
     related = [job for job in existing if job.get("run_id") == run_id]
     parent_job_id = related[0]["id"] if related else ""
-    assessment_jobs = [job for job in related if job.get("attempt_kind") != "deep_investigation"]
+    assessment_jobs = [
+        job for job in related
+        if job.get("attempt_kind") not in {"deep_investigation", "bypass_session"}
+    ]
     attempt_number = (
-        0 if kind == "deep_goal" else
+        0 if kind in {"deep_goal", "launch_bypass"} else
         max((int(job.get("attempt_number") or 0) for job in assessment_jobs), default=0) + 1
     )
     attempt_kind = (
         "diagnostic_retry" if kind == "retry" else
         "deep_investigation" if kind == "deep_goal" else
+        "bypass_session" if kind == "launch_bypass" else
         resume_attempt_kind(Path(payload["run"])) if kind == "resume" else "initial"
     )
     with _lock:

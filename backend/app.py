@@ -29,6 +29,7 @@ from assessment.deep_goal import (
     DEEP_GOAL_DEFAULT_TOKENS, DEEP_GOAL_MAX_TOKENS, DEEP_GOAL_MIN_TOKENS,
     deep_goal_eligibility,
 )
+from assessment.successful_bypass import successful_candidate_path
 from worker.queue import HEARTBEAT_PATH, atomic_write_json
 from backend.providers import PROVIDER_IDS
 from backend.artifacts import (
@@ -390,6 +391,22 @@ def parse_deep_investigation(run_id: str, body: dict) -> tuple[str, dict]:
         "run": str(run_dir), "provider": "codex", "model": model,
         "reasoning_effort": reasoning_effort, "token_budget": token_budget,
     }
+
+
+def parse_bypass_launch(run_id: str, body: dict) -> tuple[str, dict]:
+    if not body.get("authorized") or not body.get("confirmed"):
+        raise ValueError("Confirm authorization before launching the APK with its bypass script.")
+    run_dir = resolve_run_directory(run_id)
+    loop = json_file(run_dir / "codex-loop-result.json") or {}
+    script = successful_candidate_path(run_dir, loop)
+    if not script:
+        raise ValueError("This assessment has no validated successful bypass script.")
+    config = json_file(run_dir / "codex-loop-config.json") or {}
+    report = json_file(run_dir / "report.json") or {}
+    if not config.get("target") or not report.get("package"):
+        raise ValueError("The successful run has no recorded device target or package name.")
+    label = f"{report.get('package') or run_id} bypass session"
+    return label, {"run": str(run_dir), "successful_script": script}
 
 
 @app.after_request
@@ -1031,6 +1048,13 @@ def start_deep_investigation(run_id: str):
     return jsonify(start_job("deep_goal", label, payload)), 202
 
 
+def start_bypass_launch(run_id: str):
+    label, payload = parse_bypass_launch(
+        run_id, request.get_json(force=True, silent=False) or {},
+    )
+    return jsonify(start_job("launch_bypass", label, payload)), 202
+
+
 _handlers = SimpleNamespace(**{
     name: globals()[name] for name in (
         "health", "overview", "events", "models", "providers", "upload_apk",
@@ -1039,7 +1063,7 @@ _handlers = SimpleNamespace(**{
         "connect_wireless_device", "device_readiness", "pair_wireless_device",
         "list_runs", "list_run_artifacts", "preview_run_artifact",
         "download_run_artifact", "get_run_assistant", "ask_run_assistant",
-        "get_run_assistant_request", "start_deep_investigation", "list_jobs", "get_job", "cancel_job", "pause_job", "start",
+        "get_run_assistant_request", "start_deep_investigation", "start_bypass_launch", "list_jobs", "get_job", "cancel_job", "pause_job", "start",
         "resume", "retry",
     )
 })

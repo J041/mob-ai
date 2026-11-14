@@ -12,7 +12,7 @@ from unittest.mock import patch
 import zipfile
 
 from backend.app import (
-    _readiness, app, artifact_manifest, codex_model_catalog, parse_deep_investigation,
+    _readiness, app, artifact_manifest, codex_model_catalog, parse_bypass_launch, parse_deep_investigation,
     parse_resume, parse_retry, parse_start,
     infer_attempt_kind, infer_job_run_id, resolve_workspace_item, sign_out_codex,
     assistant_evidence_snapshot, assistant_history, recorded_success_policy, run_assistant_turn,
@@ -176,6 +176,18 @@ class WebAppTests(unittest.TestCase):
         self.assertFalse(stored["running"])
         self.assertEqual(queued_request["payload"]["apk"], "/workspace/uploads/sample.apk")
 
+    @patch("backend.jobs.jobs", return_value=[])
+    def test_bypass_session_job_does_not_require_a_reasoning_provider(self, _jobs) -> None:
+        with tempfile.TemporaryDirectory() as temp, patch("backend.jobs.STATE_ROOT", Path(temp)):
+            state = start_job("launch_bypass", "com.example bypass session", {
+                "run": "/workspace/runs/example",
+                "successful_script": "agent/iteration-1/candidate.js",
+            })
+            stored = json.loads((Path(temp) / state["id"] / "job.json").read_text(encoding="utf-8"))
+        self.assertEqual(stored["kind"], "launch_bypass")
+        self.assertEqual(stored["attempt_kind"], "bypass_session")
+        self.assertEqual(stored["attempt_number"], 0)
+
     def test_overview_contract(self) -> None:
         payload = self.client.get("/api/overview").get_json()
         self.assertIn("codex", payload)
@@ -295,6 +307,32 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(label, "com.example deep investigation")
         self.assertEqual(payload["provider"], "codex")
         self.assertEqual(payload["token_budget"], 50_000)
+
+    def test_bypass_launch_requires_authorization_and_a_validated_script(self) -> None:
+        runs_root = WORKSPACE / "runs"
+        runs_root.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=runs_root) as temp:
+            run = Path(temp)
+            candidate = run / "agent" / "iteration-1" / "candidate.js"
+            candidate.parent.mkdir(parents=True)
+            candidate.write_text("Java.perform(function () {});\n", encoding="utf-8")
+            (run / "report.json").write_text('{"package":"com.example"}', encoding="utf-8")
+            (run / "codex-loop-config.json").write_text(
+                '{"target":"device-123","transport":"adb"}', encoding="utf-8",
+            )
+            (run / "codex-loop-result.json").write_text(json.dumps({
+                "status": "success", "iterations": [{
+                    "candidate": "agent/iteration-1/candidate.js",
+                    "validation": {"success": True},
+                }],
+            }), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "Confirm authorization"):
+                parse_bypass_launch(run.name, {})
+            label, payload = parse_bypass_launch(
+                run.name, {"confirmed": True, "authorized": True},
+            )
+        self.assertEqual(label, "com.example bypass session")
+        self.assertEqual(payload["successful_script"], "agent/iteration-1/candidate.js")
 
     def test_diagnostic_decision_requires_allowlisted_actions(self) -> None:
         schema = WORKSPACE / "pipeline" / "codex-decision.schema.json"
