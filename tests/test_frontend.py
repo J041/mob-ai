@@ -38,11 +38,12 @@ class FrontendTests(unittest.TestCase):
         page = response.get_data(as_text=True)
         response.close()
         self.assertIn('type="module"', page)
-        self.assertIn('src="/scripts/app.js?v=20261113-bypass-launch"', page)
+        self.assertIn('src="/scripts/app.js?v=20261114-activity-split"', page)
         for path in (
             "/scripts/app.js", "/scripts/core.js", "/scripts/models.js",
             "/scripts/artifacts.js", "/scripts/assistant.js", "/scripts/auth.js",
             "/scripts/devices.js", "/scripts/events.js", "/scripts/policy-builder.js",
+            "/scripts/activity.js",
             "/scripts/runs.js",
         ):
             response = self.client.get(path)
@@ -56,6 +57,7 @@ class FrontendTests(unittest.TestCase):
         self.assertIn("from './artifacts.js'", app_script)
         self.assertIn("from './models.js'", app_script)
         self.assertIn("connectOverviewEvents", app_script)
+        self.assertIn("from './activity.js'", app_script)
 
     def test_reassessment_entry_is_in_continue_workflow(self) -> None:
         response = self.client.get("/")
@@ -93,7 +95,7 @@ class FrontendTests(unittest.TestCase):
         self.assertIn("display: flex; flex-direction: column", styles)
 
     def test_agent_console_loads_older_activity_without_six_group_cutoff(self) -> None:
-        response = self.client.get("/scripts/app.js")
+        response = self.client.get("/scripts/activity.js")
         script = response.get_data(as_text=True)
         response.close()
         self.assertNotIn("[...groups.entries()].slice(0, 6)", script)
@@ -122,9 +124,12 @@ class FrontendTests(unittest.TestCase):
         response = self.client.get("/scripts/runs.js")
         run_script = response.get_data(as_text=True)
         response.close()
+        response = self.client.get("/scripts/activity.js")
+        activity_script = response.get_data(as_text=True)
+        response.close()
         self.assertIn("terminal.recommended_action", script)
         self.assertIn("Recommended:", run_script)
-        self.assertIn("job-terminal-reason", script)
+        self.assertIn("job-terminal-reason", activity_script)
 
     def test_successful_run_script_download_is_conditional(self) -> None:
         response = self.client.get("/scripts/app.js")
@@ -149,7 +154,7 @@ class FrontendTests(unittest.TestCase):
         response = self.client.get("/")
         page = response.get_data(as_text=True)
         response.close()
-        response = self.client.get("/scripts/app.js")
+        response = self.client.get("/scripts/activity.js")
         script = response.get_data(as_text=True)
         response.close()
         self.assertIn('id="pauseJob"', page)
@@ -163,8 +168,11 @@ class FrontendTests(unittest.TestCase):
         response.close()
         self.assertIn("function tokenLabel", script)
         self.assertIn("run.token_usage", script)
-        self.assertIn("job.token_usage", script)
-        self.assertIn("${escapeText(activityCount)} &middot; ${escapeText(tokenLabel(run?.token_usage))}", script)
+        response = self.client.get("/scripts/activity.js")
+        activity_script = response.get_data(as_text=True)
+        response.close()
+        self.assertIn("job.token_usage", activity_script)
+        self.assertIn("${escapeText(activityCount)} &middot; ${escapeText(tokenLabel(run?.token_usage))}", activity_script)
 
     def test_assessment_rows_share_grid_columns(self) -> None:
         response = self.client.get("/styles/styles.css")
