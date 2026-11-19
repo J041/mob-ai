@@ -145,9 +145,9 @@ def control_checkpoint(stage: str, run_dir: Path | None = None, *, allow_pause: 
     control = _job_control
     if control is None:
         return
-    control.set_stage(stage)
     if run_dir is not None:
         control.run_dir = run_dir
+    control.set_stage(stage)
     if control.cancel_requested.is_set():
         raise JobCancelled("The assessment was cancelled by the operator.")
     if allow_pause and control.pause_requested.is_set():

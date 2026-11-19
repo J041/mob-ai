@@ -13,9 +13,10 @@ import uuid
 from worker.queue import atomic_write_json
 from assessment.runtime import WORKSPACE, read_json, write_json
 from backend.providers import PROVIDER_IDS, ProviderRequest, provider_adapter, validate_provider_output
-from backend.artifacts import ARTIFACT_PREVIEW_SUFFIXES, artifact_manifest, resolve_run_directory
+from backend.artifacts import resolve_run_directory
 from backend.auth import REASONING_EFFORTS, provider_authenticated, provider_model_catalog
 from backend.common import json_file, strip_terminal_controls, subprocess_capture_text, utc_now
+from backend.evidence_index import INDEX_THEME_PATTERNS, load_evidence_index, refresh_evidence_index
 
 
 ASSISTANT_SCHEMA = WORKSPACE / "pipeline" / "assistant-response.schema.json"
@@ -64,14 +65,7 @@ ASSISTANT_STOP_WORDS = {
     "from", "have", "into", "with", "what", "when", "where", "which", "this",
     "that", "then", "than", "their", "there", "would", "please", "recorded",
 }
-ASSISTANT_THEME_PATTERNS = {
-    "status": ("status", "success", "policy", "human_review", "human review", "failed", "ended", "stop"),
-    "crash": ("crash", "sigsegv", "sigbus", "signal", "tombstone", "exit", "abort", "fault"),
-    "attempt": ("attempt", "compare", "comparison", "changed", "difference", "retry", "rerun"),
-    "hook": ("frida", "hook", "root", "magisk", "debugger", "bypass", "detection"),
-    "native": ("ghidra", "native", "binary", ".so", "library", "symbol"),
-    "plan": ("harder", "rerun", "retry", "next", "recommend", "plan", "improve"),
-}
+ASSISTANT_THEME_PATTERNS = INDEX_THEME_PATTERNS
 
 
 def _assistant_text(path: Path, limit: int = 180_000) -> str:
@@ -120,6 +114,7 @@ def _assistant_excerpt(content: str, terms: set[str], limit: int) -> tuple[str, 
 
 def assistant_evidence_snapshot(
     run_dir: Path, allowed: set[str], question: str, *, limit: int = 36_000, max_files: int = 10,
+    evidence_index: dict | None = None,
 ) -> dict:
     """Rank evidence for one question and return a small, text-only, citable snapshot."""
     lowered_question = question.lower()
@@ -133,21 +128,15 @@ def assistant_evidence_snapshot(
     }
     # These three files define the recorded outcome and its immutable policy binding.
     required = ["codex-loop-result.json", "result.json", "codex-loop-config.json"]
-    text_suffixes = ARTIFACT_PREVIEW_SUFFIXES | {".smali", ".java", ".kt"}
-    candidates: list[tuple[float, str, str]] = []
-    for relative in allowed:
-        if relative.startswith("assistant/") or relative.endswith(("codex.log", "claude.log")):
+    index = evidence_index or refresh_evidence_index(run_dir, allowed)
+    entries = index.get("entries") or {}
+    candidates: list[tuple[float, str]] = []
+    for relative, entry in entries.items():
+        if not isinstance(entry, dict):
             continue
-        path = (run_dir / relative).resolve()
-        try:
-            path.relative_to(run_dir)
-        except ValueError:
-            continue
-        if not path.is_file() or path.suffix.lower() not in text_suffixes:
-            continue
-        content = _assistant_text(path)
         path_lower = relative.lower()
-        content_lower = content.lower()
+        term_counts = entry.get("terms") if isinstance(entry.get("terms"), dict) else {}
+        theme_counts = entry.get("themes") if isinstance(entry.get("themes"), dict) else {}
         score = 0.0
         if relative in required:
             score += 1000 - required.index(relative)
@@ -165,7 +154,7 @@ def assistant_evidence_snapshot(
         for term in query_terms:
             if term in path_lower:
                 score += 18
-            score += min(12, content_lower.count(term) * 2)
+            score += min(12, int(term_counts.get(term) or 0) * 2)
         if "status" in themes and relative in {"report.json", "codex-loop-result.json", "result.json"}:
             score += 45
         if "status" in themes and relative.endswith("/decision.json"):
@@ -180,32 +169,34 @@ def assistant_evidence_snapshot(
             score += 65
         if "plan" in themes and any(marker in path_lower for marker in ("adaptive", "decision", "comparison", "observation", "result")):
             score += 50
-        candidates.append((score, relative, content))
+        score += min(20, sum(int(theme_counts.get(theme) or 0) for theme in themes))
+        candidates.append((score, relative))
 
     candidates.sort(key=lambda item: (-item[0], item[1]))
-    selected: list[tuple[str, str]] = []
+    selected_paths_ordered: list[str] = []
     selected_paths: set[str] = set()
-    by_path = {relative: content for _, relative, content in candidates}
+    by_path = {relative for _, relative in candidates}
     for relative in required:
         if relative in by_path:
-            selected.append((relative, by_path[relative]))
+            selected_paths_ordered.append(relative)
             selected_paths.add(relative)
-    for _score, relative, content in candidates:
-        if len(selected) >= max_files:
+    for _score, relative in candidates:
+        if len(selected_paths_ordered) >= max_files:
             break
         if relative not in selected_paths:
-            selected.append((relative, content))
+            selected_paths_ordered.append(relative)
             selected_paths.add(relative)
 
     chunks: list[str] = []
     used = 0
-    per_file = max(2200, min(5200, limit // max(1, len(selected))))
+    per_file = max(2200, min(5200, limit // max(1, len(selected_paths_ordered))))
     excerpt_terms = query_terms | {marker for theme in themes for marker in ASSISTANT_THEME_PATTERNS[theme]}
     included: list[str] = []
-    for relative, content in selected:
+    for relative in selected_paths_ordered:
         remaining = limit - used
         if remaining < 600:
             break
+        content = _assistant_text(run_dir / relative)
         excerpt, truncated = _assistant_excerpt(content, excerpt_terms, min(per_file, remaining - 160))
         marker = " (relevant excerpts; file truncated)" if truncated else ""
         chunk = f"\n--- BEGIN {relative}{marker} ---\n{excerpt}\n--- END {relative} ---\n"
@@ -218,6 +209,7 @@ def assistant_evidence_snapshot(
         "bundle": bundle,
         "characters": len(bundle),
         "available_count": len(candidates),
+        "index": dict(index.get("stats") or {}),
     }
 
 
@@ -258,23 +250,32 @@ def run_assistant_turn(run_id: str, body: dict, progress=None) -> dict:
             turn_number += 1
             turn_dir = run_dir / "assistant" / f"turn-{turn_number}"
         turn_dir.mkdir(parents=True)
-        manifest = artifact_manifest(run_id)
-        all_evidence_paths = sorted(
-            path for path in manifest["allowed"]
-            if not path.startswith("assistant/") and not path.endswith(("codex.log", "claude.log"))
+        checkpoint_index = load_evidence_index(run_dir)
+        if not checkpoint_index:
+            checkpoint_index = refresh_evidence_index(run_dir)
+        all_evidence_paths = sorted((checkpoint_index.get("entries") or {}).keys())
+        evidence = assistant_evidence_snapshot(
+            run_dir, set(all_evidence_paths), question, evidence_index=checkpoint_index,
         )
-        evidence = assistant_evidence_snapshot(run_dir, set(all_evidence_paths), question)
         evidence_paths = list(evidence["paths"])
         evidence_bundle = str(evidence["bundle"])
+        index_stats = dict(evidence["index"])
         write_json(turn_dir / "retrieval.json", {
             "question": question,
             "selected_paths": evidence_paths,
             "selected_characters": evidence["characters"],
             "available_files": evidence["available_count"],
+            "index": evidence["index"],
         })
         report_progress(
-            "preparing_model", f"Selected {len(evidence_paths)} relevant files ({evidence['characters']:,} characters).",
+            "preparing_model",
+            (
+                f"Selected {len(evidence_paths)} relevant files ({evidence['characters']:,} characters); "
+                f"indexed {index_stats.get('changed', 0)} changed and reused "
+                f"{index_stats.get('reused', 0)} unchanged files."
+            ),
             selected_files=len(evidence_paths), evidence_characters=evidence["characters"],
+            indexed_files=index_stats.get("changed", 0), cached_files=index_stats.get("reused", 0),
         )
         summary = json_file(run_dir / "codex-loop-result.json") or {}
         catalog = provider_model_catalog(provider)
@@ -396,6 +397,7 @@ Return the required JSON object. Cite only exact paths from Available evidence p
                 "files": evidence_paths,
                 "characters": evidence["characters"],
                 "available_files": evidence["available_count"],
+                "index": evidence["index"],
             },
             "suggested_action": suggested_action,
         }

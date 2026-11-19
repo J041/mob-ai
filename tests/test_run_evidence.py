@@ -27,6 +27,7 @@ from assessment.orchestrator import (
 )
 from backend.providers import ProviderRequest, detect_usage_limit, provider_adapter, validate_provider_output
 from backend.run_catalog import successful_candidate_path
+from backend.evidence_index import evidence_index_path, refresh_evidence_index
 
 
 class RunEvidenceTests(unittest.TestCase):
@@ -99,6 +100,28 @@ class RunEvidenceTests(unittest.TestCase):
         self.assertIn("codex-loop-result.json", snapshot["paths"])
         self.assertIn("logs/diagnostic-native-crashes.log", snapshot["paths"])
         self.assertIn("SIGSEGV", snapshot["bundle"])
+        self.assertEqual(snapshot["index"]["changed"], len(files))
+
+    def test_assistant_evidence_index_reuses_unchanged_files(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            run = Path(temp)
+            report = run / "report.json"
+            result = run / "result.json"
+            report.write_text('{"package":"com.example"}', encoding="utf-8")
+            result.write_text('{"success":false}', encoding="utf-8")
+            allowed = {"report.json", "result.json"}
+            first = refresh_evidence_index(run, allowed)
+            with patch("backend.evidence_index._read_indexable_text") as read_text:
+                second = refresh_evidence_index(run, allowed)
+                read_text.assert_not_called()
+            result.write_text('{"success":true}', encoding="utf-8")
+            third = refresh_evidence_index(run, allowed)
+
+            self.assertEqual(first["stats"]["changed"], 2)
+            self.assertEqual(second["stats"]["reused"], 2)
+            self.assertEqual(third["stats"]["changed"], 1)
+            self.assertEqual(third["stats"]["reused"], 1)
+            self.assertTrue(evidence_index_path(run).is_file())
 
     def test_artifact_browser_classifies_previews_and_downloads(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

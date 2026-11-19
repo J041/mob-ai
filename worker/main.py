@@ -24,6 +24,7 @@ from assessment.usage import aggregate_token_usage, assessment_token_usage, toke
 from assessment.deep_goal import run_deep_goal
 from assessment.bypass_session import run_successful_bypass
 from runtime_data import initialize_runtime_data
+from backend.evidence_index import refresh_run_evidence_index
 
 
 POLL_SECONDS = float(os.environ.get("MOB_AI_WORKER_POLL_SECONDS", "1"))
@@ -64,7 +65,28 @@ def execute(directory, state: dict, request: dict) -> None:
         directory / "progress.json", kind, str(state.get("queued_utc") or utc_now()),
     )
     progress.transition("starting")
-    control = JobControl(on_stage=progress.transition)
+    control = None
+    index_requested = threading.Event()
+    index_stopping = threading.Event()
+
+    def record_stage(stage: str) -> None:
+        progress.transition(stage)
+        index_requested.set()
+
+    control = JobControl(on_stage=record_stage)
+
+    def update_evidence_index() -> None:
+        while not index_stopping.is_set():
+            if not index_requested.wait(0.5):
+                continue
+            index_requested.clear()
+            current_run = control.run_dir
+            if current_run is None or not current_run.is_dir():
+                continue
+            try:
+                refresh_run_evidence_index(current_run)
+            except (OSError, ValueError) as error:
+                log.write(f"\nBackground evidence index refresh skipped: {error}\n")
     monitoring = threading.Event()
 
     def monitor_control() -> None:
@@ -79,6 +101,10 @@ def execute(directory, state: dict, request: dict) -> None:
     monitor = threading.Thread(target=monitor_control, name=f"job-control-{state['id'][:8]}", daemon=True)
     monitor.start()
     with (directory / "output.log").open("a", encoding="utf-8", buffering=1) as log:
+        indexer = threading.Thread(
+            target=update_evidence_index, name=f"evidence-index-{state['id'][:8]}", daemon=True,
+        )
+        indexer.start()
         log.write(f"\nDurable worker claimed job {state['id']} at {state['started_utc']}.\n")
         try:
             spec = job_type(kind)
@@ -122,6 +148,9 @@ def execute(directory, state: dict, request: dict) -> None:
         finally:
             monitoring.set()
             monitor.join(timeout=1)
+            index_stopping.set()
+            index_requested.set()
+            indexer.join()
             install_job_control(None)
             latest = read_json(directory / "job.json")
             state.update({
@@ -164,6 +193,10 @@ def execute(directory, state: dict, request: dict) -> None:
                     },
                 })
             if run_dir is not None and run_dir.is_dir():
+                try:
+                    refresh_run_evidence_index(run_dir)
+                except (OSError, ValueError) as error:
+                    log.write(f"\nFinal evidence index refresh skipped: {error}\n")
                 assessment_usage = assessment_token_usage(run_dir)
                 state["token_usage"] = token_usage_delta(assessment_usage, usage_before)
                 state["assessment_token_usage"] = assessment_usage

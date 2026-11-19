@@ -353,8 +353,12 @@ schema validation, the candidate-only write boundary, and deterministic device v
 
 Each assessment row also exposes **Ask assistant**. The run assistant operates in a
 read-only sandbox and answers questions from that run's recorded artifacts, with
-clickable citations into the Artifact browser. It ranks evidence for each question
-and sends a bounded snapshot rather than the complete run, while the drawer reports
+clickable citations into the Artifact browser. It ranks evidence from an incremental
+checkpoint index and sends a bounded snapshot rather than the complete run. The index
+is stored under `assistant/index/manifest.json`, refreshes in the background at stage
+boundaries, and rereads only artifacts whose file signature changed. Existing runs
+are indexed once on first use; normal questions open only the selected evidence files.
+The drawer reports
 the current evidence-selection, reasoning, and validation stage. A request such as “try harder” may
 produce a bounded rerun proposal, but it cannot operate the device or queue work
 directly. **Review in Continue / retry** copies the proposal into the normal durable
