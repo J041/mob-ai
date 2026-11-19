@@ -17,6 +17,7 @@ from backend.common import json_file, utc_now
 from backend.providers import PROVIDER_IDS
 from worker.queue import STATE_ROOT, atomic_write_json
 from worker.job_types import job_type
+from worker.job_timeline import JobProgressRecorder, build_job_timeline
 
 _lock = threading.RLock()
 _log_cache: dict[tuple[str, str], str] = {}
@@ -163,6 +164,8 @@ def job_state(job_id: str, *, include_output: bool = True) -> dict:
         state["job_type"] = job_type(str(state.get("kind") or "")).public_dict()
     except ValueError:
         state["job_type"] = {}
+    progress = json_file(STATE_ROOT / job_id / "progress.json") or {}
+    state["timeline"] = build_job_timeline(state, progress)
     if include_output and not isinstance(state.get("token_usage"), dict):
         state["token_usage"] = legacy_job_token_usage(job_id)
     if include_output:
@@ -269,6 +272,7 @@ def start_job(kind: str, label: str, payload: dict) -> dict:
         }
         atomic_write_json(directory / "request.json", {"kind": kind, "label": label, "payload": payload})
         atomic_write_json(directory / "job.json", state)
+        JobProgressRecorder.initialize(directory / "progress.json", kind, state["queued_utc"])
     return job_state(job_id)
 
 

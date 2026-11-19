@@ -30,7 +30,7 @@ def activity_revision() -> str:
     """Return a cheap revision for files that affect the live dashboard."""
     job_files = (
         path
-        for pattern in ("jobs/*/job.json", "jobs/*/output.log", "wireless-devices.json")
+        for pattern in ("jobs/*/job.json", "jobs/*/progress.json", "jobs/*/output.log", "wireless-devices.json")
         for path in JOB_STATE_ROOT.glob(pattern)
     )
     run_files = (

@@ -11,7 +11,7 @@ import shutil
 import signal
 import subprocess
 import threading
-from typing import Any, TextIO
+from typing import Any, Callable, TextIO
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -39,6 +39,7 @@ ADB_TRANSPORT_MARKER = "MOB_AI_ADB_TRANSPORT_ERROR "
 NATIVE_BATCH_SIZE = 5
 NATIVE_TOTAL_LIMIT = 15
 GHIDRA_PREP_TIMEOUT_SECONDS = int(os.environ.get("MOB_AI_GHIDRA_PREP_TIMEOUT", "600"))
+PIPELINE_STAGE_MARKER = "MOB_AI_STAGE "
 
 
 class LoopError(RuntimeError):
@@ -69,13 +70,21 @@ class JobPaused(RuntimeError):
 class JobControl:
     """Process-local control for the single job owned by a durable worker."""
 
-    def __init__(self) -> None:
+    def __init__(self, on_stage: Callable[[str], None] | None = None) -> None:
         self.cancel_requested = threading.Event()
         self.pause_requested = threading.Event()
         self._lock = threading.Lock()
         self._process: subprocess.Popen | None = None
         self.stage = "starting"
         self.run_dir: Path | None = None
+        self._on_stage = on_stage
+
+    def set_stage(self, stage: str) -> None:
+        if stage == self.stage:
+            return
+        self.stage = stage
+        if self._on_stage is not None:
+            self._on_stage(stage)
 
     def request_cancel(self) -> None:
         self.cancel_requested.set()
@@ -137,7 +146,7 @@ def control_checkpoint(stage: str, run_dir: Path | None = None, *, allow_pause: 
     control = _job_control
     if control is None:
         return
-    control.stage = stage
+    control.set_stage(stage)
     if run_dir is not None:
         control.run_dir = run_dir
     if control.cancel_requested.is_set():
@@ -314,6 +323,10 @@ def run_logged(
             chunks.append(line)
             log.write(line)
             log.flush()
+            if line.startswith(PIPELINE_STAGE_MARKER):
+                reported_stage = line.removeprefix(PIPELINE_STAGE_MARKER).strip()
+                if re.fullmatch(r"[a-z0-9_]+", reported_stage):
+                    control_checkpoint(reported_stage, allow_pause=False)
             if artifact_stream:
                 artifact_stream.write(line)
                 artifact_stream.flush()

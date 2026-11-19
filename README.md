@@ -47,6 +47,7 @@ The dashboard provides:
 - observation, runtime, Frida Server, and iteration controls;
 - provider, model, and thinking-level selection for connected Codex and Claude accounts;
 - durable queued start, resume, and diagnostic-retry jobs with live output;
+- a persisted stage timeline for static analysis, observation, native analysis, reasoning, and validation;
 - cooperative **Pause after stage** and **Cancel run** controls that preserve completed evidence;
 - provider-reported token totals per attempt and cumulative assessment, with input/output detail when available;
 - a run ledger showing findings, observations, status and resumability;
@@ -71,6 +72,10 @@ The dashboard receives run, attempt, and live-output changes through the
 `worker/.state/` and top-level run results, emitting a snapshot only when their
 revision changes plus an idle keepalive every 15 seconds. Browsers reconnect
 automatically; HTTP polling remains available only as a compatibility fallback.
+Each durable job writes stage transitions to its own `progress.json` sidecar. This
+keeps live progress independent from pause/cancel mutations in `job.json`, preserves
+stage history across browser refreshes, and lets the UI distinguish completed,
+active, skipped, paused, and failed stages without parsing human-readable logs.
 The separate Ghidra service is reachable only on the private Compose network and
 requires a bearer token. Wireless pairing
 codes are submitted directly to `adb pair` over stdin, cleared from the form after

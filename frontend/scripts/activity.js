@@ -25,6 +25,43 @@ function displayStatus(job) {
   return String(job.status || `exit ${job.exit_code ?? '?'}`).replaceAll('_', ' ').toUpperCase();
 }
 
+function elapsedLabel(seconds) {
+  const value = Math.max(0, Number(seconds || 0));
+  if (value < 60) return `${value}s`;
+  const minutes = Math.floor(value / 60);
+  const remainder = value % 60;
+  return `${minutes}m ${remainder}s`;
+}
+
+function renderTimeline(timeline) {
+  const container = $('#jobTimeline');
+  const stages = timeline?.stages || [];
+  if (!stages.length) {
+    container.querySelector('.timeline-stages').innerHTML = '<span class="timeline-empty">No stage information was recorded for this job.</span>';
+    $('#timelineDetail').textContent = 'No active stage';
+    $('#timelineArtifact').textContent = '';
+    return;
+  }
+  const marks = { completed: '✓', active: '●', failed: '!', paused: 'Ⅱ', cancelled: '×', skipped: '–' };
+  container.querySelector('.timeline-stages').innerHTML = stages.map((stage, index) => `
+    <div class="timeline-stage ${escapeText(stage.status)}" aria-label="${escapeText(stage.label)}: ${escapeText(stage.status)}">
+      <span class="timeline-marker" aria-hidden="true">${marks[stage.status] || index + 1}</span>
+      <strong>${escapeText(stage.label)}</strong>
+      <small data-elapsed="${stage.status === 'active' ? escapeText(stage.started_utc) : ''}" data-base-seconds="${Number(stage.elapsed_seconds || 0)}">${stage.started_utc ? elapsedLabel(stage.elapsed_seconds) : stage.status}</small>
+    </div>`).join('');
+  $('#timelineDetail').textContent = timeline.detail || 'Stage information is available.';
+  $('#timelineArtifact').textContent = timeline.artifact || '';
+}
+
+function refreshTimelineClocks() {
+  $$('[data-elapsed]').forEach(element => {
+    if (!element.dataset.elapsed) return;
+    const started = new Date(element.dataset.elapsed).valueOf();
+    if (Number.isNaN(started)) return;
+    element.textContent = elapsedLabel(Math.floor((Date.now() - started) / 1000));
+  });
+}
+
 function sequenceLabel(job, index, attempts) {
   const type = jobType(job);
   if (!type.counts_as_attempt) {
@@ -148,6 +185,7 @@ export function createActivityController({ tokenLabel, renderOverviewSnapshot })
     if (!state.selectedJob) return;
     try {
       const job = await api(`/api/jobs/${state.selectedJob}`);
+      renderTimeline(job.timeline);
       const output = [job.stdout, job.stderr && `\n[stderr]\n${job.stderr}`].filter(Boolean).join('');
       $('#consoleOutput').textContent = output || (job.status === 'queued' ? 'Queued; waiting for the durable worker…' : 'Process started; waiting for output…');
       $('#consoleOutput').scrollTop = $('#consoleOutput').scrollHeight;
@@ -211,6 +249,7 @@ export function createActivityController({ tokenLabel, renderOverviewSnapshot })
         toast('Clipboard access was unavailable.', true);
       }
     });
+    setInterval(refreshTimelineClocks, 1000);
   }
 
   return { bindActivityControls, controlSelectedJob, refreshSelectedJob, renderJobs, schedulePoll };

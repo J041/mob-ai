@@ -38,7 +38,7 @@ class FrontendTests(unittest.TestCase):
         page = response.get_data(as_text=True)
         response.close()
         self.assertIn('type="module"', page)
-        self.assertIn('src="/scripts/app.js?v=20261114-activity-split"', page)
+        self.assertIn('src="/scripts/app.js?v=20261119-stage-timeline"', page)
         for path in (
             "/scripts/app.js", "/scripts/core.js", "/scripts/models.js",
             "/scripts/artifacts.js", "/scripts/assistant.js", "/scripts/auth.js",
@@ -164,6 +164,8 @@ class FrontendTests(unittest.TestCase):
         self.assertIn("type.supports_pause", script)
         self.assertIn("type.counts_as_attempt", script)
         self.assertNotIn("NON_ATTEMPT_KINDS", script)
+        self.assertIn('id="jobTimeline"', page)
+        self.assertIn("renderTimeline(job.timeline)", script)
 
     def test_run_and_attempt_token_usage_is_visible(self) -> None:
         response = self.client.get("/scripts/app.js")

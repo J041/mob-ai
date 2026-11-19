@@ -224,6 +224,8 @@ class DurableWorkerTests(unittest.TestCase):
             self.assertEqual(stored["status"], "success")
             self.assertEqual(stored["run_id"], "run-123")
             self.assertEqual(stored["exit_code"], 0)
+            progress = job_queue.read_json(directory / "progress.json")
+            self.assertEqual(progress["terminal_status"], "success")
 
     def test_deep_goal_job_completes_without_changing_assessment_status(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

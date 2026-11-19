@@ -62,6 +62,7 @@ DIAGNOSTIC_MAX_TOTAL_BYTES = BOUNDED_CAPTURE.max_total_bytes
 ADB_COMMAND_TIMEOUT_SECONDS = max(5, int(os.environ.get("MOB_AI_ADB_TIMEOUT_SECONDS", "30")))
 ADB_INSTALL_TIMEOUT_SECONDS = max(ADB_COMMAND_TIMEOUT_SECONDS, 180)
 ADB_TRANSPORT_MARKER = "MOB_AI_ADB_TRANSPORT_ERROR "
+PIPELINE_STAGE_MARKER = "MOB_AI_STAGE "
 ADB_TRANSPORT_PATTERN = re.compile(
     r"device\s+offline|device\s+unauthorized|no devices?/emulators? found|"
     r"device ['\"]?.+?['\"]? not found|cannot connect|connection refused|"
@@ -85,6 +86,13 @@ class AdbTransportError(RuntimeError):
             "timeout_seconds": self.timeout,
             "command": " ".join(self.command[2:] if len(self.command) > 2 else self.command),
         }
+
+
+def report_stage(stage: str) -> None:
+    """Emit a trusted marker that the parent durable worker records as progress."""
+    if not re.fullmatch(r"[a-z0-9_]+", stage):
+        raise RuntimeError(f"Invalid pipeline stage: {stage!r}")
+    print(f"{PIPELINE_STAGE_MARKER}{stage}", flush=True)
 
 
 def run(
@@ -1141,6 +1149,7 @@ def main() -> int:
         if not args.apk or not args.apk.is_file():
             print("An existing APK path is required unless --resume is used.", file=sys.stderr)
             return 2
+        report_stage("static_analysis")
         run_dir, metadata = prepare(args.apk.resolve(), args.runs.resolve(), args.reuse_static)
     print(f"Run directory: {run_dir}")
     print(f"Static findings: {len(metadata['findings'])}")
@@ -1167,6 +1176,7 @@ def main() -> int:
     package = args.package or metadata.get("package")
     if not package:
         raise RuntimeError("Package name was not detected; pass --package explicitly.")
+    report_stage("validation" if args.observation_mode == "off" else "observation")
     prepare_device(args, run_dir / "original.apk")
     runtime_abi = device_abi(args)
     if args.diagnostic_actions:

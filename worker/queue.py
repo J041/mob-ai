@@ -9,6 +9,7 @@ from typing import Any
 
 from assessment.runtime import WORKSPACE
 from worker.job_types import job_type
+from worker.job_timeline import JobProgressRecorder
 
 
 STATE_ROOT = WORKSPACE / "worker" / ".state" / "jobs"
@@ -57,6 +58,7 @@ def recover_abandoned_jobs() -> None:
                 "detail": "The durable worker stopped during this attempt. Existing evidence was preserved; retry or recover the run from the dashboard.",
             })
             atomic_write_json(state_path, state)
+            JobProgressRecorder(directory / "progress.json", str(state.get("kind") or "start")).finish("interrupted")
             claim.unlink(missing_ok=True)
 
 
@@ -117,6 +119,7 @@ def enqueue_due_usage_limit_jobs() -> list[str]:
         }
         atomic_write_json(target / "request.json", {"kind": resume_type.name, "label": run_id, "payload": payload})
         atomic_write_json(target / "job.json", next_state)
+        JobProgressRecorder.initialize(target / "progress.json", resume_type.name, queued_utc)
         state.update({"auto_resume_job_id": job_id, "auto_resume_queued_utc": queued_utc})
         atomic_write_json(directory / "job.json", state)
         created.append(job_id)

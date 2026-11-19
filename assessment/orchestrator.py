@@ -307,6 +307,7 @@ class LoopRunner(RecoveryMixin, NativeAnalysisMixin):
     ) -> str:
         validate_decision_schema_registry()
         agent_dir = run_dir / "agent"
+        control_checkpoint("native_selection", run_dir, allow_pause=False)
         try:
             self._ensure_native_selection(run_dir, config)
         except ProviderUsageLimit as error:
@@ -355,6 +356,7 @@ class LoopRunner(RecoveryMixin, NativeAnalysisMixin):
             prior_dir = agent_dir / f"iteration-{iteration - 1}" if iteration > 1 else None
             self.log.write(f"Preparing Ghidra native batch before iteration {iteration}...\n")
             self.log.flush()
+            control_checkpoint(f"ghidra_preparation_iteration_{iteration}", run_dir, allow_pause=False)
             try:
                 ghidra_preparation = self._prepare_ghidra_batch(run_dir)
             except (LoopError, OSError, json.JSONDecodeError) as error:
@@ -581,6 +583,7 @@ class LoopRunner(RecoveryMixin, NativeAnalysisMixin):
                 self._resolve_native_queue(run_dir, iteration)
                 write_summary(run_dir, "success", records, f"Success policy passed in iteration {iteration}.")
                 return "success"
+            control_checkpoint(f"native_replenishment_iteration_{iteration}", run_dir, allow_pause=False)
             try:
                 self._replenish_native_queue(run_dir, config, iteration)
             except ProviderUsageLimit as error:

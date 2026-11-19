@@ -14,6 +14,7 @@ from worker.queue import (
 )
 from worker.ghidra_proxy import GhidraLoopbackProxy
 from worker.job_types import JobType, job_type
+from worker.job_timeline import JobProgressRecorder
 from assessment.orchestrator import LoopRunner
 from assessment.runtime import (
     EnvironmentFailure, JobCancelled, JobControl, JobPaused, LoopError,
@@ -55,7 +56,14 @@ def execute(directory, state: dict, request: dict) -> None:
         if requested_run is not None and requested_run.is_dir()
         else aggregate_token_usage([])
     )
-    control = JobControl()
+    progress = JobProgressRecorder(
+        directory / "progress.json", kind, str(state.get("queued_utc") or utc_now()),
+    )
+    JobProgressRecorder.initialize(
+        directory / "progress.json", kind, str(state.get("queued_utc") or utc_now()),
+    )
+    progress.transition("starting")
+    control = JobControl(on_stage=progress.transition)
     monitoring = threading.Event()
 
     def monitor_control() -> None:
@@ -141,6 +149,7 @@ def execute(directory, state: dict, request: dict) -> None:
                 "status": status,
                 "completed_utc": utc_now(),
             })
+            progress.finish(status)
             if status in {"cancelled", "paused"}:
                 state.update({
                     "detail": (
