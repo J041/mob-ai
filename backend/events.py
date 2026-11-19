@@ -8,12 +8,13 @@ from pathlib import Path
 import time
 from typing import Callable, Iterator
 
-from assessment.runtime import RUNS_ROOT, WORKSPACE
+from assessment.runtime import RUNS_ROOT
+from runtime_data import STATE_ROOT
 
 
 EVENT_INTERVAL_SECONDS = 1.0
 KEEPALIVE_SECONDS = 15.0
-JOB_STATE_ROOT = WORKSPACE / "worker" / ".state"
+JOB_STATE_ROOT = STATE_ROOT
 
 
 def _latest_mtime(paths: Iterator[Path]) -> int:

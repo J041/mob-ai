@@ -3,6 +3,7 @@
 .codex
 out
 ghidra-projects
+.mob-ai-data
 runs
 uploads
 policies/generated

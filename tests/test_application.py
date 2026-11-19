@@ -36,6 +36,7 @@ from backend.events import activity_revision
 from assessment.usage import assessment_token_usage, record_provider_usage, token_usage_delta
 from assessment.deep_goal import deep_goal_eligibility
 from assessment.goals import codex_thread_id, goal_tool_observed
+from runtime_data import RUNS_ROOT
 
 
 class WebAppTests(unittest.TestCase):
@@ -195,6 +196,7 @@ class WebAppTests(unittest.TestCase):
         self.assertIn("success_specs", payload)
         self.assertEqual(payload["job_types"]["launch_bypass"]["counts_as_attempt"], False)
         self.assertEqual(payload["job_types"]["resume"]["supports_pause"], True)
+        self.assertTrue(payload["runtime_data"]["root"].endswith(".mob-ai-data"))
         self.assertTrue(payload["diagnostic_recipes"])
         self.assertIn("ui_description", payload["diagnostic_recipes"][0])
         self.assertIn("artifact_limits", payload["diagnostic_recipes"][0])
@@ -292,7 +294,7 @@ class WebAppTests(unittest.TestCase):
             self.assertFalse(deep_goal_eligibility(run)[0])
 
     def test_deep_investigation_request_is_explicit_and_bounded(self) -> None:
-        runs_root = WORKSPACE / "runs"
+        runs_root = RUNS_ROOT
         runs_root.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=runs_root) as temp:
             run = Path(temp)
@@ -311,7 +313,7 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(payload["token_budget"], 50_000)
 
     def test_bypass_launch_requires_authorization_and_a_validated_script(self) -> None:
-        runs_root = WORKSPACE / "runs"
+        runs_root = RUNS_ROOT
         runs_root.mkdir(exist_ok=True)
         with tempfile.TemporaryDirectory(dir=runs_root) as temp:
             run = Path(temp)
@@ -457,7 +459,7 @@ class WebAppTests(unittest.TestCase):
     @patch("backend.app.success_policy")
     def test_reassessment_uses_recorded_apk_and_links_source(self, policy) -> None:
         import hashlib
-        with tempfile.TemporaryDirectory(dir=WORKSPACE / "runs") as temp:
+        with tempfile.TemporaryDirectory(dir=RUNS_ROOT) as temp:
             source = Path(temp)
             apk = source / "original.apk"
             apk.write_bytes(b"PK\x03\x04same-apk")
@@ -552,7 +554,7 @@ class WebAppTests(unittest.TestCase):
 
     @patch("backend.app.resolve_workspace_item")
     def test_resume_accepts_thinking_level(self, resolve) -> None:
-        run = WORKSPACE / "runs" / "example"
+        run = RUNS_ROOT / "example"
         resolve.return_value = run
         _, request = parse_resume({
             "authorized": True, "run": "runs/example", "max_iterations": 2,
@@ -562,7 +564,7 @@ class WebAppTests(unittest.TestCase):
 
     @patch("backend.app.resolve_workspace_item")
     def test_resume_accepts_claude_provider(self, resolve) -> None:
-        resolve.return_value = WORKSPACE / "runs" / "example"
+        resolve.return_value = RUNS_ROOT / "example"
         _, request = parse_resume({
             "authorized": True, "run": "runs/example", "max_iterations": 2,
             "provider": "claude", "model": "sonnet", "reasoning_effort": "high",
@@ -573,7 +575,7 @@ class WebAppTests(unittest.TestCase):
     @patch("backend.app.json_file")
     @patch("backend.app.resolve_workspace_item")
     def test_resume_rejects_policy_from_another_run(self, resolve, read_json) -> None:
-        resolve.return_value = WORKSPACE / "runs" / "example"
+        resolve.return_value = RUNS_ROOT / "example"
         read_json.return_value = {"success_spec_sha256": "a" * 64}
         with self.assertRaisesRegex(ValueError, "does not match"):
             parse_resume({
@@ -583,7 +585,7 @@ class WebAppTests(unittest.TestCase):
 
     @patch("backend.app.resolve_workspace_item")
     def test_retry_accepts_any_completed_run(self, resolve) -> None:
-        run = WORKSPACE / "runs" / "example"
+        run = RUNS_ROOT / "example"
         resolve.return_value = run
         with patch.object(Path, "is_file", return_value=True):
             label, request = parse_retry({
@@ -595,13 +597,13 @@ class WebAppTests(unittest.TestCase):
 
     @patch("backend.app.resolve_workspace_item")
     def test_retry_requires_completed_run(self, resolve) -> None:
-        resolve.return_value = WORKSPACE / "runs" / "unfinished"
+        resolve.return_value = RUNS_ROOT / "unfinished"
         with self.assertRaisesRegex(ValueError, "completed assessment"):
             parse_retry({"authorized": True, "run": "runs/unfinished", "max_iterations": 1})
 
     @patch("backend.app.resolve_workspace_item")
     def test_resume_accepts_parallel_specialists(self, resolve) -> None:
-        resolve.return_value = WORKSPACE / "runs" / "example"
+        resolve.return_value = RUNS_ROOT / "example"
         _, request = parse_resume({
             "authorized": True, "run": "runs/example", "max_iterations": 2,
             "reasoning_mode": "parallel", "specialist_count": 2,
@@ -611,7 +613,7 @@ class WebAppTests(unittest.TestCase):
 
     @patch("backend.app.resolve_workspace_item")
     def test_resume_rejects_invalid_parallel_specialist_count(self, resolve) -> None:
-        resolve.return_value = WORKSPACE / "runs" / "example"
+        resolve.return_value = RUNS_ROOT / "example"
         with self.assertRaisesRegex(ValueError, "specialist count"):
             parse_resume({
                 "authorized": True, "run": "runs/example", "max_iterations": 2,
@@ -620,7 +622,7 @@ class WebAppTests(unittest.TestCase):
 
     @patch("backend.app.resolve_workspace_item")
     def test_resume_accepts_device_frida_server_path(self, resolve) -> None:
-        resolve.return_value = WORKSPACE / "runs" / "example"
+        resolve.return_value = RUNS_ROOT / "example"
         _, request = parse_resume({
             "authorized": True, "run": "runs/example", "max_iterations": 2,
             "frida_server": "/data/local/tmp/frida-server-17.5.1",
@@ -630,7 +632,7 @@ class WebAppTests(unittest.TestCase):
     @patch("backend.app.json_file")
     @patch("backend.app.resolve_workspace_item")
     def test_resume_changed_target_requires_bound_readiness(self, resolve, read_json) -> None:
-        resolve.return_value = WORKSPACE / "runs" / "example"
+        resolve.return_value = RUNS_ROOT / "example"
         read_json.return_value = {
             "target": "old-device", "transport": "adb",
             "start_frida_server": "/data/local/tmp/frida-server",
@@ -645,7 +647,7 @@ class WebAppTests(unittest.TestCase):
     @patch("backend.app.json_file")
     @patch("backend.app.resolve_workspace_item")
     def test_resume_accepts_ready_alternate_target(self, resolve, read_json) -> None:
-        resolve.return_value = WORKSPACE / "runs" / "example"
+        resolve.return_value = RUNS_ROOT / "example"
         read_json.return_value = {
             "target": "old-device", "transport": "adb",
             "start_frida_server": "/data/local/tmp/frida-server",
@@ -666,7 +668,7 @@ class WebAppTests(unittest.TestCase):
 
     @patch("backend.app.resolve_workspace_item")
     def test_resume_rejects_unsafe_frida_server_path(self, resolve) -> None:
-        resolve.return_value = WORKSPACE / "runs" / "example"
+        resolve.return_value = RUNS_ROOT / "example"
         with self.assertRaisesRegex(ValueError, "Frida Server path"):
             parse_resume({
                 "authorized": True, "run": "runs/example", "max_iterations": 2,
@@ -675,7 +677,7 @@ class WebAppTests(unittest.TestCase):
 
     @patch("backend.app.resolve_workspace_item")
     def test_resume_rejects_unknown_thinking_level(self, resolve) -> None:
-        resolve.return_value = WORKSPACE / "runs" / "example"
+        resolve.return_value = RUNS_ROOT / "example"
         with self.assertRaisesRegex(ValueError, "thinking level"):
             parse_resume({
                 "authorized": True, "run": "runs/example", "max_iterations": 2,

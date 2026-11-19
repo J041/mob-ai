@@ -14,6 +14,8 @@ On Windows, `scripts\codex-container.cmd <command> <args...>` is a convenient bu
 
 The repository is mounted at `/workspace`, which is also the container working directory. Prefer headless commands (`jadx`, `analyzeHeadless`, and `adb`) so they work through Codex's terminal. Do not run untrusted samples outside the container.
 
+Transferable runtime data is rooted at `MOB_AI_DATA_ROOT`, defaulting to `/workspace/.mob-ai-data`. Runs, uploads, generated policies, durable jobs, wireless-device history, exports, and temporary files must derive from `runtime_data.py`; do not introduce new top-level runtime directories. Legacy `runs/`, `uploads/`, `policies/generated/`, and `worker/.state/` paths are compatibility links only. Provider credentials, ADB keys, and Ghidra user state remain in their private Docker volumes and must not be copied into the runtime-data root.
+
 ## Authorized APK assessment pipeline
 
 For an APK the user owns or is explicitly authorized to test, use `python3 pipeline/pipeline.py`. Start with the Frida strategy and review each run's `report.json` and logs before increasing the bypass level. Always pass the exact `--device` serial; never select or modify an unspecified device. Preserve `original.apk` and write changes only below that run directory.

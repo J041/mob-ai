@@ -7,14 +7,12 @@ from pathlib import Path
 import uuid
 from typing import Any
 
-from assessment.runtime import WORKSPACE
 from worker.job_types import job_type
 from worker.job_timeline import JobProgressRecorder
+from runtime_data import HEARTBEAT_PATH, JOBS_ROOT, RUNS_ROOT
 
 
-STATE_ROOT = WORKSPACE / "worker" / ".state" / "jobs"
-HEARTBEAT_PATH = WORKSPACE / "worker" / ".state" / "worker-heartbeat"
-STATE_ROOT.mkdir(parents=True, exist_ok=True)
+STATE_ROOT = JOBS_ROOT
 
 
 def utc_now() -> str:
@@ -100,7 +98,7 @@ def enqueue_due_usage_limit_jobs() -> list[str]:
             ).get("id") or "")
             atomic_write_json(directory / "job.json", state)
             continue
-        payload["run"] = str(WORKSPACE / "runs" / run_id)
+        payload["run"] = str(RUNS_ROOT / run_id)
         payload["auto_resume_usage_limit"] = True
         resume_type = job_type("resume")
         job_id = uuid.uuid4().hex

@@ -23,6 +23,7 @@ from assessment.runtime import (
 from assessment.usage import aggregate_token_usage, assessment_token_usage, token_usage_delta
 from assessment.deep_goal import run_deep_goal
 from assessment.bypass_session import run_successful_bypass
+from runtime_data import initialize_runtime_data
 
 
 POLL_SECONDS = float(os.environ.get("MOB_AI_WORKER_POLL_SECONDS", "1"))
@@ -170,6 +171,7 @@ def execute(directory, state: dict, request: dict) -> None:
 
 
 def main() -> int:
+    initialize_runtime_data(migrate_legacy=True)
     worker_id = f"{os.uname().nodename}-{uuid.uuid4().hex[:8]}"
     stopping = threading.Event()
     ghidra_proxy = GhidraLoopbackProxy(

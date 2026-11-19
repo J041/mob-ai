@@ -19,10 +19,9 @@ import urllib.request
 from assessment.control_points import CONTROL_POINT_STAGES, CONTROL_POINT_STATUSES, HOOK_LAYERS
 
 from pipeline.diagnostic_recipes import DIAGNOSTIC_ACTIONS
+from runtime_data import RUNS_ROOT, WORKSPACE
 
 
-WORKSPACE = Path(os.environ.get("MOB_AI_WORKSPACE", "/workspace")).resolve()
-RUNS_ROOT = WORKSPACE / "runs"
 PIPELINE = WORKSPACE / "pipeline" / "pipeline.py"
 DECISION_SCHEMA = WORKSPACE / "pipeline" / "codex-decision.schema.json"
 NATIVE_SELECTION_SCHEMA = WORKSPACE / "pipeline" / "native-selection.schema.json"

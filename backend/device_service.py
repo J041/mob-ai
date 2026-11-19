@@ -12,14 +12,13 @@ import uuid
 
 from flask import jsonify, request
 
-from assessment.runtime import WORKSPACE
 from backend.common import json_file, strip_terminal_controls, token, truthy, utc_now
 from backend.requests import DeviceReadinessRequest
 from pipeline.frida_runtimes import frida_command, validate_frida_version
 from worker.queue import atomic_write_json
+from runtime_data import WIRELESS_DEVICES_PATH
 
 
-WIRELESS_DEVICES_PATH = WORKSPACE / "worker" / ".state" / "wireless-devices.json"
 _lock = threading.RLock()
 _readiness: dict[str, dict] = {}
 

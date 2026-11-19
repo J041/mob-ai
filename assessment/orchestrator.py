@@ -130,7 +130,7 @@ class LoopRunner(RecoveryMixin, NativeAnalysisMixin):
         try:
             run_dir.relative_to(RUNS_ROOT.resolve())
         except ValueError as error:
-            raise LoopError("Resume target must be inside /workspace/runs.") from error
+            raise LoopError(f"Resume target must be inside {RUNS_ROOT}.") from error
         required = [
             run_dir / "agent", run_dir / "codex-loop-config.json", run_dir / "codex-loop-result.json",
             run_dir / "report.json", run_dir / "original.apk",

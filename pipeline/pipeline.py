@@ -28,6 +28,7 @@ try:
         CommandOutcome, FRIDA_SHUTDOWN_GRACE_SECONDS, FridaSessionError,
         FridaSessionRunner, timeout_output,
     )
+    from runtime_data import RUNS_ROOT
 except ModuleNotFoundError:  # Direct execution from /workspace/pipeline.
     from diagnostic_recipes import (  # type: ignore
         BOUNDED_CAPTURE, DIAGNOSTIC_ACTIONS, DIAGNOSTIC_MAX_ACTIONS_PER_PASS,
@@ -38,6 +39,7 @@ except ModuleNotFoundError:  # Direct execution from /workspace/pipeline.
         CommandOutcome, FRIDA_SHUTDOWN_GRACE_SECONDS, FridaSessionError,
         FridaSessionRunner, timeout_output,
     )
+    RUNS_ROOT = Path(os.environ.get("MOB_AI_DATA_ROOT", "/workspace/.mob-ai-data")) / "runs"
 
 PATTERNS = {
     "root_framework": re.compile(r"RootBeer|Magisk|SuperSU|rooted|isRooted", re.I),
@@ -1121,7 +1123,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--patch-script", help="reviewed Python patch receiving the apktool directory")
     parser.add_argument("--resume", type=Path, help="resume an existing run directory")
     parser.add_argument("--reuse-static", type=Path, help="reuse JADX/native static artifacts from a prior run of the identical APK")
-    parser.add_argument("--runs", type=Path, default=Path("/workspace/runs"))
+    parser.add_argument("--runs", type=Path, default=RUNS_ROOT)
     return parser.parse_args()
 
 

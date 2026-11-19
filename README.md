@@ -54,11 +54,11 @@ The dashboard provides:
 - a per-run artifact browser for findings, hooks, comparisons, crash logs, Codex decisions, saved Ghidra results, and success-policy checks;
 - authorization confirmation before every start or resume operation.
 
-Uploaded APKs are stored in the ignored `uploads/` directory and validated as APK/ZIP
+Uploaded APKs are stored in the ignored `.mob-ai-data/uploads/` directory and validated as APK/ZIP
 files before a run starts. The default limit is 1024 MB. The host port binds only to
 `127.0.0.1`. The Flask API validates paths under this
 workspace, exposes fixed operations rather than arbitrary shell commands, and keeps
-job requests and state under the ignored `worker/.state/` directory using atomic writes.
+job requests and state under the ignored `.mob-ai-data/state/` directory using atomic writes.
 The dedicated worker claims queued jobs on disk, so restarting the web UI does not
 interrupt an assessment. If the worker itself stops during device interaction, the
 attempt is preserved as `interrupted` instead of silently repeating side effects.
@@ -69,7 +69,7 @@ finishes, then the worker writes a `paused` continuation checkpoint before start
 another stage. A paused assessment appears in **Continue / retry**.
 The dashboard receives run, attempt, and live-output changes through the
 `/api/events` server-sent event stream. The server watches bounded control files under
-`worker/.state/` and top-level run results, emitting a snapshot only when their
+`.mob-ai-data/state/` and run results, emitting a snapshot only when their
 revision changes plus an idle keepalive every 15 seconds. Browsers reconnect
 automatically; HTTP polling remains available only as a compatibility fallback.
 Each durable job writes stage transitions to its own `progress.json` sidecar. This
@@ -80,6 +80,24 @@ The separate Ghidra service is reachable only on the private Compose network and
 requires a bearer token. Wireless pairing
 codes are submitted directly to `adb pair` over stdin, cleared from the form after
 every attempt, and never stored in run configuration or job logs.
+
+### Portable runtime data
+
+All transferable application data is consolidated below `/workspace/.mob-ai-data`
+by default. Set `MOB_AI_DATA_ROOT` in `.env` to choose another directory inside the
+mounted workspace. The root contains `runs/`, `uploads/`, `policies/`, `state/`,
+`exports/`, and `temp/`. On upgrade, startup moves data from the former top-level
+locations once and creates compatibility links so saved requests and older tooling
+continue to resolve.
+
+To transfer assessments to another Mob-AI instance, stop the stack and copy the
+entire `.mob-ai-data` directory into the destination repository before starting its
+stack. Startup recreates the compatibility links. This transfers run evidence,
+uploads, policies, durable jobs, and device-history metadata, but intentionally does
+not transfer the private `codex-state`, `claude-state`, `adb-keys`, or `ghidra-state`
+Docker volumes. Authenticate providers again and rerun device readiness on the new
+host. Migration refuses to merge two non-empty copies of the same data category so
+an ambiguous transfer cannot silently overwrite evidence.
 
 ## Start and connect
 
@@ -317,7 +335,7 @@ Before **Start assessment** is enabled, run **Device readiness** for the exact t
 The image installs `FRIDA_VERSION` with `FRIDA_TOOLS_VERSION` as its default runtime and `FRIDA_COMPAT_VERSION` with `FRIDA_COMPAT_TOOLS_VERSION` as an isolated alternative. Override those build arguments in `.env` and rebuild the stack to curate a different pair; the selected tools release must declare compatibility with its Frida binding. Mob-AI intentionally does not download executable Frida Server binaries during an assessment; provide the matching trusted server through **Frida Server binary**.
 
 The Wireless section also keeps a local, non-secret registry of successful pairings
-under `worker/.state/`. It combines that history with `adb devices` and ADB mDNS discovery
+under `.mob-ai-data/state/`. It combines that history with `adb devices` and ADB mDNS discovery
 to distinguish **Connected**, **Previously paired**, **Discovered**, **Unauthorized**,
 and **Offline** devices. Pairing and last-used connection endpoints and timestamps may
 be retained; six-digit pairing codes are never stored. A previously paired label is
@@ -325,7 +343,7 @@ host history rather than proof that Android has not subsequently revoked the pai
 
 **Reasoning mode** controls each provider iteration. **Single agent** disables delegation. **Parallel specialists** allows two or three read-only reviewers to inspect independent static, runtime, and relevant native evidence when supported by the selected provider. Specialists cannot edit the hook or operate the device; only the root agent may update `candidate.js` and return the structured decision.
 
-Native triage is auditable under append-only `runs/RUN_ID/agent/native-selection/attempt-N/` directories, with its final validated selection at `runs/RUN_ID/native-selection.json`. Each hook iteration is auditable under `runs/RUN_ID/agent/iteration-N/` and contains the prompt, candidate hook, provider decision and log, Frida/logcat output, validation result, and combined record. `codex-loop-result.json` retains its compatibility filename and records the terminal status and complete history. The loop never rebuilds or resigns the APK, and it directs the provider to request human review for remote attestation or unsupported/high-risk changes.
+Native triage is auditable under append-only `.mob-ai-data/runs/RUN_ID/agent/native-selection/attempt-N/` directories, with its final validated selection at `.mob-ai-data/runs/RUN_ID/native-selection.json`. Each hook iteration is auditable under `.mob-ai-data/runs/RUN_ID/agent/iteration-N/` and contains the prompt, candidate hook, provider decision and log, Frida/logcat output, validation result, and combined record. `codex-loop-result.json` retains its compatibility filename and records the terminal status and complete history. The loop never rebuilds or resigns the APK, and it directs the provider to request human review for remote attestation or unsupported/high-risk changes.
 
 Reasoning execution is normalized in `backend/providers.py`. CLI providers receive the same
 prompt, JSON schema, model/effort selection, working directory, and access mode, then
@@ -341,7 +359,7 @@ the current evidence-selection, reasoning, and validation stage. A request such 
 produce a bounded rerun proposal, but it cannot operate the device or queue work
 directly. **Review in Continue / retry** copies the proposal into the normal durable
 job form, where authorization must be confirmed before submission. Conversation
-turns and assistant logs are append-only under `runs/RUN_ID/assistant/`.
+turns and assistant logs are append-only under `.mob-ai-data/runs/RUN_ID/assistant/`.
 
 If a run ends with `max_iterations`, select it in the UI and resume it. The iteration
 count is the number of **additional** attempts. The next iteration is seeded from the
@@ -452,7 +470,7 @@ Review and edit a generated hook, then run it directly when an app-specific dete
 
 ```powershell
 .\scripts\codex-container.cmd frida -H 127.0.0.1:27042 -f com.example.app `
-  -l /workspace/runs/RUN_ID/frida/bypass-level-1.js
+  -l /workspace/.mob-ai-data/runs/RUN_ID/frida/bypass-level-1.js
 ```
 
 Generated scripts are automatically regenerated when new observations change the adaptive plan. Once a generated script is manually edited, its hash no longer matches the plan and the pipeline preserves it on resume so Codex can safely refine app-specific hooks. Suspicious native libraries can be investigated with Ghidra MCP or `analyzeHeadless` from the same run directory.
@@ -461,8 +479,8 @@ To choose interactively between Frida and rebuilding, use `--strategy choose`. S
 
 ```powershell
 .\scripts\codex-container.cmd python3 pipeline/pipeline.py --authorized `
-  --strategy rebuild --resume /workspace/runs/RUN_ID `
-  --patch-script /workspace/runs/RUN_ID/patch.py
+  --strategy rebuild --resume /workspace/.mob-ai-data/runs/RUN_ID `
+  --patch-script /workspace/.mob-ai-data/runs/RUN_ID/patch.py
 ```
 
 The rebuilt test APK is signed with a generated debug key and will not retain the original publisher signature. Apps using signature checks or Play Integrity may therefore behave differently.

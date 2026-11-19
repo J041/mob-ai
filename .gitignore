@@ -10,9 +10,13 @@ adbkey.pub
 local.properties
 
 # Assessment runtime data and uploaded samples
-runs/
-uploads/
-policies/generated/
+.mob-ai-data/
+# These legacy names are directory symlinks after runtime-data migration. Match
+# both real directories from older checkouts and the compatibility links.
+runs
+uploads
+policies/generated
+worker/.state
 **/.state/
 
 # Reverse-engineering outputs and binary samples

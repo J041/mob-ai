@@ -29,6 +29,7 @@ from assessment.deep_goal import (
 from assessment.successful_bypass import successful_candidate_path
 from worker.queue import HEARTBEAT_PATH
 from worker.job_types import public_job_type_catalog
+from runtime_data import POLICY_ROOT, UPLOAD_ROOT, runtime_summary
 from backend.providers import PROVIDER_IDS
 from backend.artifacts import (
     ARTIFACT_PREVIEW_SUFFIXES, artifact_manifest, resolve_run_artifact,
@@ -68,8 +69,6 @@ from backend.routes import (
 
 
 STATIC_ROOT = WORKSPACE / "frontend"
-UPLOAD_ROOT = WORKSPACE / "uploads"
-POLICY_ROOT = WORKSPACE / "policies" / "generated"
 UPLOAD_ROOT.mkdir(parents=True, exist_ok=True)
 POLICY_ROOT.mkdir(parents=True, exist_ok=True)
 
@@ -409,6 +408,7 @@ def overview_payload() -> dict:
         "apks": apks, "success_specs": specs, "runs": runs(), "jobs": job_items,
         "jobs_has_more": job_count() > len(job_items),
         "job_types": public_job_type_catalog(),
+        "runtime_data": runtime_summary(),
         "diagnostic_recipes": diagnostic_recipe_catalog(),
         "deep_goal": {
             "default_token_budget": DEEP_GOAL_DEFAULT_TOKENS,
