@@ -452,9 +452,12 @@ class PipelineTests(unittest.TestCase):
         )
         responses = [
             subprocess.CompletedProcess([], 0, "device\n"),
+            subprocess.CompletedProcess([], 0, ""),
             subprocess.CompletedProcess([], 1, ""),
         ]
-        with mock.patch.object(pipeline, "adb", side_effect=responses):
+        probe = subprocess.CompletedProcess([], 1, "connection closed")
+        with mock.patch.object(pipeline, "adb", side_effect=responses), \
+                mock.patch.object(pipeline, "run", return_value=probe):
             with self.assertRaisesRegex(RuntimeError, "missing or not executable"):
                 pipeline.prepare_device(args, Path("sample.apk"))
 

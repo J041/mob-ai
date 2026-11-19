@@ -12,7 +12,7 @@ from assessment.runtime import (
     set_control_run_dir, write_json,
 )
 from assessment.successful_bypass import successful_candidate_path
-from pipeline.frida_runtimes import frida_command
+from pipeline.frida_session import CommandOutcome, FridaSessionError, FridaSessionRunner
 
 
 def _utc_now() -> str:
@@ -60,9 +60,6 @@ def run_successful_bypass(payload: dict[str, Any], log: TextIO) -> tuple[str, Pa
         raise LoopError("The run has no valid recorded device target.")
     if not package or not re.fullmatch(r"[A-Za-z0-9._]+", package):
         raise LoopError("The run has no valid recorded package name.")
-    if frida_server and not re.fullmatch(r"/[A-Za-z0-9_./-]+", frida_server):
-        raise LoopError("The recorded Frida Server path is invalid.")
-
     session_root = run_dir / "launches"
     session_root.mkdir(exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -84,39 +81,36 @@ def run_successful_bypass(payload: dict[str, Any], log: TextIO) -> tuple[str, Pa
             output = _command(["adb", "connect", target], log, "wireless_connect")
             if not re.search(r"connected to|already connected", output, re.I):
                 raise EnvironmentFailure(f"Wireless ADB did not connect to {target}.")
-        state = _command(["adb", "-s", target, "get-state"], log, "device_state")
-        if state.strip() != "device":
-            raise EnvironmentFailure(f"Recorded device {target} is not in the ADB device state.")
-        _command(["adb", "-s", target, "forward", "tcp:27042", "tcp:27042"], log, "frida_forward")
+        def run_adb(command: list[str], stage: str, _check: bool) -> CommandOutcome:
+            code, output = run_logged(["adb", "-s", target, *command], log, stage=stage)
+            return CommandOutcome(code, output)
 
-        frida_ps = frida_command(frida_version, "frida-ps")
-        probe_code, _probe_output = run_logged(
-            [*frida_ps, "-H", "127.0.0.1:27042"], log, stage="frida_probe",
-        )
-        if probe_code:
-            if not frida_server:
-                raise EnvironmentFailure("Frida Server is unreachable and this run has no recorded server path.")
-            _command(
-                ["adb", "-s", target, "shell", "su", "-c", f"test -x {frida_server}"],
-                log, "frida_server_check",
+        def run_host(
+            command: list[str], stage: str, timeout: int | None, artifact: Path | None,
+        ) -> CommandOutcome:
+            code, output = run_logged(
+                command, log, artifact=artifact, stage=stage,
             )
-            _command(
-                ["adb", "-s", target, "shell", "su", "-c", f"{frida_server} -D"],
-                log, "frida_server_start",
+            return CommandOutcome(code, output)
+
+        try:
+            session = FridaSessionRunner(
+                target=target, endpoint="127.0.0.1:27042", version=frida_version,
+                server_path=frida_server, adb_runner=run_adb, host_runner=run_host,
             )
-            _command([*frida_ps, "-H", "127.0.0.1:27042"], log, "frida_probe")
+            session.prepare()
+        except (FridaSessionError, ValueError) as error:
+            raise EnvironmentFailure(str(error)) from error
 
         _command(["adb", "-s", target, "shell", "am", "force-stop", package], log, "app_stop")
         metadata["status"] = "running"
         write_json(session_dir / "session.json", metadata)
-        frida = frida_command(frida_version, "frida")
-        code, _output = run_logged(
-            [*frida, "-H", "127.0.0.1:27042", "-f", package, "-l", str(candidate),
-             "-q", "-t", "inf", "--exit-on-error"],
-            log, artifact=session_dir / "frida.log", stage="bypass_session",
+        result = session.run_script(
+            package, candidate, duration_seconds=None,
+            artifact=session_dir / "frida.log", stage="bypass_session",
         )
-        if code:
-            raise EnvironmentFailure(f"Frida bypass session exited with code {code}.")
+        if result.returncode:
+            raise EnvironmentFailure(f"Frida bypass session exited with code {result.returncode}.")
         metadata.update({"status": "ended", "completed_utc": _utc_now()})
         write_json(session_dir / "session.json", metadata)
         return "bypass_session_ended", run_dir

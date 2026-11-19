@@ -24,12 +24,20 @@ try:
         DIAGNOSTIC_RECIPES,
     )
     from pipeline.frida_runtimes import activate_frida_runtime
+    from pipeline.frida_session import (
+        CommandOutcome, FRIDA_SHUTDOWN_GRACE_SECONDS, FridaSessionError,
+        FridaSessionRunner, timeout_output,
+    )
 except ModuleNotFoundError:  # Direct execution from /workspace/pipeline.
     from diagnostic_recipes import (  # type: ignore
         BOUNDED_CAPTURE, DIAGNOSTIC_ACTIONS, DIAGNOSTIC_MAX_ACTIONS_PER_PASS,
         DIAGNOSTIC_RECIPES,
     )
     from frida_runtimes import activate_frida_runtime  # type: ignore
+    from frida_session import (  # type: ignore
+        CommandOutcome, FRIDA_SHUTDOWN_GRACE_SECONDS, FridaSessionError,
+        FridaSessionRunner, timeout_output,
+    )
 
 PATTERNS = {
     "root_framework": re.compile(r"RootBeer|Magisk|SuperSU|rooted|isRooted", re.I),
@@ -38,8 +46,6 @@ PATTERNS = {
     "hook_framework": re.compile(r"frida|xposed|substrate|gum-js-loop|linjector", re.I),
     "debugger": re.compile(r"isDebuggerConnected|TracerPid|ptrace", re.I),
 }
-FRIDA_SHUTDOWN_GRACE_SECONDS = 10
-
 DEFAULT_MODULES = {
     "java-files", "debugger", "properties", "rootbeer", "packages", "commands",
     "native-files", "native-antidebug", "anti-frida",
@@ -124,13 +130,6 @@ def run_adb_command(
         shown = display or " ".join(command)
         raise RuntimeError(f"Command failed ({result.returncode}): {shown}")
     return result
-
-
-def timeout_output(error: subprocess.TimeoutExpired) -> str:
-    output = error.stdout or b""
-    if isinstance(output, bytes):
-        return output.decode("utf-8", errors="replace")
-    return str(output)
 
 
 def sha256(path: Path) -> str:
@@ -394,29 +393,39 @@ def infer_modules(metadata: dict[str, object], events: list[dict[str, object]]) 
     return modules
 
 
-def quiet_frida_command(
-    args: argparse.Namespace, package: str, script: Path, duration_seconds: int,
-) -> list[str]:
-    """Keep a non-interactive Frida session attached for the full evidence window."""
-    return [
-        "frida", "-H", args.frida_endpoint, "-f", package, "-l", str(script),
-        "-q", "-t", str(duration_seconds), "--exit-on-error",
-    ]
+def frida_session_runner(args: argparse.Namespace) -> FridaSessionRunner:
+    """Adapt pipeline logging and ADB transport handling to the shared runner."""
+    def run_adb(command: list[str], _stage: str, check: bool) -> CommandOutcome:
+        result = adb(args, *command, check=check)
+        return CommandOutcome(result.returncode, result.stdout or "")
+
+    def run_host(
+        command: list[str], _stage: str, timeout: int | None, artifact: Path | None,
+    ) -> CommandOutcome:
+        result = run(command, log=artifact, check=False, timeout=timeout)
+        return CommandOutcome(result.returncode, result.stdout or "")
+
+    return FridaSessionRunner(
+        target=str(args.device or ""), endpoint=args.frida_endpoint,
+        version=str(getattr(args, "frida_version", "") or ""),
+        server_path=str(getattr(args, "start_frida_server", "") or ""),
+        adb_runner=run_adb, host_runner=run_host,
+    )
 
 
 def run_observation(args: argparse.Namespace, run_dir: Path, package: str) -> dict[str, object]:
     script = install_observer(run_dir)
     adb(args, "logcat", "-c", check=False)
     log = run_dir / "logs" / "observation-frida.log"
-    cmd = quiet_frida_command(args, package, script, args.observation_seconds)
+    session = frida_session_runner(args)
     print(f"Observation pass: {args.observation_seconds}s (no return values are modified)")
     try:
-        result = run(
-            cmd, log=log, check=False,
-            timeout=args.observation_seconds + FRIDA_SHUTDOWN_GRACE_SECONDS,
+        result = session.run_script(
+            package, script, duration_seconds=args.observation_seconds,
+            artifact=log, stage="observation",
         )
-        frida_output = result.stdout
-    except subprocess.TimeoutExpired as exc:
+        frida_output = result.output
+    except subprocess.TimeoutExpired as exc:  # Compatibility for injected legacy runners.
         frida_output = timeout_output(exc)
         log.parent.mkdir(parents=True, exist_ok=True)
         log.write_text(frida_output, encoding="utf-8", errors="replace")
@@ -851,30 +860,17 @@ def setup_wireless(args: argparse.Namespace) -> None:
 
 
 def prepare_device(args: argparse.Namespace, apk: Path) -> None:
-    adb(args, "get-state")
+    try:
+        session = frida_session_runner(args)
+        session.check_device()
+    except FridaSessionError as error:
+        raise RuntimeError(str(error)) from error
     if args.install:
         adb(args, "install", "-r", str(apk))
-    if args.start_frida_server:
-        if not re.fullmatch(r"/[A-Za-z0-9_./-]+", args.start_frida_server):
-            raise RuntimeError("--start-frida-server must be a simple absolute device path")
-        probe = adb(args, "shell", "su", "-c", f"test -x {args.start_frida_server}", check=False)
-        if probe.returncode:
-            raise RuntimeError(
-                f"Frida Server is missing or not executable at {args.start_frida_server}"
-            )
-        adb(args, "shell", "su", "-c", f"{args.start_frida_server} -D &")
-        time.sleep(2)
-    if args.frida_endpoint == "127.0.0.1:27042":
-        adb(args, "forward", "tcp:27042", "tcp:27042")
-    if args.start_frida_server:
-        probe = run(
-            ["frida-ps", "-H", args.frida_endpoint], check=False, timeout=15,
-            display=f"frida-ps -H {args.frida_endpoint} (server readiness check)",
-        )
-        if probe.returncode:
-            raise RuntimeError(
-                f"Frida Server started from {args.start_frida_server} but is not reachable at {args.frida_endpoint}"
-            )
+    try:
+        session.prepare(check_device=False)
+    except FridaSessionError as error:
+        raise RuntimeError(str(error)) from error
 
 
 def load_success_spec(path: Path | None) -> dict[str, object] | None:
@@ -1012,7 +1008,7 @@ def run_frida(
             # process from the baseline or prior repeat cannot create a false pass.
             adb(args, "shell", "am", "force-stop", package, check=False)
             adb(args, "logcat", "-c", check=False)
-            cmd = quiet_frida_command(args, package, script, args.run_seconds)
+            session = frida_session_runner(args)
             suffix = "" if repetition == 1 else f"-repeat-{repetition}"
             log = run_dir / "logs" / f"frida-{index}{suffix}.log"
             print(
@@ -1020,9 +1016,9 @@ def run_frida(
                 f"{script.name} ({args.run_seconds}s observation window)"
             )
             try:
-                result = run(
-                    cmd, log=log, check=False,
-                    timeout=args.run_seconds + FRIDA_SHUTDOWN_GRACE_SECONDS,
+                result = session.run_script(
+                    package, script, duration_seconds=args.run_seconds,
+                    artifact=log, stage="validation",
                 )
             except subprocess.TimeoutExpired as exc:
                 output = timeout_output(exc)
@@ -1035,7 +1031,7 @@ def run_frida(
             passed, checks = evaluate_success(args, package, frida_output, logcat, success_spec)
             pass_count += int(passed)
             repetitions.append({"repeat": repetition, "passed": passed, "checks": checks})
-            if result is not None and result.returncode != 0:
+            if result is not None and result.returncode != 0 and not result.timed_out:
                 print("Frida exited early; inspect the validation log.", file=sys.stderr)
         success = pass_count >= min_passes
         attempts.append({

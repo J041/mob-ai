@@ -14,6 +14,7 @@ from unittest import mock
 from assessment.runtime import JobCancelled, JobControl, JobPaused, install_job_control, run_logged
 from assessment import bypass_session
 from backend import jobs as job_service
+from pipeline import frida_session
 from worker import main as worker
 from worker import queue as job_queue
 from worker.ghidra_proxy import GhidraLoopbackProxy
@@ -42,7 +43,7 @@ class DurableWorkerTests(unittest.TestCase):
                 return (0, "device\n" if kwargs.get("stage") == "device_state" else "")
 
             with mock.patch.object(bypass_session, "RUNS_ROOT", root), mock.patch.object(
-                bypass_session, "frida_command", side_effect=lambda _version, tool: [tool],
+                frida_session, "frida_command", side_effect=lambda _version, tool: [tool],
             ), mock.patch.object(bypass_session, "run_logged", side_effect=fake_run_logged):
                 status, returned = bypass_session.run_successful_bypass(
                     {"run": str(run)}, StringIO(),
