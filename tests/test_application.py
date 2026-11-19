@@ -193,6 +193,8 @@ class WebAppTests(unittest.TestCase):
         self.assertIn("codex", payload)
         self.assertIn("runs", payload)
         self.assertIn("success_specs", payload)
+        self.assertEqual(payload["job_types"]["launch_bypass"]["counts_as_attempt"], False)
+        self.assertEqual(payload["job_types"]["resume"]["supports_pause"], True)
         self.assertTrue(payload["diagnostic_recipes"])
         self.assertIn("ui_description", payload["diagnostic_recipes"][0])
         self.assertIn("artifact_limits", payload["diagnostic_recipes"][0])

@@ -13,6 +13,7 @@ from worker.queue import (
     read_json, recover_abandoned_jobs, touch_heartbeat, utc_now,
 )
 from worker.ghidra_proxy import GhidraLoopbackProxy
+from worker.job_types import JobType, job_type
 from assessment.orchestrator import LoopRunner
 from assessment.runtime import (
     EnvironmentFailure, JobCancelled, JobControl, JobPaused, LoopError,
@@ -26,9 +27,25 @@ from assessment.bypass_session import run_successful_bypass
 POLL_SECONDS = float(os.environ.get("MOB_AI_WORKER_POLL_SECONDS", "1"))
 
 
+def dispatch_job(spec: JobType, runner: LoopRunner, payload: dict, log):
+    """Bind registry executor identifiers to their runtime implementations."""
+    executors = {
+        "loop.new": lambda: runner.new(payload),
+        "loop.resume": lambda: runner.resume(payload),
+        "loop.retry_with_diagnostics": lambda: runner.retry_with_diagnostics(payload),
+        "function.deep_goal": lambda: run_deep_goal(payload, log),
+        "function.launch_bypass": lambda: run_successful_bypass(payload, log),
+    }
+    try:
+        return executors[spec.executor]()
+    except KeyError as error:
+        raise LoopError(f"No worker executor is registered for {spec.name!r}.") from error
+
+
 def execute(directory, state: dict, request: dict) -> None:
     payload = request.get("payload") or {}
     kind = str(state.get("kind") or request.get("kind") or "")
+    spec = None
     exit_code = 1
     status = "error"
     run_dir = None
@@ -55,19 +72,9 @@ def execute(directory, state: dict, request: dict) -> None:
     with (directory / "output.log").open("a", encoding="utf-8", buffering=1) as log:
         log.write(f"\nDurable worker claimed job {state['id']} at {state['started_utc']}.\n")
         try:
+            spec = job_type(kind)
             runner = LoopRunner(log)
-            if kind == "resume":
-                status, run_dir = runner.resume(payload)
-            elif kind == "retry":
-                status, run_dir = runner.retry_with_diagnostics(payload)
-            elif kind == "start":
-                status, run_dir = runner.new(payload)
-            elif kind == "deep_goal":
-                status, run_dir = run_deep_goal(payload, log)
-            elif kind == "launch_bypass":
-                status, run_dir = run_successful_bypass(payload, log)
-            else:
-                raise LoopError(f"Unsupported queued job kind: {kind!r}.")
+            status, run_dir = dispatch_job(spec, runner, payload, log)
             if not state.get("run_id"):
                 state.update({
                     "run_id": run_dir.name,
@@ -76,9 +83,7 @@ def execute(directory, state: dict, request: dict) -> None:
                     "parent_job_id": "",
                 })
             log.write(f"\nLoop finished: {status}\nRun directory: {run_dir}\n")
-            exit_code = 0 if status in {
-                "success", "success_without_bypass", "investigation_complete", "bypass_session_ended",
-            } else 1
+            exit_code = 0 if spec.is_success(status) else 1
         except JobCancelled as error:
             log.write(f"\ncancelled: {error}\n")
             status = "cancelled"

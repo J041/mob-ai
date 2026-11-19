@@ -17,6 +17,10 @@ function tokenLabel(usage) {
   return `${total.toLocaleString()} tokens${usage?.complete ? '' : ' (total only)'}`;
 }
 
+function jobTypeLabel(kind, fallback) {
+  return state.overview?.job_types?.[kind]?.label || fallback;
+}
+
 function setTab(name) {
   $$('.segment').forEach(button => {
     const active = button.dataset.tab === name;
@@ -109,10 +113,10 @@ function renderRuns(runs) {
         <button class="resume-button assistant" data-assistant="${escapeText(run.id)}">Ask assistant</button>
         <button class="resume-button artifacts" data-artifacts="${escapeText(run.id)}">Artifacts</button>
         ${run.successful_script ? `<a class="resume-button download-script" href="/api/runs/${encodeURIComponent(run.id)}/artifacts/download?path=${encodeURIComponent(run.successful_script)}" download>Download script</a>` : ''}
-        ${run.successful_script ? `<button class="resume-button launch-bypass" data-launch-bypass="${escapeText(run.id)}">Run APK + bypass</button>` : ''}
+        ${run.successful_script ? `<button class="resume-button launch-bypass" data-launch-bypass="${escapeText(run.id)}">${escapeText(jobTypeLabel('launch_bypass', 'Run APK + bypass'))}</button>` : ''}
         ${run.continuable ? `<button class="resume-button" data-resume="${escapeText(run.path)}">${run.usage_recoverable ? 'Resume after reset' : run.frida_recoverable ? 'Fix Frida' : run.checkpoint_recoverable ? 'Recover' : 'Resume'}</button>` : ''}
         <button class="resume-button diagnostic" data-retry="${escapeText(run.path)}" ${run.retryable ? '' : 'disabled'}>Rerun / retry</button>
-        ${run.deep_investigation_eligible ? `<button class="resume-button deep-goal" data-deep-goal="${escapeText(run.id)}">${run.deep_investigation_count ? 'Investigate again' : 'Deep investigation'}</button>` : ''}
+        ${run.deep_investigation_eligible ? `<button class="resume-button deep-goal" data-deep-goal="${escapeText(run.id)}">${run.deep_investigation_count ? 'Investigate again' : escapeText(jobTypeLabel('deep_goal', 'Deep investigation'))}</button>` : ''}
       </div>
     </article>`;
   }).join('');
@@ -294,7 +298,7 @@ async function submitForm(form, endpoint) {
     }
     const job = await api(endpoint, { method: 'POST', body: JSON.stringify(payload) });
     state.selectedJob = job.id;
-    toast(`${job.kind === 'retry' ? 'Rerun / retry' : job.kind === 'resume' ? 'Resume' : 'Assessment'} job queued.`);
+    toast(`${job.job_type?.label || jobTypeLabel(job.kind, 'Assessment')} job queued.`);
     renderOverview(await api('/api/overview'));
     $('#activity').scrollIntoView({ behavior: 'smooth', block: 'start' });
   } catch (error) { toast(error.message, true); }

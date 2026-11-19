@@ -28,6 +28,7 @@ from assessment.deep_goal import (
 )
 from assessment.successful_bypass import successful_candidate_path
 from worker.queue import HEARTBEAT_PATH
+from worker.job_types import public_job_type_catalog
 from backend.providers import PROVIDER_IDS
 from backend.artifacts import (
     ARTIFACT_PREVIEW_SUFFIXES, artifact_manifest, resolve_run_artifact,
@@ -407,6 +408,7 @@ def overview_payload() -> dict:
     return {
         "apks": apks, "success_specs": specs, "runs": runs(), "jobs": job_items,
         "jobs_has_more": job_count() > len(job_items),
+        "job_types": public_job_type_catalog(),
         "diagnostic_recipes": diagnostic_recipe_catalog(),
         "deep_goal": {
             "default_token_budget": DEEP_GOAL_DEFAULT_TOKENS,

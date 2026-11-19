@@ -161,6 +161,9 @@ class FrontendTests(unittest.TestCase):
         self.assertIn('id="cancelJob"', page)
         self.assertIn("controlSelectedJob('pause')", script)
         self.assertIn("controlSelectedJob('cancel')", script)
+        self.assertIn("type.supports_pause", script)
+        self.assertIn("type.counts_as_attempt", script)
+        self.assertNotIn("NON_ATTEMPT_KINDS", script)
 
     def test_run_and_attempt_token_usage_is_visible(self) -> None:
         response = self.client.get("/scripts/app.js")

@@ -2,17 +2,19 @@
 
 import { $, $$, api, escapeText, state, toast } from './core.js';
 
-const NON_ATTEMPT_KINDS = new Set(['deep_investigation', 'bypass_session']);
+function jobType(job) {
+  return job?.job_type || state.overview?.job_types?.[job?.kind] || {
+    label: 'Assessment', counts_as_attempt: true, supports_pause: false,
+    control_noun: 'assessment', sequence_noun: 'Attempt', history_noun: 'attempt',
+    attempt_labels: {},
+  };
+}
 
-function attemptName(kind) {
-  return ({
-    initial: 'Initial assessment', resume: 'Resume iterations',
-    frida_recovery: 'Fix Frida', observation_recovery: 'Recover observation',
-    validation_recovery: 'Recover validation', checkpoint_recovery: 'Recover checkpoint',
-    usage_limit_resume: 'Resume after usage reset', pause_resume: 'Continue after pause',
-    diagnostic_retry: 'Rerun / retry', deep_investigation: 'Deep investigation',
-    bypass_session: 'Run APK + bypass',
-  })[kind] || String(kind || 'Assessment').replaceAll('_', ' ');
+function attemptName(job) {
+  const type = jobType(job);
+  return type.attempt_labels?.[job.attempt_kind]
+    || type.label
+    || String(job.attempt_kind || 'Assessment').replaceAll('_', ' ');
 }
 
 function statusClass(value) {
@@ -23,14 +25,12 @@ function displayStatus(job) {
   return String(job.status || `exit ${job.exit_code ?? '?'}`).replaceAll('_', ' ').toUpperCase();
 }
 
-function sequenceLabel(job, index, attempts, totals) {
-  if (job.attempt_kind === 'deep_investigation') {
-    const prior = attempts.slice(0, index).filter(item => item.attempt_kind === 'deep_investigation').length;
-    return `Deep investigation ${totals.investigations - prior}`;
-  }
-  if (job.attempt_kind === 'bypass_session') {
-    const prior = attempts.slice(0, index).filter(item => item.attempt_kind === 'bypass_session').length;
-    return `Bypass session ${totals.bypassSessions - prior}`;
+function sequenceLabel(job, index, attempts) {
+  const type = jobType(job);
+  if (!type.counts_as_attempt) {
+    const sameType = attempts.filter(item => item.kind === job.kind).length;
+    const prior = attempts.slice(0, index).filter(item => item.kind === job.kind).length;
+    return `${type.sequence_noun || type.label} ${sameType - prior}`;
   }
   return `Attempt ${job.attempt_number || 1}`;
 }
@@ -54,15 +54,16 @@ export function createActivityController({ tokenLabel, renderOverviewSnapshot })
     const visibleGroups = groupEntries.slice(0, state.jobGroupLimit);
     strip.innerHTML = visibleGroups.map(([key, attempts]) => {
       const latest = attempts[0];
-      const assessmentAttempts = attempts.filter(job => !NON_ATTEMPT_KINDS.has(job.attempt_kind));
-      const totals = {
-        investigations: attempts.filter(job => job.attempt_kind === 'deep_investigation').length,
-        bypassSessions: attempts.filter(job => job.attempt_kind === 'bypass_session').length,
-      };
+      const assessmentAttempts = attempts.filter(job => jobType(job).counts_as_attempt);
+      const auxiliaryCounts = new Map();
+      attempts.filter(job => !jobType(job).counts_as_attempt).forEach(job => {
+        const type = jobType(job);
+        const key = job.kind || job.attempt_kind;
+        auxiliaryCounts.set(key, { count: (auxiliaryCounts.get(key)?.count || 0) + 1, type });
+      });
       const activityCount = [
         assessmentAttempts.length ? `${assessmentAttempts.length} attempt${assessmentAttempts.length === 1 ? '' : 's'}` : '',
-        totals.investigations ? `${totals.investigations} investigation${totals.investigations === 1 ? '' : 's'}` : '',
-        totals.bypassSessions ? `${totals.bypassSessions} bypass session${totals.bypassSessions === 1 ? '' : 's'}` : '',
+        ...[...auxiliaryCounts.values()].map(({ count, type }) => `${count} ${type.history_noun}${count === 1 ? '' : 's'}`),
       ].filter(Boolean).join(' · ');
       const run = state.overview?.runs.find(item => item.id === latest.run_id);
       const terminal = run?.terminal || {};
@@ -82,7 +83,7 @@ export function createActivityController({ tokenLabel, renderOverviewSnapshot })
         }
         const history = attempts.map((job, index) => `
           <button class="attempt-chip ${job.id === state.selectedJob ? 'active' : ''}" data-job="${job.id}">
-            <span><strong>${sequenceLabel(job, index, attempts, totals)}</strong><small>${escapeText(attemptName(job.attempt_kind))} · ${escapeText(tokenLabel(job.token_usage))}</small></span>
+            <span><strong>${sequenceLabel(job, index, attempts)}</strong><small>${escapeText(attemptName(job))} · ${escapeText(tokenLabel(job.token_usage))}</small></span>
             <b class="job-status ${statusClass(job.status)}">${escapeText(displayStatus(job))}</b>
           </button>`).join('');
         return `<details class="job-group attempt-group ${selectedHere ? 'active' : ''}" data-run-group="${escapeText(key)}" ${state.expandedRuns.has(key) ? 'open' : ''}>
@@ -150,13 +151,13 @@ export function createActivityController({ tokenLabel, renderOverviewSnapshot })
       const output = [job.stdout, job.stderr && `\n[stderr]\n${job.stderr}`].filter(Boolean).join('');
       $('#consoleOutput').textContent = output || (job.status === 'queued' ? 'Queued; waiting for the durable worker…' : 'Process started; waiting for output…');
       $('#consoleOutput').scrollTop = $('#consoleOutput').scrollHeight;
-      const attempt = String(job.attempt_kind || job.kind || 'assessment').replaceAll('_', ' ');
-      $('#jobLabel').textContent = `${attempt} · ${job.run_id || job.label} · attempt ${job.attempt_number || 1}`;
+      const type = jobType(job);
+      $('#jobLabel').textContent = `${attemptName(job)} · ${job.run_id || job.label} · ${sequenceLabel(job, 0, [job]).toLowerCase()}`;
       $('#livePill').textContent = displayStatus(job);
       $('#livePill').className = `live-pill${job.status === 'running' ? ' running' : ''}${job.status === 'pausing' || job.status === 'cancelling' ? ` ${job.status}` : ''}`;
-      $('#pauseJob').disabled = job.attempt_kind === 'bypass_session' || !job.running || job.status !== 'running' || Boolean(job.pause_requested);
+      $('#pauseJob').disabled = !type.supports_pause || !job.running || job.status !== 'running' || Boolean(job.pause_requested);
       $('#cancelJob').disabled = !job.running && job.status !== 'queued';
-      $('#cancelJob').textContent = job.attempt_kind === 'bypass_session' ? 'Cancel session' : 'Cancel job';
+      $('#cancelJob').textContent = `Cancel ${type.control_noun || 'job'}`;
       if (job.auto_resume_job_id) {
         state.selectedJob = job.auto_resume_job_id;
         if (state.eventsConnected) refreshSelectedJob();
@@ -173,7 +174,7 @@ export function createActivityController({ tokenLabel, renderOverviewSnapshot })
   async function controlSelectedJob(action) {
     if (!state.selectedJob) return;
     const selected = state.activityJobs.find(job => job.id === state.selectedJob);
-    const noun = selected?.attempt_kind === 'bypass_session' ? 'session' : 'assessment';
+    const noun = jobType(selected).control_noun || 'assessment';
     if (action === 'cancel' && !window.confirm(
       `Cancel this ${noun}? The active provider or device process will stop and completed evidence will be preserved.`
     )) return;

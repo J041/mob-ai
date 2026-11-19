@@ -16,6 +16,7 @@ from backend.auth import provider_authenticated
 from backend.common import json_file, utc_now
 from backend.providers import PROVIDER_IDS
 from worker.queue import STATE_ROOT, atomic_write_json
+from worker.job_types import job_type
 
 _lock = threading.RLock()
 _log_cache: dict[tuple[str, str], str] = {}
@@ -91,6 +92,7 @@ def request_job_control(job_id: str, action: str) -> dict:
         state = json_file(state_path)
         if not state:
             raise FileNotFoundError("Job not found.")
+        spec = job_type(str(state.get("kind") or ""))
         status = str(state.get("status") or "")
         if action == "cancel":
             if status == "queued" and not state.get("running"):
@@ -110,6 +112,8 @@ def request_job_control(job_id: str, action: str) -> dict:
             else:
                 raise ValueError(f"Job cannot be cancelled from status {status!r}.")
         else:
+            if not spec.supports_pause:
+                raise ValueError(f"{spec.label} jobs do not support pausing.")
             if not state.get("running") or status not in {"running", "pausing"}:
                 raise ValueError("Only a running job can pause after its current stage.")
             state.update({
@@ -133,13 +137,15 @@ def infer_attempt_kind(state: dict, log_text: str) -> str:
     recorded = str(state.get("attempt_kind") or "")
     if recorded:
         return recorded
-    if state.get("kind") == "start":
-        return "initial"
+    kind = str(state.get("kind") or "")
     if "--observation-mode only" in log_text:
         return "frida_recovery" if "--start-frida-server" in log_text else "observation_recovery"
     if "--candidate-script" in log_text and "checkpoint-recovery" in log_text:
         return "validation_recovery"
-    return "resume"
+    try:
+        return job_type(kind).default_attempt_kind
+    except ValueError:
+        return "resume"
 
 
 def job_state(job_id: str, *, include_output: bool = True) -> dict:
@@ -153,6 +159,10 @@ def job_state(job_id: str, *, include_output: bool = True) -> dict:
     inference_text = job_log_head(job_id) + "\n" + log_text
     state["run_id"] = infer_job_run_id(state, inference_text)
     state["attempt_kind"] = infer_attempt_kind(state, inference_text)
+    try:
+        state["job_type"] = job_type(str(state.get("kind") or "")).public_dict()
+    except ValueError:
+        state["job_type"] = {}
     if include_output and not isinstance(state.get("token_usage"), dict):
         state["token_usage"] = legacy_job_token_usage(job_id)
     if include_output:
@@ -191,7 +201,11 @@ def jobs(*, limit: int = 20, offset: int = 0) -> list[dict]:
             state.setdefault("attempt_number", 1)
             state.setdefault("parent_job_id", "")
             continue
-        if state.get("attempt_kind") in {"deep_investigation", "bypass_session"}:
+        try:
+            counts_as_attempt = job_type(str(state.get("kind") or "")).counts_as_attempt
+        except ValueError:
+            counts_as_attempt = state.get("attempt_kind") not in {"deep_investigation", "bypass_session"}
+        if not counts_as_attempt:
             state["attempt_number"] = 0
             state["parent_job_id"] = str(state.get("parent_job_id") or previous_by_run.get(run_id) or "")
             continue
@@ -217,30 +231,29 @@ def resume_attempt_kind(run_dir: Path) -> str:
 
 
 def start_job(kind: str, label: str, payload: dict) -> dict:
-    if kind != "launch_bypass":
+    spec = job_type(kind)
+    if spec.requires_provider:
         provider = str(payload.get("provider") or "codex")
         if provider not in PROVIDER_IDS:
             raise ValueError("Unsupported reasoning provider.")
         if not provider_authenticated(provider):
             account = "ChatGPT" if provider == "codex" else "Claude"
             raise ValueError(f"{account} is not connected. Connect it from the dashboard first.")
-    run_id = Path(payload["run"]).name if kind in {"resume", "retry", "deep_goal", "launch_bypass"} else ""
+    run_id = Path(payload["run"]).name if "run" in payload else ""
     existing = jobs() if run_id else []
     related = [job for job in existing if job.get("run_id") == run_id]
     parent_job_id = related[0]["id"] if related else ""
     assessment_jobs = [
         job for job in related
-        if job.get("attempt_kind") not in {"deep_investigation", "bypass_session"}
+        if bool((job.get("job_type") or {}).get("counts_as_attempt", True))
     ]
     attempt_number = (
-        0 if kind in {"deep_goal", "launch_bypass"} else
+        0 if not spec.counts_as_attempt else
         max((int(job.get("attempt_number") or 0) for job in assessment_jobs), default=0) + 1
     )
     attempt_kind = (
-        "diagnostic_retry" if kind == "retry" else
-        "deep_investigation" if kind == "deep_goal" else
-        "bypass_session" if kind == "launch_bypass" else
-        resume_attempt_kind(Path(payload["run"])) if kind == "resume" else "initial"
+        resume_attempt_kind(Path(payload["run"])) if kind == "resume"
+        else spec.default_attempt_kind
     )
     with _lock:
         if any(job.get("running") or job.get("status") == "queued" for job in jobs()):

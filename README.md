@@ -417,6 +417,12 @@ the artifact browser. `frontend/scripts/app.js` composes the page features.
 This keeps the public API and single-command deployment unchanged while making each
 subsystem independently testable.
 
+Durable job semantics are centralized in `worker/job_types.py`. Each registered job type
+declares its provider requirement, attempt-counting behavior, pause support, successful
+terminal statuses, worker executor identifier, and safe UI labels. Queue creation, worker
+dispatch, exit-code classification, attempt history, and frontend activity controls consume
+that registry so adding a job cannot silently drift across those layers.
+
 For a wireless physical device, replace `--device SERIAL_FROM_ADB` with `--wireless-connect IP:CONNECTION_PORT`; add `--wireless-pair IP:PAIRING_PORT` on the first connection. The same installation, Frida forwarding, logging, and success checks then apply.
 
 If `frida-server` is already running, omit `--start-frida-server`. The pipeline forwards that device's port 27042 and connects through `127.0.0.1:27042`. For a remote server, use `--frida-endpoint HOST:PORT`.

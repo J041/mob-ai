@@ -8,6 +8,7 @@ import uuid
 from typing import Any
 
 from assessment.runtime import WORKSPACE
+from worker.job_types import job_type
 
 
 STATE_ROOT = WORKSPACE / "worker" / ".state" / "jobs"
@@ -99,12 +100,13 @@ def enqueue_due_usage_limit_jobs() -> list[str]:
             continue
         payload["run"] = str(WORKSPACE / "runs" / run_id)
         payload["auto_resume_usage_limit"] = True
+        resume_type = job_type("resume")
         job_id = uuid.uuid4().hex
         queued_utc = utc_now()
         target = STATE_ROOT / job_id
         target.mkdir(parents=True)
         next_state = {
-            "id": job_id, "kind": "resume", "label": run_id, "queued_utc": queued_utc,
+            "id": job_id, "kind": resume_type.name, "label": run_id, "queued_utc": queued_utc,
             "started_utc": "", "running": False, "exit_code": None, "status": "queued",
             "run_id": run_id, "attempt_number": max(
                 (int(other.get("attempt_number") or 0) for _, other in states if other.get("run_id") == run_id),
@@ -113,7 +115,7 @@ def enqueue_due_usage_limit_jobs() -> list[str]:
             "attempt_kind": "usage_limit_resume", "parent_job_id": str(state.get("id") or ""),
             "auto_resumed": True,
         }
-        atomic_write_json(target / "request.json", {"kind": "resume", "label": run_id, "payload": payload})
+        atomic_write_json(target / "request.json", {"kind": resume_type.name, "label": run_id, "payload": payload})
         atomic_write_json(target / "job.json", next_state)
         state.update({"auto_resume_job_id": job_id, "auto_resume_queued_utc": queued_utc})
         atomic_write_json(directory / "job.json", state)
