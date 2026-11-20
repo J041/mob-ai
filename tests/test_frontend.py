@@ -38,13 +38,13 @@ class FrontendTests(unittest.TestCase):
         page = response.get_data(as_text=True)
         response.close()
         self.assertIn('type="module"', page)
-        self.assertIn('src="/scripts/app.js?v=20261120-trash-management"', page)
+        self.assertIn('src="/scripts/app.js?v=20261120-run-ledger"', page)
         for path in (
             "/scripts/app.js", "/scripts/core.js", "/scripts/models.js",
             "/scripts/artifacts.js", "/scripts/assistant.js", "/scripts/auth.js",
             "/scripts/devices.js", "/scripts/events.js", "/scripts/policy-builder.js",
             "/scripts/activity.js",
-            "/scripts/runs.js", "/scripts/trash.js",
+            "/scripts/runs.js", "/scripts/run-ledger.js", "/scripts/trash.js",
         ):
             response = self.client.get(path)
             self.assertEqual(response.status_code, 200, path)
@@ -59,6 +59,7 @@ class FrontendTests(unittest.TestCase):
         self.assertIn("connectOverviewEvents", app_script)
         self.assertIn("from './activity.js'", app_script)
         self.assertIn("from './trash.js'", app_script)
+        self.assertIn("from './run-ledger.js'", app_script)
 
     def test_reassessment_entry_is_in_continue_workflow(self) -> None:
         response = self.client.get("/")
@@ -119,7 +120,7 @@ class FrontendTests(unittest.TestCase):
         self.assertIn(".job-group { flex: 0 0 auto", styles)
 
     def test_actionable_terminal_status_ui_is_visible(self) -> None:
-        response = self.client.get("/scripts/app.js")
+        response = self.client.get("/scripts/run-ledger.js")
         script = response.get_data(as_text=True)
         response.close()
         response = self.client.get("/scripts/runs.js")
@@ -133,7 +134,7 @@ class FrontendTests(unittest.TestCase):
         self.assertIn("job-terminal-reason", activity_script)
 
     def test_successful_run_script_download_is_conditional(self) -> None:
-        response = self.client.get("/scripts/app.js")
+        response = self.client.get("/scripts/run-ledger.js")
         script = response.get_data(as_text=True)
         response.close()
         self.assertIn("run.successful_script ?", script)
@@ -144,7 +145,7 @@ class FrontendTests(unittest.TestCase):
         self.assertIn("Run APK + bypass", script)
 
     def test_assessment_rows_have_recoverable_delete_control(self) -> None:
-        response = self.client.get("/scripts/app.js")
+        response = self.client.get("/scripts/run-ledger.js")
         script = response.get_data(as_text=True)
         response.close()
         self.assertIn('data-delete-run=', script)
@@ -193,15 +194,30 @@ class FrontendTests(unittest.TestCase):
 
     def test_run_and_attempt_token_usage_is_visible(self) -> None:
         response = self.client.get("/scripts/app.js")
-        script = response.get_data(as_text=True)
+        app_script = response.get_data(as_text=True)
         response.close()
-        self.assertIn("function tokenLabel", script)
-        self.assertIn("run.token_usage", script)
+        response = self.client.get("/scripts/run-ledger.js")
+        ledger_script = response.get_data(as_text=True)
+        response.close()
+        self.assertIn("function tokenLabel", app_script)
+        self.assertIn("run.token_usage", ledger_script)
         response = self.client.get("/scripts/activity.js")
         activity_script = response.get_data(as_text=True)
         response.close()
         self.assertIn("job.token_usage", activity_script)
         self.assertIn("${escapeText(activityCount)} &middot; ${escapeText(tokenLabel(run?.token_usage))}", activity_script)
+
+    def test_app_delegates_assessment_row_rendering(self) -> None:
+        response = self.client.get("/scripts/app.js")
+        app_script = response.get_data(as_text=True)
+        response.close()
+        response = self.client.get("/scripts/run-ledger.js")
+        ledger_script = response.get_data(as_text=True)
+        response.close()
+        self.assertIn("createRunLedgerController", app_script)
+        self.assertIn("renderRuns(data.runs)", app_script)
+        self.assertNotIn('<article class="run-row">', app_script)
+        self.assertIn('<article class="run-row">', ledger_script)
 
     def test_assessment_rows_share_grid_columns(self) -> None:
         response = self.client.get("/styles/styles.css")
