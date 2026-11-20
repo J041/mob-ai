@@ -27,6 +27,7 @@ class RuntimeDataTests(unittest.TestCase):
             self.assertTrue((data_root / "uploads" / "sample.apk").is_file())
             self.assertTrue((data_root / "policies" / "policy.json").is_file())
             self.assertTrue((data_root / "state" / "jobs" / "abc").is_dir())
+            self.assertTrue((data_root / "trash" / "runs").is_dir())
             self.assertTrue((workspace / "runs").is_symlink())
             self.assertEqual((workspace / "runs").resolve(), (data_root / "runs").resolve())
             self.assertEqual(manifest["version"], 1)

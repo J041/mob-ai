@@ -15,7 +15,7 @@ from assessment.runtime import WORKSPACE, read_json, write_json
 from backend.providers import PROVIDER_IDS, ProviderRequest, provider_adapter, validate_provider_output
 from backend.artifacts import resolve_run_directory
 from backend.auth import REASONING_EFFORTS, provider_authenticated, provider_model_catalog
-from backend.common import json_file, strip_terminal_controls, subprocess_capture_text, utc_now
+from backend.common import RUN_LIFECYCLE_LOCK, json_file, strip_terminal_controls, subprocess_capture_text, utc_now
 from backend.evidence_index import INDEX_THEME_PATTERNS, load_evidence_index, refresh_evidence_index
 
 
@@ -426,26 +426,29 @@ def start_assistant_request(run_id: str, body: dict) -> dict:
     question = str(body.get("question") or "").strip()
     if not 1 <= len(question) <= 4000:
         raise ValueError("Question must contain between 1 and 4000 characters.")
-    run_dir = resolve_run_directory(run_id)
-    config = json_file(run_dir / "codex-loop-config.json") or {}
-    provider = str(body.get("provider") or config.get("provider") or "codex")
-    if provider not in PROVIDER_IDS or not provider_authenticated(provider):
-        raise ValueError(f"Connect your {'ChatGPT' if provider == 'codex' else 'Claude'} account before asking the run assistant.")
-    if _chat_lock.locked():
-        raise ValueError("Another assistant question is currently running. Wait for it to finish.")
-    request_id = uuid.uuid4().hex
-    state_path = _assistant_request_path(run_id, request_id)
-    state = {
-        "id": request_id,
-        "run_id": run_id,
-        "status": "queued",
-        "stage": "queued",
-        "detail": "Question queued for evidence selection.",
-        "question": question,
-        "created_utc": utc_now(),
-        "updated_utc": utc_now(),
-    }
-    atomic_write_json(state_path, state)
+    with RUN_LIFECYCLE_LOCK:
+        run_dir = resolve_run_directory(run_id)
+        if (run_dir / ".archiving").exists():
+            raise ValueError("This assessment is being deleted and cannot accept assistant requests.")
+        config = json_file(run_dir / "codex-loop-config.json") or {}
+        provider = str(body.get("provider") or config.get("provider") or "codex")
+        if provider not in PROVIDER_IDS or not provider_authenticated(provider):
+            raise ValueError(f"Connect your {'ChatGPT' if provider == 'codex' else 'Claude'} account before asking the run assistant.")
+        if _chat_lock.locked():
+            raise ValueError("Another assistant question is currently running. Wait for it to finish.")
+        request_id = uuid.uuid4().hex
+        state_path = _assistant_request_path(run_id, request_id)
+        state = {
+            "id": request_id,
+            "run_id": run_id,
+            "status": "queued",
+            "stage": "queued",
+            "detail": "Question queued for evidence selection.",
+            "question": question,
+            "created_utc": utc_now(),
+            "updated_utc": utc_now(),
+        }
+        atomic_write_json(state_path, state)
 
     def update(changes: dict) -> None:
         current = json_file(state_path) or dict(state)

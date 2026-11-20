@@ -86,7 +86,7 @@ every attempt, and never stored in run configuration or job logs.
 All transferable application data is consolidated below `/workspace/.mob-ai-data`
 by default. Set `MOB_AI_DATA_ROOT` in `.env` to choose another directory inside the
 mounted workspace. The root contains `runs/`, `uploads/`, `policies/`, `state/`,
-`exports/`, and `temp/`. On upgrade, startup moves data from the former top-level
+`exports/`, `temp/`, and recoverable `trash/`. On upgrade, startup moves data from the former top-level
 locations once and creates compatibility links so saved requests and older tooling
 continue to resolve.
 
@@ -98,6 +98,12 @@ not transfer the private `codex-state`, `claude-state`, `adb-keys`, or `ghidra-s
 Docker volumes. Authenticate providers again and rerun device readiness on the new
 host. Migration refuses to merge two non-empty copies of the same data category so
 an ambiguous transfer cannot silently overwrite evidence.
+
+The **Delete** action on an assessment row is a soft delete. It requires confirmation,
+rejects runs with active jobs or assistant requests, and moves the run together with
+its completed durable-job history to `.mob-ai-data/trash/runs/`. Uploaded APKs and
+generated policies are not removed because another assessment may reference them.
+The archive manifest records the original run and job identifiers for manual recovery.
 
 ## Start and connect
 

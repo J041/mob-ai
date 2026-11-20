@@ -117,6 +117,7 @@ function renderRuns(runs) {
         ${run.continuable ? `<button class="resume-button" data-resume="${escapeText(run.path)}">${run.usage_recoverable ? 'Resume after reset' : run.frida_recoverable ? 'Fix Frida' : run.checkpoint_recoverable ? 'Recover' : 'Resume'}</button>` : ''}
         <button class="resume-button diagnostic" data-retry="${escapeText(run.path)}" ${run.retryable ? '' : 'disabled'}>Rerun / retry</button>
         ${run.deep_investigation_eligible ? `<button class="resume-button deep-goal" data-deep-goal="${escapeText(run.id)}">${run.deep_investigation_count ? 'Investigate again' : escapeText(jobTypeLabel('deep_goal', 'Deep investigation'))}</button>` : ''}
+        <button class="resume-button delete-run" data-delete-run="${escapeText(run.id)}">Delete</button>
       </div>
     </article>`;
   }).join('');
@@ -138,6 +139,27 @@ function renderRuns(runs) {
   }));
   $$('[data-artifacts]').forEach(button => button.addEventListener('click', () => openArtifactBrowser(button.dataset.artifacts)));
   $$('[data-assistant]').forEach(button => button.addEventListener('click', () => openRunAssistant(button.dataset.assistant)));
+  $$('[data-delete-run]').forEach(button => button.addEventListener('click', async () => {
+    const run = state.overview?.runs.find(item => item.id === button.dataset.deleteRun);
+    if (!run) return;
+    if (!window.confirm(
+      `Delete ${run.package || run.id}?\n\nRun ID: ${run.id}\n\n` +
+      'The run and its completed job history will leave the UI and move to recoverable runtime trash. ' +
+      'Active jobs or assistant requests must finish first.'
+    )) return;
+    button.disabled = true;
+    try {
+      await api(`/api/runs/${encodeURIComponent(run.id)}`, {
+        method: 'DELETE', body: JSON.stringify({ confirm_run_id: run.id }),
+      });
+      if (state.assistantRun === run.id) state.assistantRun = null;
+      toast('Assessment moved to recoverable runtime trash.');
+      renderOverview(await api('/api/overview'));
+    } catch (error) {
+      toast(error.message, true);
+      button.disabled = false;
+    }
+  }));
   $$('[data-launch-bypass]').forEach(button => button.addEventListener('click', async () => {
     const run = state.overview?.runs.find(item => item.id === button.dataset.launchBypass);
     if (!run) return;

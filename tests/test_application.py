@@ -49,6 +49,18 @@ class WebAppTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()["status"], "ok")
 
+    @patch("backend.app.archive_run")
+    def test_delete_run_requires_backend_confirmation_and_returns_archive(self, archive) -> None:
+        archive.return_value = {
+            "archive_id": "run-123-archive", "run_id": "run-123", "recoverable": True,
+        }
+        response = self.client.delete(
+            "/api/runs/run-123", json={"confirm_run_id": "run-123"},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.get_json()["recoverable"])
+        archive.assert_called_once_with("run-123", "run-123")
+
     def test_usage_limit_detection_preserves_reported_reset(self) -> None:
         usage = detect_usage_limit(
             'ERROR {"code":"subscription_sharing_usage_limit_exceeded"} resets at 2026-11-01T05:30:00Z',

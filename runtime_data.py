@@ -41,6 +41,7 @@ WIRELESS_DEVICES_PATH = STATE_ROOT / "wireless-devices.json"
 HEARTBEAT_PATH = STATE_ROOT / "worker-heartbeat"
 EXPORTS_ROOT = DATA_ROOT / "exports"
 TEMP_ROOT = DATA_ROOT / "temp"
+TRASH_ROOT = DATA_ROOT / "trash"
 MIGRATION_MANIFEST = DATA_ROOT / "migration-v1.json"
 
 
@@ -64,6 +65,7 @@ class RuntimeLayout:
             self.data_root / "runs", self.data_root / "uploads",
             self.data_root / "policies", self.data_root / "state" / "jobs",
             self.data_root / "exports", self.data_root / "temp",
+            self.data_root / "trash" / "runs",
         )
 
 
@@ -171,4 +173,5 @@ def runtime_summary() -> dict[str, str]:
         "root": str(DATA_ROOT), "runs": str(RUNS_ROOT), "uploads": str(UPLOAD_ROOT),
         "policies": str(POLICY_ROOT), "jobs": str(JOBS_ROOT),
         "exports": str(EXPORTS_ROOT), "temp": str(TEMP_ROOT),
+        "trash": str(TRASH_ROOT),
     }

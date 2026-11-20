@@ -142,6 +142,15 @@ class FrontendTests(unittest.TestCase):
         self.assertIn("/launch-bypass", script)
         self.assertIn("Run APK + bypass", script)
 
+    def test_assessment_rows_have_recoverable_delete_control(self) -> None:
+        response = self.client.get("/scripts/app.js")
+        script = response.get_data(as_text=True)
+        response.close()
+        self.assertIn('data-delete-run=', script)
+        self.assertIn("method: 'DELETE'", script)
+        self.assertIn("confirm_run_id: run.id", script)
+        self.assertIn("recoverable runtime trash", script)
+
     def test_resume_recommendation_does_not_inherit_icon_typography(self) -> None:
         response = self.client.get("/styles/styles.css")
         styles = response.get_data(as_text=True)

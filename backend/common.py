@@ -6,9 +6,11 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 import re
+import threading
 
 
 ANSI_ESCAPE = re.compile(r"\x1B(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1B\\))")
+RUN_LIFECYCLE_LOCK = threading.RLock()
 
 
 def strip_terminal_controls(value: str) -> str:

@@ -317,6 +317,8 @@ input::placeholder { color: #465358; }
 .resume-button.diagnostic:hover { border-color: var(--green); background: rgba(185,247,99,.09); }
 .resume-button.deep-goal { border-color: #685b87; color: #d2baff; background: rgba(165,123,255,.05); white-space: nowrap; }
 .resume-button.deep-goal:hover { border-color: #b792ff; background: rgba(165,123,255,.11); }
+.resume-button.delete-run { border-color: #704146; color: var(--red); white-space: nowrap; }
+.resume-button.delete-run:hover { border-color: var(--red); background: rgba(255,124,124,.08); }
 .resume-button.artifacts { color: #bcd9d6; white-space: nowrap; }
 .resume-button.artifacts:hover { border-color: var(--cyan); color: var(--cyan); }
 .resume-button.download-script { color: var(--green); text-decoration: none; white-space: nowrap; }

@@ -13,11 +13,12 @@ from assessment.state import (
     usage_limit_recovery_available,
 )
 from backend.auth import provider_authenticated
-from backend.common import json_file, utc_now
+from backend.common import RUN_LIFECYCLE_LOCK, json_file, utc_now
 from backend.providers import PROVIDER_IDS
 from worker.queue import STATE_ROOT, atomic_write_json
 from worker.job_types import job_type
 from worker.job_timeline import JobProgressRecorder, build_job_timeline
+from runtime_data import RUNS_ROOT
 
 _lock = threading.RLock()
 _log_cache: dict[tuple[str, str], str] = {}
@@ -258,7 +259,14 @@ def start_job(kind: str, label: str, payload: dict) -> dict:
         resume_attempt_kind(Path(payload["run"])) if kind == "resume"
         else spec.default_attempt_kind
     )
-    with _lock:
+    with RUN_LIFECYCLE_LOCK, _lock:
+        referenced_run = Path(str(payload.get("run") or "")) if payload.get("run") else None
+        source_run = str(payload.get("derived_from_run") or "")
+        if (
+            (referenced_run is not None and (referenced_run / ".archiving").exists())
+            or (source_run and (RUNS_ROOT / source_run / ".archiving").exists())
+        ):
+            raise ValueError("This assessment is being deleted and cannot accept new work.")
         if any(job.get("running") or job.get("status") == "queued" for job in jobs()):
             raise ValueError("Another assessment job is running or queued.")
         job_id = uuid.uuid4().hex

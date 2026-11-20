@@ -70,7 +70,9 @@ def enqueue_due_usage_limit_jobs() -> list[str]:
     created: list[str] = []
     for directory, state in sorted(states, key=lambda item: item[0].stat().st_mtime):
         if (
-            state.get("status") != "usage_limited"
+            state.get("archived")
+            or (directory / ".archiving").exists()
+            or state.get("status") != "usage_limited"
             or not state.get("auto_resume")
             or state.get("auto_resume_job_id")
         ):
@@ -101,6 +103,8 @@ def enqueue_due_usage_limit_jobs() -> list[str]:
         payload["run"] = str(RUNS_ROOT / run_id)
         payload["auto_resume_usage_limit"] = True
         resume_type = job_type("resume")
+        if state.get("archived") or (directory / ".archiving").exists():
+            continue
         job_id = uuid.uuid4().hex
         queued_utc = utc_now()
         target = STATE_ROOT / job_id
@@ -131,6 +135,8 @@ def claim_next_job(worker_id: str) -> tuple[Path, dict[str, Any], dict[str, Any]
         key=lambda path: path.stat().st_mtime,
     )
     for directory in directories:
+        if (directory / ".archiving").exists():
+            continue
         state_path = directory / "job.json"
         state = read_json(state_path)
         if state.get("status") != "queued":
