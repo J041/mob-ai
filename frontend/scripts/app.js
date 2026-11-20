@@ -10,6 +10,7 @@ import { createDeviceController } from './devices.js';
 import { connectOverviewEvents } from './events.js';
 import { updatePolicyBuilder } from './policy-builder.js';
 import { createActivityController } from './activity.js';
+import { createTrashController } from './trash.js';
 
 function tokenLabel(usage) {
   const total = Number(usage?.total_tokens || 0);
@@ -343,6 +344,8 @@ const { askRunAssistant, openRunAssistant } = createAssistantController({
 
 const { beginAuth, openAuth, signOutAuth } = createAuthController({ refreshOverview });
 
+const { openTrash } = createTrashController({ renderOverviewSnapshot: renderOverview });
+
 const { bindActivityControls, renderJobs, schedulePoll } = createActivityController({
   tokenLabel, renderOverviewSnapshot: renderOverview,
 });
@@ -392,6 +395,7 @@ $('#reassessSelected').addEventListener('click', () => {
 });
 $('#newForm [name="policy_repeat"]').addEventListener('change', updatePolicyBuilder);
 $('#refreshAll').addEventListener('click', () => refreshOverview(true));
+$('#manageTrash').addEventListener('click', openTrash);
 bindActivityControls();
 $('#codexAuth').addEventListener('click', () => openAuth('codex'));
 $('#claudeAuth').addEventListener('click', () => openAuth('claude'));
@@ -406,6 +410,8 @@ $('#closeAssistant').addEventListener('click', () => { state.assistantRun = null
 $('#assistantDialog').addEventListener('click', event => {
   if (event.target === event.currentTarget) { state.assistantRun = null; event.currentTarget.close(); }
 });
+$('#closeTrash').addEventListener('click', () => $('#trashDialog').close());
+$('#trashDialog').addEventListener('click', event => { if (event.target === event.currentTarget) event.currentTarget.close(); });
 $$('[data-assistant-prompt]').forEach(button => button.addEventListener('click', () => {
   $('#assistantQuestion').value = button.dataset.assistantPrompt;
   $('#assistantQuestion').focus();

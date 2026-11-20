@@ -6,6 +6,7 @@ export const state = {
   artifactRun: null, artifactManifest: null, artifactCategory: null,
   artifactPath: null, artifactPreviewCache: new Map(), assistantRun: null,
   assistantTurns: [], assistantFailures: [],
+  trashArchives: [],
   eventSource: null, eventsConnected: false,
 };
 

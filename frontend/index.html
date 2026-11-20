@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="dark">
   <title>Mob-AI Control Room</title>
   <meta name="description" content="Local control room for authorized mobile application assessment runs.">
-  <link rel="stylesheet" href="/styles/styles.css?v=20261106-resume-summary">
+  <link rel="stylesheet" href="/styles/styles.css?v=20261120-trash-management">
 </head>
 <body>
   <div class="shell">
@@ -194,7 +194,7 @@
       </section>
 
       <section class="panel runs-panel" id="runs">
-        <div class="panel-heading"><div><p class="kicker">EVIDENCE LEDGER</p><h2>Assessment runs</h2></div><span class="muted" id="lastRefresh">Not refreshed</span></div>
+        <div class="panel-heading"><div><p class="kicker">EVIDENCE LEDGER</p><h2>Assessment runs</h2></div><div class="panel-heading-actions"><span class="muted" id="lastRefresh">Not refreshed</span><button class="resume-button trash-button" id="manageTrash" type="button">Trash <span id="trashCount"></span></button></div></div>
         <div class="run-list" id="runList"><div class="empty">No assessment runs found.</div></div>
       </section>
     </main>
@@ -243,6 +243,14 @@
       <p class="assistant-note">The assistant is read-only. Suggested reruns must be reviewed and explicitly authorized in Continue / retry.</p>
     </form>
   </dialog>
+  <dialog class="trash-dialog" id="trashDialog">
+    <div class="dialog-heading">
+      <div><p class="kicker">RUNTIME DATA</p><h2>Deleted assessments</h2><small>Restore archived evidence or permanently free its storage.</small></div>
+      <button class="dialog-close" id="closeTrash" type="button" aria-label="Close trash manager">&times;</button>
+    </div>
+    <p class="dialog-copy">Deleting an assessment is recoverable until you permanently remove it here. Restore never overwrites an existing run or durable job.</p>
+    <div class="trash-list" id="trashList"><p class="assistant-empty">Loading deleted assessments&hellip;</p></div>
+  </dialog>
   <dialog class="auth-dialog" id="authDialog">
     <div class="dialog-heading">
       <div><p class="kicker" id="authKicker">PROVIDER AUTHENTICATION</p><h2 id="authTitle">Connect an AI account</h2></div>
@@ -262,6 +270,6 @@
       </div>
     </div>
   </dialog>
-  <script type="module" src="/scripts/app.js?v=20261119-stage-timeline"></script>
+  <script type="module" src="/scripts/app.js?v=20261120-trash-management"></script>
 </body>
 </html>

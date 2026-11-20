@@ -103,7 +103,11 @@ The **Delete** action on an assessment row is a soft delete. It requires confirm
 rejects runs with active jobs or assistant requests, and moves the run together with
 its completed durable-job history to `.mob-ai-data/trash/runs/`. Uploaded APKs and
 generated policies are not removed because another assessment may reference them.
-The archive manifest records the original run and job identifiers for manual recovery.
+Open **Trash** beside the Assessment runs heading to see archive size, deletion time,
+and job count. **Restore** validates that the run and job identifiers are still free
+before moving the complete history back. **Delete permanently** requires typing the
+original run identifier and then removes only that validated archive. The archive
+manifest preserves the original identifiers until restoration or permanent deletion.
 
 ## Start and connect
 

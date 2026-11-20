@@ -319,6 +319,18 @@ input::placeholder { color: #465358; }
 .resume-button.deep-goal:hover { border-color: #b792ff; background: rgba(165,123,255,.11); }
 .resume-button.delete-run { border-color: #704146; color: var(--red); white-space: nowrap; }
 .resume-button.delete-run:hover { border-color: var(--red); background: rgba(255,124,124,.08); }
+.panel-heading-actions { display: flex; align-items: center; justify-content: flex-end; gap: 12px; }
+.trash-button { color: #bcd9d6; }
+.trash-dialog { width: min(760px, calc(100vw - 28px)); max-height: min(760px, calc(100dvh - 28px)); padding: 0; color: var(--text); background: var(--surface); border: 1px solid var(--line); border-radius: 14px; box-shadow: 0 24px 90px #000d; overflow: hidden; }
+.trash-dialog::backdrop { background: rgba(3,6,7,.78); backdrop-filter: blur(5px); }
+.trash-heading small, .trash-dialog .dialog-heading small { display: block; margin-top: 5px; color: var(--muted); font: 9px var(--mono); }
+.trash-list { max-height: 570px; overflow-y: auto; scrollbar-gutter: stable; padding: 12px 18px 18px; display: grid; gap: 9px; }
+.trash-row { display: flex; align-items: center; justify-content: space-between; gap: 18px; padding: 13px 14px; border: 1px solid var(--line-soft); border-radius: 9px; background: var(--surface-2); }
+.trash-main { min-width: 0; display: grid; gap: 4px; }
+.trash-main strong, .trash-main code, .trash-main small { overflow-wrap: anywhere; }
+.trash-main code { color: #9fb1b3; font-size: 9px; }
+.trash-main small { color: var(--muted); font-size: 9px; }
+.trash-actions { display: flex; flex: 0 0 auto; gap: 8px; }
 .resume-button.artifacts { color: #bcd9d6; white-space: nowrap; }
 .resume-button.artifacts:hover { border-color: var(--cyan); color: var(--cyan); }
 .resume-button.download-script { color: var(--green); text-decoration: none; white-space: nowrap; }
@@ -470,6 +482,9 @@ input::placeholder { color: #465358; }
   .assistant-dialog { width: calc(100vw - 12px); height: calc(100dvh - 12px); margin: 6px; }
   .assistant-controls, .assistant-composer { grid-template-columns: minmax(0, 1fr); }
   .assistant-composer .button { justify-self: stretch; justify-content: space-between; }
+  .trash-dialog { width: calc(100vw - 16px); max-height: calc(100dvh - 16px); }
+  .trash-row { align-items: stretch; flex-direction: column; }
+  .trash-actions { justify-content: flex-end; }
 }
 
 @media (max-width: 480px) {
@@ -503,5 +518,8 @@ input::placeholder { color: #465358; }
   .toast { right: 10px; bottom: 10px; left: 10px; max-width: none; }
   .auth-dialog { width: calc(100vw - 20px); }
   .dialog-heading, .dialog-copy, .dialog-actions { padding-inline: 15px; }
+  .panel-heading-actions { width: 100%; justify-content: space-between; }
+  .trash-actions { flex-direction: column; }
+  .trash-actions .resume-button { width: 100%; }
   .auth-output { margin-inline: 15px; }
 }

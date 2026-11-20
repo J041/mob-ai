@@ -61,6 +61,25 @@ class WebAppTests(unittest.TestCase):
         self.assertTrue(response.get_json()["recoverable"])
         archive.assert_called_once_with("run-123", "run-123")
 
+    @patch("backend.app.trash_runs", return_value=[{"archive_id": "archive-1"}])
+    def test_trash_management_routes(self, catalog) -> None:
+        response = self.client.get("/api/trash/runs")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["archives"][0]["archive_id"], "archive-1")
+        catalog.assert_called_once_with()
+        with patch("backend.app.restore_run", return_value={"restored": True}) as restore:
+            response = self.client.post(
+                "/api/trash/runs/archive-1/restore", json={"confirm_run_id": "run-1"},
+            )
+            self.assertEqual(response.status_code, 200)
+            restore.assert_called_once_with("archive-1", "run-1")
+        with patch("backend.app.purge_run_archive", return_value={"purged": True}) as purge:
+            response = self.client.delete(
+                "/api/trash/runs/archive-1", json={"confirm_run_id": "run-1"},
+            )
+            self.assertEqual(response.status_code, 200)
+            purge.assert_called_once_with("archive-1", "run-1")
+
     def test_usage_limit_detection_preserves_reported_reset(self) -> None:
         usage = detect_usage_limit(
             'ERROR {"code":"subscription_sharing_usage_limit_exceeded"} resets at 2026-11-01T05:30:00Z',

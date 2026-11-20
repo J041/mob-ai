@@ -59,7 +59,9 @@ from backend.device_service import (
 )
 from backend.events import overview_event_stream
 from backend.run_catalog import recorded_success_policy, runs
-from backend.run_deletion import RunDeletionConflict, archive_run
+from backend.run_deletion import (
+    RunDeletionConflict, archive_run, purge_run_archive, restore_run, trash_runs,
+)
 from backend.jobs import (
     infer_attempt_kind, infer_job_run_id, job_count, job_state, jobs, request_job_control, start_job,
 )
@@ -519,6 +521,34 @@ def delete_run(run_id: str):
     return jsonify(result)
 
 
+def list_deleted_runs():
+    return jsonify(archives=trash_runs())
+
+
+def restore_deleted_run(archive_id: str):
+    body = request.get_json(force=True, silent=True) or {}
+    try:
+        result = restore_run(archive_id, str(body.get("confirm_run_id") or ""))
+    except FileNotFoundError as error:
+        return jsonify(error=str(error)), 404
+    except RunDeletionConflict as error:
+        return jsonify(error=str(error)), 409
+    except ValueError as error:
+        return jsonify(error=str(error)), 400
+    return jsonify(result)
+
+
+def purge_deleted_run(archive_id: str):
+    body = request.get_json(force=True, silent=True) or {}
+    try:
+        result = purge_run_archive(archive_id, str(body.get("confirm_run_id") or ""))
+    except FileNotFoundError as error:
+        return jsonify(error=str(error)), 404
+    except ValueError as error:
+        return jsonify(error=str(error)), 400
+    return jsonify(result)
+
+
 def list_run_artifacts(run_id: str):
     try:
         manifest = artifact_manifest(run_id)
@@ -645,7 +675,8 @@ _handlers = SimpleNamespace(**{
         "get_provider_auth", "begin_provider_auth", "logout_provider_auth",
         "get_auth", "begin_auth", "logout_auth", "devices",
         "connect_wireless_device", "device_readiness", "pair_wireless_device",
-        "list_runs", "delete_run", "list_run_artifacts", "preview_run_artifact",
+        "list_runs", "delete_run", "list_deleted_runs", "restore_deleted_run",
+        "purge_deleted_run", "list_run_artifacts", "preview_run_artifact",
         "download_run_artifact", "get_run_assistant", "ask_run_assistant",
         "get_run_assistant_request", "start_deep_investigation", "start_bypass_launch", "list_jobs", "get_job", "cancel_job", "pause_job", "start",
         "resume", "retry",

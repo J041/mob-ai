@@ -38,13 +38,13 @@ class FrontendTests(unittest.TestCase):
         page = response.get_data(as_text=True)
         response.close()
         self.assertIn('type="module"', page)
-        self.assertIn('src="/scripts/app.js?v=20261119-stage-timeline"', page)
+        self.assertIn('src="/scripts/app.js?v=20261120-trash-management"', page)
         for path in (
             "/scripts/app.js", "/scripts/core.js", "/scripts/models.js",
             "/scripts/artifacts.js", "/scripts/assistant.js", "/scripts/auth.js",
             "/scripts/devices.js", "/scripts/events.js", "/scripts/policy-builder.js",
             "/scripts/activity.js",
-            "/scripts/runs.js",
+            "/scripts/runs.js", "/scripts/trash.js",
         ):
             response = self.client.get(path)
             self.assertEqual(response.status_code, 200, path)
@@ -58,6 +58,7 @@ class FrontendTests(unittest.TestCase):
         self.assertIn("from './models.js'", app_script)
         self.assertIn("connectOverviewEvents", app_script)
         self.assertIn("from './activity.js'", app_script)
+        self.assertIn("from './trash.js'", app_script)
 
     def test_reassessment_entry_is_in_continue_workflow(self) -> None:
         response = self.client.get("/")
@@ -150,6 +151,20 @@ class FrontendTests(unittest.TestCase):
         self.assertIn("method: 'DELETE'", script)
         self.assertIn("confirm_run_id: run.id", script)
         self.assertIn("recoverable runtime trash", script)
+
+    def test_trash_manager_supports_restore_and_permanent_delete(self) -> None:
+        response = self.client.get("/")
+        page = response.get_data(as_text=True)
+        response.close()
+        self.assertIn('id="manageTrash"', page)
+        self.assertIn('id="trashDialog"', page)
+        response = self.client.get("/scripts/trash.js")
+        script = response.get_data(as_text=True)
+        response.close()
+        self.assertIn("/api/trash/runs", script)
+        self.assertIn("/restore", script)
+        self.assertIn("Delete permanently", script)
+        self.assertIn("window.prompt", script)
 
     def test_resume_recommendation_does_not_inherit_icon_typography(self) -> None:
         response = self.client.get("/styles/styles.css")
