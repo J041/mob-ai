@@ -8,7 +8,10 @@ import { createAuthController } from './auth.js';
 import { createAssistantController } from './assistant.js';
 import { createDeviceController } from './devices.js';
 import { connectOverviewEvents } from './events.js';
-import { updatePolicyBuilder } from './policy-builder.js';
+import {
+  bindAdvancedPolicyEditor, ensureAdvancedPolicyReady, loadAdvancedPolicy,
+  updatePolicyBuilder,
+} from './policy-builder.js';
 import { createActivityController } from './activity.js';
 import { createTrashController } from './trash.js';
 import { createRunLedgerController } from './run-ledger.js';
@@ -121,11 +124,23 @@ function beginReassessment(runId) {
   const policy = run.success_policy || {};
   form.elements.policy_preset.value = ['basic', 'detection_removed', 'screen_reached', 'custom'].includes(policy.preset) ? policy.preset : 'advanced';
   form.elements.policy_repeat.value = String(policy.repeat || 1);
+  form.elements.policy_min_passes.value = String(policy.min_passes || policy.repeat || 1);
   form.elements.expected_activity.value = policy.expected_activity || '';
   form.elements.expected_ui_pattern.value = policy.expected_ui_pattern || '';
-  form.elements.forbidden_ui_pattern.value = policy.forbidden_ui_pattern || '';
+  form.elements.policy_use_regex.checked = policy.pattern_mode !== 'phrases';
+  if (policy.pattern_mode === 'phrases') {
+    form.elements.forbidden_ui_phrases.value = policy.forbidden_ui_input || '';
+    form.elements.forbidden_log_phrases.value = policy.forbidden_log_input || '';
+  } else {
+    form.elements.forbidden_ui_pattern.value = policy.forbidden_ui_input || policy.forbidden_ui_pattern || '';
+    form.elements.forbidden_log_pattern.value = policy.forbidden_log_input || policy.forbidden_log_pattern || '';
+  }
   if (policy.path) form.elements.success_spec.value = policy.path;
   updatePolicyBuilder();
+  if (form.elements.policy_preset.value === 'advanced') {
+    $('#policyJsonDocument').value = '';
+    loadAdvancedPolicy().catch(() => {});
+  }
 
   const transport = form.querySelector(`[name="transport"][value="${run.transport || 'adb'}"]`);
   if (transport) transport.checked = true;
@@ -190,6 +205,7 @@ async function submitForm(form, endpoint) {
   const button = form.querySelector('button[type="submit"]');
   button.disabled = true;
   try {
+    if (endpoint === '/api/start') await ensureAdvancedPolicyReady(form);
     const payload = formJson(form);
     const providerState = state.overview?.providers?.[payload.provider || 'codex'];
     if (!providerState?.authenticated) throw new Error(`Connect your ${(payload.provider || 'codex') === 'codex' ? 'ChatGPT' : 'Claude'} account before starting an assessment.`);
@@ -278,12 +294,16 @@ $$('.reasoning-mode').forEach(select => {
 $('#pairDevice').addEventListener('click', () => pairWirelessDevice(false));
 $('#resumePairDevice').addEventListener('click', () => pairWirelessDevice(true));
 $('#policyPreset').addEventListener('change', updatePolicyBuilder);
+bindAdvancedPolicyEditor();
 $('#clearReassessment').addEventListener('click', clearReassessment);
 $('#reassessSelected').addEventListener('click', () => {
   const run = state.overview?.runs.find(item => item.path === $('#resumeRun').value);
   if (run) beginReassessment(run.id);
 });
-$('#newForm [name="policy_repeat"]').addEventListener('change', updatePolicyBuilder);
+$$('#newForm .policy-builder input').forEach(input => input.addEventListener('input', updatePolicyBuilder));
+$$('#newForm .policy-builder select').forEach(select => {
+  if (select.id !== 'policyPreset') select.addEventListener('change', updatePolicyBuilder);
+});
 $('#refreshAll').addEventListener('click', () => refreshOverview(true));
 $('#manageTrash').addEventListener('click', openTrash);
 bindActivityControls();

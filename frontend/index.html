@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="dark">
   <title>Mob-AI Control Room</title>
   <meta name="description" content="Local control room for authorized mobile application assessment runs.">
-  <link rel="stylesheet" href="/styles/styles.css?v=20261120-trash-management">
+  <link rel="stylesheet" href="/styles/styles.css?v=20261120-policy-editor">
 </head>
 <body>
   <div class="shell">
@@ -66,11 +66,36 @@
               <div class="policy-fields" id="generatedPolicyFields">
                 <label class="field policy-activity"><span>Expected activity <em>optional</em></span><input name="expected_activity" placeholder=".MainActivity or com.example/.HomeActivity"></label>
                 <label class="field policy-expected"><span>Expected visible text <em>regex, optional</em></span><input name="expected_ui_pattern" placeholder="Welcome|Dashboard|Account ready"></label>
-                <label class="field policy-forbidden span-2"><span>Detection warning to reject <em>regex</em></span><input name="forbidden_ui_pattern" value="root(?:ed)?|device compromised|frida|hook(?:ing)? detected"></label>
-                <label class="field"><span>Repeat validation</span><select name="policy_repeat"><option value="1">1 run</option><option value="2" selected>2 runs</option><option value="3">3 runs</option></select></label>
-                <div class="policy-proof"><b>Baseline differential</b><span>The initial no-bypass observation must fail before a hooked attempt can demonstrate improvement.</span></div>
+                <section class="policy-detection policy-forbidden span-2">
+                  <div class="policy-detection-heading"><div><b>Detection warnings to reject</b><span>Visible UI and application logs are evaluated independently.</span></div><label class="switch-field compact"><input name="policy_use_regex" id="policyRegexMode" type="checkbox"><span class="switch"></span><span>Advanced regex</span></label></div>
+                  <div class="policy-pattern-grid" id="policyPhraseFields">
+                    <label class="field"><span>Visible warning phrases <em>comma separated</em></span><input name="forbidden_ui_phrases" value="Root detected, Device compromised, Frida detected, Hooking detected"><small>Matched only against the current UI hierarchy.</small></label>
+                    <label class="field"><span>Application-log phrases <em>comma separated</em></span><input name="forbidden_log_phrases" value="Root detected, Device compromised, Frida detected, Hooking detected"><small>Matched against captured validation Logcat.</small></label>
+                  </div>
+                  <div class="policy-pattern-grid" id="policyRegexFields" hidden>
+                    <label class="field"><span>Visible warning regex</span><input name="forbidden_ui_pattern" value="root(?:ed)? detected|device compromised|frida detected|hook(?:ing)? detected"><small>Case-insensitive; evaluated against visible UI only.</small></label>
+                    <label class="field"><span>Application-log regex</span><input name="forbidden_log_pattern" value="root(?:ed)? detected|device compromised|frida detected|hook(?:ing)? detected"><small>Keep this specific to application messages.</small></label>
+                  </div>
+                </section>
+                <label class="field"><span>Validation attempts</span><select name="policy_repeat"><option value="1">1 attempt</option><option value="2" selected>2 attempts</option><option value="3">3 attempts</option></select></label>
+                <label class="field"><span>Required passes</span><select name="policy_min_passes"><option value="1">1 pass</option><option value="2" selected>2 passes</option></select><small>Allows a 2-of-3 policy when validation is occasionally noisy.</small></label>
+                <div class="policy-proof span-2"><b>Baseline differential</b><span id="policyBaselineText">Without the bypass, at least one required check must fail. The hooked attempt must then satisfy the selected pass threshold.</span></div>
               </div>
-              <label class="field advanced-policy" id="advancedPolicy" hidden><span>Existing JSON policy</span><input name="success_spec" list="specOptions" value="pipeline/success-spec.example.json"><datalist id="specOptions"></datalist></label>
+              <section class="advanced-policy policy-json-editor" id="advancedPolicy" hidden>
+                <div class="policy-json-source">
+                  <label class="field"><span>Existing or saved JSON policy <em>workspace-relative path</em></span><input name="success_spec" id="policyJsonPath" list="specOptions" value="pipeline/success-spec.example.json"><datalist id="specOptions"></datalist></label>
+                  <div class="policy-json-actions">
+                    <label class="button ghost policy-import">Import JSON<input id="policyJsonFile" type="file" accept=".json,application/json" hidden></label>
+                    <button class="button ghost" id="loadPolicyJson" type="button">Load path</button>
+                    <button class="button" id="savePolicyJson" type="button">Validate &amp; save</button>
+                  </div>
+                </div>
+                <label class="field"><span>JSON editor <em>validated against the pipeline schema</em></span><textarea id="policyJsonDocument" rows="14" spellcheck="false" placeholder="Import a JSON file, load an existing path, or paste a success policy here."></textarea></label>
+                <div class="policy-json-status" id="policyJsonStatus" aria-live="polite">Load an existing policy or paste JSON to begin.</div>
+                <div class="policy-json-preview" id="policyJsonPreview" hidden></div>
+              </section>
+              <div class="policy-check-list" id="policyCheckList"></div>
+              <div class="policy-warning" id="policyWarning" hidden></div>
               <div class="policy-summary" id="policySummary"></div>
             </div>
             <div class="field span-2"><span>Target transport</span><div class="radio-row"><label><input type="radio" name="transport" value="adb" checked> ADB serial</label><label><input type="radio" name="transport" value="wireless"> Wireless</label></div></div>
@@ -270,6 +295,6 @@
       </div>
     </div>
   </dialog>
-  <script type="module" src="/scripts/app.js?v=20261120-run-ledger"></script>
+  <script type="module" src="/scripts/app.js?v=20261120-success-policy"></script>
 </body>
 </html>

@@ -299,6 +299,58 @@ A success specification has `mode: "all"` or `mode: "any"` and a non-empty `chec
 
 Every criterion and its result is stored under `attempts[].repetitions[].checks` in `result.json`. `--success-regex` remains available for simple and backward-compatible checks, but cannot be combined with `--success-spec`.
 
+#### Visual presets versus Advanced JSON
+
+The visual policy presets are the recommended default. They always use `mode: "all"`,
+require a no-bypass baseline, and include the core `process_alive`,
+`foreground_package`, and `no_crash` checks. Depending on the preset, the builder can
+also require an Activity or visible text and reject independently scoped visible-UI
+and Logcat warnings. It supports one to three validation attempts and configurable
+minimum passes.
+
+Select **Advanced JSON policy** in the UI when the proof of success cannot be expressed
+by those controls. Import a JSON file, paste or edit the document directly, or load an
+existing workspace-relative policy path. The browser shows structural errors and a
+parsed check preview as you edit. **Validate & save** then applies the pipeline's
+authoritative schema and writes a canonical copy below the consolidated runtime-data
+policy directory. Starting an assessment automatically performs this validation and
+save step when the editor contains unsaved changes. An advanced policy can additionally:
+
+- use `mode: "any"` instead of requiring every check;
+- set `baseline_required: false`;
+- omit or rearrange the three core checks;
+- require positive Logcat evidence with `log_regex`;
+- require a marker emitted by the hook with `frida_regex`;
+- inspect combined Frida and Logcat output with `output_regex`;
+- check an explicit package through a check-level `package`; and
+- define any other flat combination of the supported check types.
+
+For example, a policy can require the app to remain alive, a Frida hook to emit a
+known execution marker, and the detection dialog to be absent:
+
+```json
+{
+  "version": 2,
+  "name": "Hook executed and app survived",
+  "mode": "all",
+  "baseline_required": true,
+  "repeat": 3,
+  "min_passes": 2,
+  "checks": [
+    { "type": "process_alive" },
+    { "type": "frida_regex", "pattern": "\\[Root Bypass\\] Root detection bypassed" },
+    { "type": "ui_text_not_regex", "pattern": "Root detected" }
+  ]
+}
+```
+
+Advanced JSON does not provide arbitrary code execution, nested Boolean groups,
+unsupported check types, or more than three validation attempts. The file is
+validated when the pipeline starts, hashed into the assessment configuration, and
+used exactly as written by deterministic validation. Codex does not reinterpret it.
+Continuation requires the same file hash; use **Reassess with a different policy**
+when the success criteria need to change.
+
 ### Autonomous provider reasoning loop
 
 The Python loop performs observation, asks the selected headless provider to make one narrowly
@@ -358,8 +410,14 @@ Prerequisites are Docker Desktop, a connected ChatGPT or Claude account, an
 authorized test device, and a compatible running or startable Frida Server. The UI
 builds an auditable policy from **Basic launch**, **Detection warning removed**,
 **Expected screen reached**, or **Custom** presets. It records the no-bypass baseline
-and can require the same candidate to pass up to three repeated validations. Advanced
-users can still select an existing JSON policy.
+and can require the same candidate to pass up to three repeated validations, including
+thresholds such as two passes out of three attempts. Detection-warning policies use
+separate visible-UI and application-Logcat phrases by default; literal phrases are
+escaped so a term such as `Root detected` does not accidentally match framework text
+such as `rootAffinity`. Advanced regex mode remains available for precise patterns and
+warns when broad bare terms are likely to cause false positives. The policy preview
+lists every generated check and explains the resulting proof of success before a run
+starts. Advanced users can still select an existing JSON policy.
 
 Open the web UI, upload the APK, select the policy, choose the emulator/physical target, confirm
 authorization, and press **Start assessment**. For wireless debugging, select
@@ -435,10 +493,10 @@ assessment when the success criteria themselves need to change.
 Select an assessment under **Continue / retry**, then use **Reassess with a different
 policy** to create that new assessment without uploading the APK again. The form
 copies the prior target and policy as editable starting values, requires a fresh
-device-readiness check, and records the new run's `derived_from_run` and prior policy
-hash. When the APK hash matches, JADX and native static artifacts are copied from the
-source run; observation and every success-policy validation are always rerun from
-scratch.
+device-readiness check, restores the prior phrase/regex mode and scoped warning values,
+and records the new run's `derived_from_run` and prior policy hash. When the APK hash
+matches, JADX and native static artifacts are copied from the source run; observation
+and every success-policy validation are always rerun from scratch.
 
 Resume validates the original APK hash, success-policy hash, previous candidate hash, target transport and target identity. It refuses successful, non-recoverable `human_review`, `no_progress`, corrupted, or operational-error runs. You may supply `-Apk`, `-SuccessSpec`, `-Device`, or `-WirelessConnect` again for clarity, but their identities must match the recorded run. A changed success policy starts a new assessment rather than silently changing the old run's goalposts.
 

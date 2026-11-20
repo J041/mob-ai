@@ -24,6 +24,7 @@ try:
         DIAGNOSTIC_RECIPES,
     )
     from pipeline.frida_runtimes import activate_frida_runtime
+    from pipeline.success_policy import validate_success_policy
     from pipeline.frida_session import (
         CommandOutcome, FRIDA_SHUTDOWN_GRACE_SECONDS, FridaSessionError,
         FridaSessionRunner, timeout_output,
@@ -35,6 +36,7 @@ except ModuleNotFoundError:  # Direct execution from /workspace/pipeline.
         DIAGNOSTIC_RECIPES,
     )
     from frida_runtimes import activate_frida_runtime  # type: ignore
+    from success_policy import validate_success_policy  # type: ignore
     from frida_session import (  # type: ignore
         CommandOutcome, FRIDA_SHUTDOWN_GRACE_SECONDS, FridaSessionError,
         FridaSessionRunner, timeout_output,
@@ -887,45 +889,10 @@ def load_success_spec(path: Path | None) -> dict[str, object] | None:
     if path is None:
         return None
     data = json.loads(path.read_text(encoding="utf-8"))
-    if not isinstance(data, dict) or data.get("mode", "all") not in {"all", "any"}:
-        raise RuntimeError("Success spec must be an object with mode 'all' or 'any'")
-    checks = data.get("checks")
-    if not isinstance(checks, list) or not checks:
-        raise RuntimeError("Success spec requires a non-empty 'checks' array")
-    allowed = {
-        "process_alive", "foreground_package", "activity_reached", "no_crash",
-        "ui_text_regex", "ui_text_not_regex", "log_regex", "frida_regex",
-        "output_regex", "log_not_regex",
-    }
-    for index, check in enumerate(checks, 1):
-        if not isinstance(check, dict) or check.get("type") not in allowed:
-            raise RuntimeError(f"Invalid success check #{index}; supported types: {', '.join(sorted(allowed))}")
-        if check["type"] == "activity_reached" and (
-            not isinstance(check.get("activity"), str) or not check["activity"]
-        ):
-            raise RuntimeError(f"Success check #{index} requires a non-empty activity name")
-        if check["type"] in {
-            "ui_text_regex", "ui_text_not_regex", "log_regex", "frida_regex",
-            "output_regex", "log_not_regex",
-        }:
-            if not isinstance(check.get("pattern"), str) or not check["pattern"]:
-                raise RuntimeError(f"Success check #{index} requires a non-empty regex pattern")
-            try:
-                re.compile(check["pattern"])
-            except re.error as error:
-                raise RuntimeError(f"Invalid regex in success check #{index}: {error}") from error
-    repeat = data.get("repeat", 1)
-    min_passes = data.get("min_passes", repeat)
-    if not isinstance(repeat, int) or not 1 <= repeat <= 3:
-        raise RuntimeError("Success spec 'repeat' must be an integer from 1 to 3")
-    if not isinstance(min_passes, int) or not 1 <= min_passes <= repeat:
-        raise RuntimeError("Success spec 'min_passes' must be between 1 and repeat")
-    return {
-        "mode": data.get("mode", "all"), "checks": checks,
-        "repeat": repeat, "min_passes": min_passes,
-        "baseline_required": bool(data.get("baseline_required", False)),
-        "name": str(data.get("name") or "Success policy"),
-    }
+    try:
+        return validate_success_policy(data)
+    except ValueError as error:
+        raise RuntimeError(str(error)) from error
 
 
 def evaluate_success(

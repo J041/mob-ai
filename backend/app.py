@@ -15,6 +15,7 @@ from werkzeug.utils import secure_filename
 
 from pipeline.diagnostic_recipes import diagnostic_recipe_catalog
 from pipeline.frida_runtimes import installed_frida_runtimes, validate_frida_version
+from pipeline.success_policy import validate_success_policy
 from assessment.runtime import (
     LoopError, RUNS_ROOT, WORKSPACE, read_json, sha256, workspace_relative, write_json,
 )
@@ -78,6 +79,7 @@ POLICY_ROOT.mkdir(parents=True, exist_ok=True)
 app = Flask(__name__, static_folder=None)
 app.config["MAX_CONTENT_LENGTH"] = int(os.environ.get("MOB_AI_MAX_UPLOAD_MB", "1024")) * 1024 * 1024
 REASONING_MODES = {"single", "parallel"}
+MAX_POLICY_BYTES = 256 * 1024
 def resolve_workspace_item(value: str, *, directory: bool = False) -> Path:
     if not value or Path(value).is_absolute():
         raise ValueError("Use a workspace-relative path.")
@@ -102,10 +104,38 @@ def success_policy(body: dict) -> Path:
     repeat = int(body.get("policy_repeat") or 2)
     if not 1 <= repeat <= 3:
         raise ValueError("Repeat validation must be between 1 and 3 runs.")
+    min_passes = int(body.get("policy_min_passes") or repeat)
+    if not 1 <= min_passes <= repeat:
+        raise ValueError("Required validation passes must be between 1 and the repeat count.")
     activity = str(body.get("expected_activity") or "").strip() if preset in {"screen_reached", "custom"} else ""
     expected_text = str(body.get("expected_ui_pattern") or "").strip() if preset in {"screen_reached", "custom"} else ""
-    forbidden_text = str(body.get("forbidden_ui_pattern") or "").strip() if preset in {"detection_removed", "custom"} else ""
-    for label, pattern in (("expected UI pattern", expected_text), ("forbidden UI pattern", forbidden_text)):
+    use_regex = bool(body.get("policy_use_regex"))
+    ui_phrases = str(body.get("forbidden_ui_phrases") or "").strip()
+    log_phrases = str(body.get("forbidden_log_phrases") or "").strip()
+    ui_regex = str(body.get("forbidden_ui_pattern") or "").strip()
+    log_regex = str(body.get("forbidden_log_pattern") or "").strip()
+    # Preserve older clients that supplied only the shared regex field.
+    if ui_regex and not (ui_phrases or log_phrases or body.get("policy_use_regex") is not None):
+        use_regex = True
+        log_regex = log_regex or ui_regex
+
+    def literal_pattern(value: str, label: str) -> str:
+        phrases = [item.strip() for item in re.split(r"[,\r\n]+", value) if item.strip()]
+        if len(phrases) > 20:
+            raise ValueError(f"{label} accepts at most 20 phrases.")
+        if any(len(item) > 200 for item in phrases):
+            raise ValueError(f"{label} phrases must be 200 characters or fewer.")
+        return "(?:" + "|".join(re.escape(item) for item in phrases) + ")" if phrases else ""
+
+    forbidden_ui = ui_regex if use_regex else literal_pattern(ui_phrases, "Visible warning")
+    forbidden_log = log_regex if use_regex else literal_pattern(log_phrases, "Log warning")
+    if preset not in {"detection_removed", "custom"}:
+        forbidden_ui = forbidden_log = ""
+    for label, pattern in (
+        ("expected UI pattern", expected_text),
+        ("forbidden UI pattern", forbidden_ui),
+        ("forbidden Logcat pattern", forbidden_log),
+    ):
         if pattern:
             try:
                 re.compile(pattern)
@@ -120,15 +150,14 @@ def success_policy(body: dict) -> Path:
         checks.append({"type": "activity_reached", "activity": activity})
     if expected_text:
         checks.append({"type": "ui_text_regex", "pattern": expected_text})
-    if forbidden_text:
-        checks.extend([
-            {"type": "ui_text_not_regex", "pattern": forbidden_text},
-            {"type": "log_not_regex", "pattern": forbidden_text},
-        ])
+    if forbidden_ui:
+        checks.append({"type": "ui_text_not_regex", "pattern": forbidden_ui})
+    if forbidden_log:
+        checks.append({"type": "log_not_regex", "pattern": forbidden_log})
     if preset == "screen_reached" and not (activity or expected_text):
         raise ValueError("Screen-reached policy requires an activity name or expected UI text.")
-    if preset == "detection_removed" and not forbidden_text:
-        raise ValueError("Detection-removed policy requires a forbidden warning pattern.")
+    if preset == "detection_removed" and not (forbidden_ui or forbidden_log):
+        raise ValueError("Detection-removed policy requires a visible-UI or Logcat warning.")
     policy = {
         "version": 2,
         "name": {
@@ -142,8 +171,13 @@ def success_policy(body: dict) -> Path:
         "mode": "all",
         "baseline_required": True,
         "repeat": repeat,
-        "min_passes": repeat,
+        "min_passes": min_passes,
         "checks": checks,
+        "builder": {
+            "pattern_mode": "regex" if use_regex else "phrases",
+            "forbidden_ui_input": ui_regex if use_regex else ui_phrases,
+            "forbidden_log_input": log_regex if use_regex else log_phrases,
+        },
     }
     path = POLICY_ROOT / f"policy-{uuid.uuid4().hex}.json"
     write_json(path, policy)
@@ -398,7 +432,11 @@ def health():
 def overview_payload() -> dict:
     apk_paths = [*WORKSPACE.glob("*.apk"), *UPLOAD_ROOT.glob("*.apk")]
     apks = [{"name": path.name, "path": workspace_relative(path), "size": path.stat().st_size} for path in apk_paths if path.is_file()]
-    specs = [{"name": path.name, "path": workspace_relative(path)} for path in WORKSPACE.glob("*.json") if re.search(r"success|policy|spec", path.name, re.I)]
+    policy_paths = [
+        *[path for path in WORKSPACE.glob("*.json") if re.search(r"success|policy|spec", path.name, re.I)],
+        *POLICY_ROOT.glob("*.json"),
+    ]
+    specs = [{"name": path.name, "path": workspace_relative(path)} for path in policy_paths if path.is_file()]
     example = WORKSPACE / "pipeline" / "success-spec.example.json"
     if example.is_file():
         specs.append({"name": example.name, "path": workspace_relative(example)})
@@ -501,6 +539,49 @@ def upload_apk():
         temporary.unlink(missing_ok=True)
     return jsonify(
         name=original, path=workspace_relative(destination), size=destination.stat().st_size,
+    ), 201
+
+
+def _validated_policy_document(content: str) -> tuple[dict[str, object], str]:
+    if not isinstance(content, str) or not content.strip():
+        raise ValueError("Paste or import a JSON success policy.")
+    if len(content.encode("utf-8")) > MAX_POLICY_BYTES:
+        raise ValueError("Success-policy JSON must be 256 KB or smaller.")
+    try:
+        source = json.loads(content)
+    except json.JSONDecodeError as error:
+        raise ValueError(
+            f"Invalid JSON at line {error.lineno}, column {error.colno}: {error.msg}"
+        ) from error
+    policy = validate_success_policy(source)
+    canonical = {"version": 2, **policy}
+    return policy, json.dumps(canonical, indent=2) + "\n"
+
+
+def preview_success_policy():
+    path = resolve_workspace_item(str(request.args.get("path") or ""))
+    if path.stat().st_size > MAX_POLICY_BYTES:
+        raise ValueError("Success-policy JSON must be 256 KB or smaller.")
+    policy, document = _validated_policy_document(path.read_text(encoding="utf-8"))
+    return jsonify(path=workspace_relative(path), policy=policy, document=document)
+
+
+def save_success_policy():
+    body = request.get_json(force=True, silent=False) or {}
+    policy, document = _validated_policy_document(body.get("content"))
+    original = secure_filename(str(body.get("name") or "custom-success-policy.json"))
+    if not original.lower().endswith(".json"):
+        original += ".json"
+    destination = POLICY_ROOT / f"custom-{uuid.uuid4().hex[:12]}-{original}"
+    temporary = destination.with_suffix(".uploading")
+    try:
+        temporary.write_text(document, encoding="utf-8")
+        temporary.replace(destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return jsonify(
+        path=workspace_relative(destination), name=destination.name,
+        policy=policy, document=document,
     ), 201
 
 
@@ -672,6 +753,7 @@ def start_bypass_launch(run_id: str):
 _handlers = SimpleNamespace(**{
     name: globals()[name] for name in (
         "health", "overview", "events", "models", "providers", "upload_apk",
+        "preview_success_policy", "save_success_policy",
         "get_provider_auth", "begin_provider_auth", "logout_provider_auth",
         "get_auth", "begin_auth", "logout_auth", "devices",
         "connect_wireless_device", "device_readiness", "pair_wireless_device",

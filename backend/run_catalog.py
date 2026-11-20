@@ -37,6 +37,7 @@ def recorded_success_policy(config: dict | None) -> dict:
     expected_activity = ""
     expected_ui_pattern = ""
     forbidden_ui_pattern = ""
+    forbidden_log_pattern = ""
     for check in policy.get("checks") or []:
         check_type = str(check.get("type") or "") if isinstance(check, dict) else ""
         if check_type:
@@ -47,6 +48,9 @@ def recorded_success_policy(config: dict | None) -> dict:
             expected_ui_pattern = str(check.get("pattern") or "")
         elif check_type == "ui_text_not_regex":
             forbidden_ui_pattern = str(check.get("pattern") or "")
+        elif check_type == "log_not_regex":
+            forbidden_log_pattern = str(check.get("pattern") or "")
+    builder = policy.get("builder") if isinstance(policy.get("builder"), dict) else {}
     return {
         "name": str(policy.get("name") or "Recorded success policy"),
         "preset": str(policy.get("preset") or "advanced"),
@@ -60,6 +64,10 @@ def recorded_success_policy(config: dict | None) -> dict:
         "expected_activity": expected_activity,
         "expected_ui_pattern": expected_ui_pattern,
         "forbidden_ui_pattern": forbidden_ui_pattern,
+        "forbidden_log_pattern": forbidden_log_pattern,
+        "pattern_mode": str(builder.get("pattern_mode") or "regex"),
+        "forbidden_ui_input": str(builder.get("forbidden_ui_input") or forbidden_ui_pattern),
+        "forbidden_log_input": str(builder.get("forbidden_log_input") or forbidden_log_pattern),
     }
 
 

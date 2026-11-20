@@ -11,4 +11,6 @@ def create_system_blueprint(handlers) -> Blueprint:
     blueprint.add_url_rule("/api/models", view_func=handlers.models, methods=["GET"])
     blueprint.add_url_rule("/api/providers", view_func=handlers.providers, methods=["GET"])
     blueprint.add_url_rule("/api/apks", view_func=handlers.upload_apk, methods=["POST"])
+    blueprint.add_url_rule("/api/policies/preview", view_func=handlers.preview_success_policy, methods=["GET"])
+    blueprint.add_url_rule("/api/policies", view_func=handlers.save_success_policy, methods=["POST"])
     return blueprint

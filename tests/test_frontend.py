@@ -38,7 +38,7 @@ class FrontendTests(unittest.TestCase):
         page = response.get_data(as_text=True)
         response.close()
         self.assertIn('type="module"', page)
-        self.assertIn('src="/scripts/app.js?v=20261120-run-ledger"', page)
+        self.assertIn('src="/scripts/app.js?v=20261120-success-policy"', page)
         for path in (
             "/scripts/app.js", "/scripts/core.js", "/scripts/models.js",
             "/scripts/artifacts.js", "/scripts/assistant.js", "/scripts/auth.js",
@@ -88,6 +88,32 @@ class FrontendTests(unittest.TestCase):
         run_script = response.get_data(as_text=True)
         response.close()
         self.assertIn("updateResumeTransport();", run_script)
+
+    def test_success_policy_builder_exposes_scoped_checks_and_thresholds(self) -> None:
+        response = self.client.get("/")
+        page = response.get_data(as_text=True)
+        response.close()
+        self.assertIn('name="forbidden_ui_phrases"', page)
+        self.assertIn('name="forbidden_log_phrases"', page)
+        self.assertIn('name="forbidden_ui_pattern"', page)
+        self.assertIn('name="forbidden_log_pattern"', page)
+        self.assertIn('name="policy_min_passes"', page)
+        self.assertIn('id="policyCheckList"', page)
+        self.assertIn('id="policyWarning"', page)
+        self.assertIn('id="policyJsonFile"', page)
+        self.assertIn('id="policyJsonDocument"', page)
+        self.assertIn('id="policyJsonPreview"', page)
+        self.assertIn('id="savePolicyJson"', page)
+        response = self.client.get("/scripts/policy-builder.js")
+        script = response.get_data(as_text=True)
+        response.close()
+        self.assertIn("Broad term", script)
+        self.assertIn("Visible warning absent", script)
+        self.assertIn("Application-log warning absent", script)
+        self.assertIn("updatePassOptions", script)
+        self.assertIn("ensureAdvancedPolicyReady", script)
+        self.assertIn("/api/policies/preview", script)
+        self.assertIn("/api/policies", script)
 
     def test_attempt_history_uses_nonshrinking_scroll_content(self) -> None:
         response = self.client.get("/styles/styles.css")

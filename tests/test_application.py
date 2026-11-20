@@ -36,7 +36,7 @@ from backend.events import activity_revision
 from assessment.usage import assessment_token_usage, record_provider_usage, token_usage_delta
 from assessment.deep_goal import deep_goal_eligibility
 from assessment.goals import codex_thread_id, goal_tool_observed
-from runtime_data import RUNS_ROOT
+from runtime_data import POLICY_ROOT, RUNS_ROOT
 
 
 class WebAppTests(unittest.TestCase):
@@ -537,6 +537,39 @@ class WebAppTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 400)
 
+    def test_advanced_policy_editor_validates_saves_and_previews_json(self) -> None:
+        document = {
+            "name": "Hook marker policy", "mode": "all", "baseline_required": True,
+            "repeat": 3, "min_passes": 2,
+            "checks": [
+                {"type": "process_alive"},
+                {"type": "frida_regex", "pattern": r"\[Bypass\] ready"},
+            ],
+        }
+        response = self.client.post(
+            "/api/policies", json={"name": "hook-policy.json", "content": json.dumps(document)},
+        )
+        self.assertEqual(response.status_code, 201)
+        payload = response.get_json()
+        path = WORKSPACE / payload["path"]
+        try:
+            self.assertEqual(path.parent, POLICY_ROOT)
+            self.assertEqual(payload["policy"]["min_passes"], 2)
+            self.assertTrue(path.is_file())
+            preview = self.client.get("/api/policies/preview", query_string={"path": payload["path"]})
+            self.assertEqual(preview.status_code, 200)
+            self.assertEqual(preview.get_json()["policy"]["checks"][1]["type"], "frida_regex")
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_advanced_policy_editor_rejects_invalid_schema(self) -> None:
+        response = self.client.post(
+            "/api/policies",
+            json={"name": "bad.json", "content": json.dumps({"mode": "all", "checks": [{"type": "unknown"}]})},
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Invalid success check", response.get_json()["error"])
+
     def test_policy_builder_generates_repeatable_detection_policy(self) -> None:
         path = success_policy({
             "policy_preset": "detection_removed",
@@ -550,6 +583,42 @@ class WebAppTests(unittest.TestCase):
             kinds = {check["type"] for check in policy["checks"]}
             self.assertIn("ui_text_not_regex", kinds)
             self.assertIn("no_crash", kinds)
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_policy_builder_separates_literal_ui_and_log_warnings(self) -> None:
+        path = success_policy({
+            "policy_preset": "detection_removed", "policy_repeat": 3,
+            "policy_min_passes": 2, "policy_use_regex": False,
+            "forbidden_ui_phrases": "Root detected, Device compromised",
+            "forbidden_log_phrases": "Tamper warning",
+        })
+        try:
+            policy = json.loads(path.read_text(encoding="utf-8"))
+            checks = {check["type"]: check for check in policy["checks"]}
+            self.assertEqual(policy["repeat"], 3)
+            self.assertEqual(policy["min_passes"], 2)
+            self.assertEqual(policy["builder"]["pattern_mode"], "phrases")
+            self.assertRegex("Root detected!", checks["ui_text_not_regex"]["pattern"])
+            self.assertNotRegex("rootAffinity", checks["ui_text_not_regex"]["pattern"])
+            self.assertRegex("Tamper warning", checks["log_not_regex"]["pattern"])
+            self.assertNotIn("Root", checks["log_not_regex"]["pattern"])
+        finally:
+            path.unlink(missing_ok=True)
+
+    def test_policy_builder_accepts_independent_advanced_regexes(self) -> None:
+        path = success_policy({
+            "policy_preset": "detection_removed", "policy_repeat": 1,
+            "policy_min_passes": 1, "policy_use_regex": True,
+            "forbidden_ui_pattern": r"root\s+detected",
+            "forbidden_log_pattern": r"AntiHook:\s+blocked",
+        })
+        try:
+            policy = json.loads(path.read_text(encoding="utf-8"))
+            checks = {check["type"]: check for check in policy["checks"]}
+            self.assertEqual(checks["ui_text_not_regex"]["pattern"], r"root\s+detected")
+            self.assertEqual(checks["log_not_regex"]["pattern"], r"AntiHook:\s+blocked")
+            self.assertEqual(policy["builder"]["pattern_mode"], "regex")
         finally:
             path.unlink(missing_ok=True)
 
