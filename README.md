@@ -1,3 +1,30 @@
+# Mob-AI
+Mob-AI is a containerized, AI-assisted Android security assessment platform for testing APKs and devices you own or are explicitly authorized to assess.
+
+It combines static analysis, runtime observation, native reverse engineering, and iterative Frida hook generation into an evidence-driven pipeline. The system uses Codex or Claude to examine recorded findings and propose narrowly scoped bypass scripts, while a deterministic orchestrator—not the AI model—controls the Android device, executes tools, and verifies results against a structured success policy.
+
+Key capabilities include:
+- APK analysis with JADX and Apktool
+- Native binary analysis with Ghidra and Ghidra MCP
+- Runtime observation using ADB, Frida, and Logcat
+- Physical, wireless-debugging, and emulator device support
+- Automated anti-root, anti-debugging, and anti-hooking investigation
+- Adaptive Frida hook generation and validation
+- Configurable, repeatable success-policy checks
+- Bounded Codex or Claude reasoning loops
+- Optional parallel read-only analysis specialists
+- Durable jobs, checkpoints, retries, and resumable assessments
+- Append-only attempt history and token-usage tracking
+- Artifact browsing for findings, hooks, logs, crashes, decisions, and Ghidra results
+- Downloading and relaunching validated bypass scripts
+- A run-specific assistant for asking questions about recorded evidence
+The application is deployed with Docker Compose as three main services:
+- Web: Flask API and browser-based control interface
+- Worker: Durable pipeline execution and Android analysis tools
+- Reverse engineering: Full Ghidra installation and private MCP service
+Mob-AI follows a split-control architecture: AI providers analyze evidence and propose changes, but they cannot directly operate the test device or declare success. Device actions and validation remain under deterministic pipeline control, producing auditable and reproducible assessment results.#
+
+
 # Mobile reverse-engineering toolbox
 
 A non-root, three-image Docker stack containing:
