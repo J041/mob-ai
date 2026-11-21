@@ -22,7 +22,18 @@ The application is deployed with Docker Compose as three main services:
 - Web: Flask API and browser-based control interface
 - Worker: Durable pipeline execution and Android analysis tools
 - Reverse engineering: Full Ghidra installation and private MCP service
-Mob-AI follows a split-control architecture: AI providers analyze evidence and propose changes, but they cannot directly operate the test device or declare success. Device actions and validation remain under deterministic pipeline control, producing auditable and reproducible assessment results.#
+Mob-AI follows a split-control architecture: AI providers analyze evidence and propose changes, but they cannot directly operate the test device or declare success. Device actions and validation remain under deterministic pipeline control, producing auditable and reproducible assessment results.
+
+The main coordinators delegate cohesive responsibilities to smaller modules:
+
+- `backend/app.py` wires Flask routes; `backend/policies.py` owns policy generation,
+  validation, loading, and persistence.
+- `pipeline/pipeline.py` remains the CLI coordinator; `pipeline/static_analysis.py`
+  owns APK/JADX/native inventory and `pipeline/validation.py` evaluates structured
+  success evidence.
+- `assessment/orchestrator.py` controls run state and iterations;
+  `assessment/prompting.py` renders the bounded provider prompt independently of
+  device execution.
 
 
 # Mobile reverse-engineering toolbox

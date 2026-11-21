@@ -16,7 +16,6 @@ import struct
 import subprocess
 import sys
 import time
-import zipfile
 
 try:
     from pipeline.diagnostic_recipes import (
@@ -24,7 +23,13 @@ try:
         DIAGNOSTIC_RECIPES,
     )
     from pipeline.frida_runtimes import activate_frida_runtime
-    from pipeline.success_policy import validate_success_policy
+    from pipeline.validation import (
+        evaluate_success as evaluate_success_policy, load_success_spec as load_policy_spec,
+    )
+    from pipeline.static_analysis import (
+        PATTERNS, find_package, group_native_libraries, native_load_references,
+        prepare_static, scan, scan_native, sha256,
+    )
     from pipeline.frida_session import (
         CommandOutcome, FRIDA_SHUTDOWN_GRACE_SECONDS, FridaSessionError,
         FridaSessionRunner, timeout_output,
@@ -36,20 +41,19 @@ except ModuleNotFoundError:  # Direct execution from /workspace/pipeline.
         DIAGNOSTIC_RECIPES,
     )
     from frida_runtimes import activate_frida_runtime  # type: ignore
-    from success_policy import validate_success_policy  # type: ignore
+    from validation import (  # type: ignore
+        evaluate_success as evaluate_success_policy, load_success_spec as load_policy_spec,
+    )
+    from static_analysis import (  # type: ignore
+        PATTERNS, find_package, group_native_libraries, native_load_references,
+        prepare_static, scan, scan_native, sha256,
+    )
     from frida_session import (  # type: ignore
         CommandOutcome, FRIDA_SHUTDOWN_GRACE_SECONDS, FridaSessionError,
         FridaSessionRunner, timeout_output,
     )
     RUNS_ROOT = Path(os.environ.get("MOB_AI_DATA_ROOT", "/workspace/.mob-ai-data")) / "runs"
 
-PATTERNS = {
-    "root_framework": re.compile(r"RootBeer|Magisk|SuperSU|rooted|isRooted", re.I),
-    "root_binary": re.compile(r"(/system/(?:x?bin)/su|/sbin/su|which\s+su)", re.I),
-    "root_property": re.compile(r"ro\.(?:debuggable|secure)|test-keys|release-keys", re.I),
-    "hook_framework": re.compile(r"frida|xposed|substrate|gum-js-loop|linjector", re.I),
-    "debugger": re.compile(r"isDebuggerConnected|TracerPid|ptrace", re.I),
-}
 DEFAULT_MODULES = {
     "java-files", "debugger", "properties", "rootbeer", "packages", "commands",
     "native-files", "native-antidebug", "anti-frida",
@@ -144,170 +148,8 @@ def run_adb_command(
     return result
 
 
-def sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
-
-
-def find_package(decoded: Path) -> str | None:
-    manifests = [decoded / "resources" / "AndroidManifest.xml", decoded / "AndroidManifest.xml"]
-    for manifest in manifests:
-        if manifest.exists():
-            match = re.search(r'<manifest[^>]+package="([^"]+)"', manifest.read_text(encoding="utf-8", errors="ignore"))
-            if match:
-                return match.group(1)
-    return None
-
-
-def scan(decoded: Path) -> list[dict[str, object]]:
-    findings: list[dict[str, object]] = []
-    allowed = {".java", ".kt", ".xml", ".smali", ".txt", ".json"}
-    for path in decoded.rglob("*"):
-        if not path.is_file() or path.suffix.lower() not in allowed or path.stat().st_size > 2_000_000:
-            continue
-        text = path.read_text(encoding="utf-8", errors="ignore")
-        for kind, pattern in PATTERNS.items():
-            matches = list(pattern.finditer(text))
-            if matches:
-                findings.append({
-                    "kind": kind,
-                    "file": str(path.relative_to(decoded)),
-                    "matches": sorted({m.group(0) for m in matches})[:10],
-                })
-    return findings
-
-
-def native_load_references(decoded: Path) -> dict[str, list[str]]:
-    """Map library basenames to the decompiled files that explicitly load them."""
-    references: dict[str, set[str]] = {}
-    pattern = re.compile(r"(?:System|Runtime(?:\.getRuntime\(\))?)\.loadLibrary\(\s*[\"']([^\"']+)[\"']")
-    candidates: list[Path]
-    ripgrep = shutil.which("rg")
-    if not ripgrep:
-        bundled = sorted(Path("/usr/local/lib/node_modules/@openai/codex/node_modules/@openai").glob("codex-*/vendor/*/codex-path/rg"))
-        ripgrep = str(bundled[0]) if bundled else None
-    if ripgrep:
-        result = subprocess.run(
-            [ripgrep, "-l", "--color", "never", "--glob", "*.java", "--glob", "*.kt", "--glob", "*.smali", "loadLibrary", str(decoded)],
-            text=True, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=60,
-        )
-        candidates = [Path(value) for value in result.stdout.splitlines() if value]
-    else:
-        candidates = list(decoded.rglob("*"))
-    for path in candidates:
-        if not path.is_file() or path.suffix.lower() not in {".java", ".kt", ".smali"} or path.stat().st_size > 2_000_000:
-            continue
-        text = path.read_text(encoding="utf-8", errors="ignore")
-        for match in pattern.finditer(text):
-            references.setdefault(f"lib{match.group(1)}.so", set()).add(path.relative_to(decoded).as_posix())
-    return {name: sorted(paths)[:20] for name, paths in references.items()}
-
-
-def scan_native(apk: Path, decoded: Path | None = None) -> list[dict[str, object]]:
-    """Inventory every bounded APK native library without guessing which ones matter."""
-    libraries: list[dict[str, object]] = []
-    load_references = native_load_references(decoded) if decoded and decoded.is_dir() else {}
-    with zipfile.ZipFile(apk) as archive:
-        for info in archive.infolist():
-            if not info.filename.startswith("lib/") or not info.filename.endswith(".so") or info.file_size > 100_000_000:
-                continue
-            parts = Path(info.filename).parts
-            if len(parts) != 3 or any(part in {"", ".", ".."} for part in parts):
-                continue
-            data = archive.read(info)
-            libraries.append({
-                "archive_path": info.filename,
-                "abi": parts[1],
-                "name": parts[2],
-                "size": info.file_size,
-                "sha256": hashlib.sha256(data).hexdigest(),
-                "load_references": load_references.get(parts[2], []),
-            })
-    return sorted(libraries, key=lambda item: (str(item["abi"]), str(item["name"])))
-
-
-def group_native_libraries(libraries: list[dict[str, object]]) -> list[dict[str, object]]:
-    """Group equivalent APK libraries across ABIs into logical analysis targets."""
-    grouped: dict[str, dict[str, object]] = {}
-    for item in libraries:
-        if not isinstance(item, dict):
-            continue
-        name = str(item.get("name") or "")
-        archive_path = str(item.get("archive_path") or "")
-        abi = str(item.get("abi") or "")
-        if not name or not archive_path or not abi:
-            continue
-        group = grouped.setdefault(name, {
-            "library": name,
-            "load_references": [],
-            "variants": [],
-        })
-        references = set(group["load_references"])
-        references.update(str(value) for value in item.get("load_references", []) if value)
-        group["load_references"] = sorted(references)[:20]
-        group["variants"].append({
-            key: item[key] for key in ("archive_path", "abi", "size", "sha256") if key in item
-        })
-    for group in grouped.values():
-        group["variants"] = sorted(group["variants"], key=lambda item: str(item.get("abi", "")))
-    return sorted(grouped.values(), key=lambda item: str(item["library"]))
-
-
 def prepare(apk: Path, runs: Path, reuse_static: Path | None = None) -> tuple[Path, dict[str, object]]:
-    digest = sha256(apk)
-    stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    run_dir = runs / f"{stamp}-{digest[:12]}"
-    run_dir.mkdir(parents=True)
-    original = run_dir / "original.apk"
-    shutil.copy2(apk, original)
-    original.chmod(0o444)
-    if reuse_static is not None:
-        source = reuse_static.resolve()
-        source_report = source / "report.json"
-        source_apk = source / "original.apk"
-        if not source_report.is_file() or not source_apk.is_file() or sha256(source_apk) != digest:
-            raise RuntimeError("Static-analysis reuse requires a prior run with the same APK hash")
-        metadata = json.loads(source_report.read_text(encoding="utf-8"))
-        for name in ("jadx", "native"):
-            prior = source / name
-            if prior.is_dir():
-                ignore = shutil.ignore_patterns("selected") if name == "native" else None
-                shutil.copytree(prior, run_dir / name, copy_function=shutil.copy2, ignore=ignore)
-        metadata["findings"] = [
-            item for item in metadata.get("findings", [])
-            if not isinstance(item, dict) or item.get("kind") != "native_indicator"
-        ]
-        if not isinstance(metadata.get("native_libraries"), list):
-            metadata["native_libraries"] = scan_native(original, run_dir / "jadx")
-        metadata["native_library_groups"] = group_native_libraries(metadata["native_libraries"])
-        metadata.update({
-            "created_utc": stamp,
-            "authorization_asserted": True,
-            "source": str(apk.resolve()),
-            "sha256": digest,
-            "static_reused_from": str(source),
-        })
-        (run_dir / "report.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
-        return run_dir, metadata
-    decoded = run_dir / "jadx"
-    run(["jadx", "--show-bad-code", "-d", str(decoded), str(original)], log=run_dir / "logs" / "jadx.log", check=False)
-    findings = scan(decoded)
-    native_libraries = scan_native(original, decoded)
-    metadata: dict[str, object] = {
-        "created_utc": stamp,
-        "authorization_asserted": True,
-        "source": str(apk.resolve()),
-        "sha256": digest,
-        "package": find_package(decoded),
-        "findings": findings,
-        "native_libraries": native_libraries,
-        "native_library_groups": group_native_libraries(native_libraries),
-    }
-    (run_dir / "report.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
-    return run_dir, metadata
+    return prepare_static(apk, runs, command_runner=run, reuse_static=reuse_static)
 
 
 def make_frida_scripts(run_dir: Path, iterations: int, modules: set[str] | None = None) -> list[Path]:
@@ -886,87 +728,16 @@ def prepare_device(args: argparse.Namespace, apk: Path) -> None:
 
 
 def load_success_spec(path: Path | None) -> dict[str, object] | None:
-    if path is None:
-        return None
-    data = json.loads(path.read_text(encoding="utf-8"))
-    try:
-        return validate_success_policy(data)
-    except ValueError as error:
-        raise RuntimeError(str(error)) from error
+    return load_policy_spec(path)
 
 
 def evaluate_success(
     args: argparse.Namespace, package: str, frida_output: str, logcat: str,
     spec: dict[str, object] | None,
 ) -> tuple[bool, list[dict[str, object]]]:
-    if spec is None:
-        if not args.success_regex:
-            return False, []
-        matched = re.search(args.success_regex, frida_output + "\n" + logcat, re.I | re.M) is not None
-        return matched, [{"type": "output_regex", "pattern": args.success_regex, "passed": matched}]
-
-    results: list[dict[str, object]] = []
-    ui_xml: str | None = None
-
-    def get_ui_xml() -> str:
-        nonlocal ui_xml
-        if ui_xml is None:
-            remote = "/sdcard/mob-ai-window.xml"
-            dumped = adb(args, "shell", "uiautomator", "dump", remote, check=False)
-            if dumped.returncode == 0:
-                ui_xml = adb(args, "shell", "cat", remote, check=False).stdout
-            else:
-                ui_xml = ""
-            adb(args, "shell", "rm", "-f", remote, check=False)
-        return ui_xml
-
-    for check in spec["checks"]:
-        kind = str(check["type"])
-        result: dict[str, object] = {"type": kind, "passed": False}
-        if kind == "process_alive":
-            probe = adb(args, "shell", "pidof", package, check=False)
-            result.update(passed=probe.returncode == 0 and bool(probe.stdout.strip()), evidence=probe.stdout.strip()[:500])
-        elif kind == "foreground_package":
-            expected = str(check.get("package") or package)
-            probe = adb(args, "shell", "dumpsys", "activity", "activities", check=False)
-            resumed = "\n".join(line.strip() for line in probe.stdout.splitlines() if "ResumedActivity" in line)
-            result.update(package=expected, passed=expected in resumed, evidence=resumed[:500])
-        elif kind == "activity_reached":
-            expected = str(check["activity"])
-            probe = adb(args, "shell", "dumpsys", "activity", "activities", check=False)
-            resumed = "\n".join(
-                line.strip() for line in probe.stdout.splitlines()
-                if "ResumedActivity" in line or "topResumedActivity" in line
-            )
-            result.update(activity=expected, passed=expected in resumed, evidence=resumed[:500])
-        elif kind == "no_crash":
-            crash_pattern = (
-                r"FATAL EXCEPTION|AndroidRuntime.*Process:|has died:|Force finishing activity|"
-                r"Fatal signal\s+\d+|signal\s+\d+\s+\(SIG(?:SEGV|BUS|ABRT|ILL|FPE)\)|"
-                r"APP CRASH\((?:NATIVE|EXCEPTION)\)"
-            )
-            matched = re.search(crash_pattern, logcat, re.I | re.M) is not None
-            result.update(passed=not matched, pattern=crash_pattern)
-        else:
-            pattern = str(check["pattern"])
-            if kind in {"ui_text_regex", "ui_text_not_regex"}:
-                haystack = get_ui_xml()
-            else:
-                haystack = {
-                    "log_regex": logcat,
-                    "log_not_regex": logcat,
-                    "frida_regex": frida_output,
-                    "output_regex": frida_output + "\n" + logcat,
-                }[kind]
-            matched = re.search(pattern, haystack, re.I | re.M) is not None
-            passed = not matched if kind in {"log_not_regex", "ui_text_not_regex"} else matched
-            result.update(pattern=pattern, passed=passed)
-            if kind.startswith("ui_text_"):
-                result["evidence"] = haystack[:500]
-        results.append(result)
-    passed_values = [bool(result["passed"]) for result in results]
-    success = all(passed_values) if spec["mode"] == "all" else any(passed_values)
-    return success, results
+    return evaluate_success_policy(
+        args, package, frida_output, logcat, spec, adb_runner=adb,
+    )
 
 
 def run_frida(
